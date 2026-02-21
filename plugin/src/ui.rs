@@ -24,7 +24,7 @@ pub fn render_worktree_list(worktrees: &[Worktree], selected: usize, rows: usize
         return;
     }
 
-    let max_visible = rows.saturating_sub(5); // header + footer + margins
+    let max_visible = rows.saturating_sub(5).max(1); // header + footer + margins
     let start = if selected >= max_visible {
         selected - max_visible + 1
     } else {
@@ -51,7 +51,7 @@ pub fn render_branch_list(branches: &[String], selected: usize, rows: usize) {
     println!("{title}");
     println!();
 
-    let max_visible = rows.saturating_sub(7);
+    let max_visible = rows.saturating_sub(7).max(1);
     let start = if selected >= max_visible {
         selected - max_visible + 1
     } else {

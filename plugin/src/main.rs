@@ -58,6 +58,7 @@ pub struct State {
     pub status_message: String,
     pub status_is_error: bool,
     pub spawn_agent_path: String,
+    pub tabs: Vec<TabInfo>,
 }
 
 register_plugin!(State);
@@ -96,6 +97,14 @@ pub fn parse_branches(output: &str) -> Vec<String> {
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+/// Wrapping navigation: move `current` by `delta` within `[0, len)`, wrapping around.
+fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    ((current as isize + delta).rem_euclid(len as isize)) as usize
 }
 
 impl State {
@@ -212,7 +221,13 @@ impl State {
         Action::FetchWorktreesAndBranches
     }
 
-    pub fn handle_list_worktrees(&mut self, _exit_code: Option<i32>, stdout: &[u8], spawn_prefix: &str) {
+    pub fn handle_list_worktrees(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8], spawn_prefix: &str) {
+        if exit_code != Some(0) {
+            let err = String::from_utf8_lossy(stderr);
+            self.status_message = format!("Failed to list worktrees: {err}");
+            self.status_is_error = true;
+            return;
+        }
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output, spawn_prefix);
         if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
@@ -220,7 +235,13 @@ impl State {
         }
     }
 
-    pub fn handle_git_branches(&mut self, _exit_code: Option<i32>, stdout: &[u8]) {
+    pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+        if exit_code != Some(0) {
+            let err = String::from_utf8_lossy(stderr);
+            self.status_message = format!("Failed to list branches: {err}");
+            self.status_is_error = true;
+            return;
+        }
         let output = String::from_utf8_lossy(stdout);
         self.branches = parse_branches(&output);
     }
@@ -243,6 +264,10 @@ impl State {
         if exit_code == Some(0) {
             self.status_message = format!("Removed '{branch}'");
             self.status_is_error = false;
+            #[cfg(target_arch = "wasm32")]
+            if let Some(idx) = self.tab_index_for_branch(&branch) {
+                close_tab_with_index(idx);
+            }
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
             self.status_message = format!("Remove failed: {err}");
@@ -252,22 +277,21 @@ impl State {
         Action::Refresh
     }
 
+    /// Find the Zellij tab position associated with a branch name.
+    /// Tab names use the branch with `/` replaced by `-` (matching spawn-agent.sh).
+    pub fn tab_index_for_branch(&self, branch: &str) -> Option<usize> {
+        let tab_name = branch.replace('/', "-");
+        self.tabs.iter().find(|t| t.name == tab_name).map(|t| t.position)
+    }
+
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    if !self.worktrees.is_empty() {
-                        self.selected_index = (self.selected_index + 1) % self.worktrees.len();
-                    }
+                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    if !self.worktrees.is_empty() {
-                        self.selected_index = if self.selected_index == 0 {
-                            self.worktrees.len() - 1
-                        } else {
-                            self.selected_index - 1
-                        };
-                    }
+                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), -1);
                 }
                 BareKey::Enter => {
                     if let Some(wt) = self.worktrees.get(self.selected_index) {
@@ -309,18 +333,10 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    if !self.filtered_branches.is_empty() {
-                        self.selected_index = (self.selected_index + 1) % self.filtered_branches.len();
-                    }
+                    self.selected_index = wrap_navigate(self.selected_index, self.filtered_branches.len(), 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    if !self.filtered_branches.is_empty() {
-                        self.selected_index = if self.selected_index == 0 {
-                            self.filtered_branches.len() - 1
-                        } else {
-                            self.selected_index - 1
-                        };
-                    }
+                    self.selected_index = wrap_navigate(self.selected_index, self.filtered_branches.len(), -1);
                 }
                 BareKey::Enter => {
                     if let Some(branch) = self.filtered_branches.get(self.selected_index).cloned() {
@@ -358,6 +374,7 @@ impl State {
             BareKey::Esc if no_mod => {
                 self.mode = Mode::BrowseWorktrees;
                 self.selected_index = 0;
+                self.input_buffer.clear();
             }
             BareKey::Backspace if no_mod => {
                 self.input_buffer.pop();
@@ -413,6 +430,7 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
+            EventType::TabUpdate,
         ]);
     }
 
@@ -431,17 +449,21 @@ impl ZellijPlugin for State {
                     Some(CMD_GIT_TOPLEVEL) => self.handle_git_toplevel(exit_code, &stdout, &stderr),
                     Some(CMD_LIST_WORKTREES) => {
                         let suffix = format!("/.spawn-agent/{}/", self.repo_name);
-                        self.handle_list_worktrees(exit_code, &stdout, &suffix);
+                        self.handle_list_worktrees(exit_code, &stdout, &stderr, &suffix);
                         Action::None
                     }
                     Some(CMD_GIT_BRANCHES) => {
-                        self.handle_git_branches(exit_code, &stdout);
+                        self.handle_git_branches(exit_code, &stdout, &stderr);
                         Action::None
                     }
                     Some(CMD_SPAWN) => self.handle_spawn_result(exit_code, &stderr, &context),
                     Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
                     _ => Action::None,
                 }
+            }
+            Event::TabUpdate(tab_info) => {
+                self.tabs = tab_info;
+                Action::None
             }
             Event::Key(key) => {
                 match self.mode {
@@ -905,13 +927,102 @@ bare
         assert_eq!(action, Action::Refresh);
     }
 
+    fn make_tab(name: &str, position: usize) -> TabInfo {
+        TabInfo {
+            position,
+            name: name.to_string(),
+            active: false,
+            panes_to_hide: 0,
+            is_fullscreen_active: false,
+            is_sync_panes_active: false,
+            are_floating_panes_visible: false,
+            other_focused_clients: vec![],
+            active_swap_layout_name: None,
+            is_swap_layout_dirty: false,
+            viewport_rows: 0,
+            viewport_columns: 0,
+            display_area_rows: 0,
+            display_area_columns: 0,
+            selectable_tiled_panes_count: 0,
+            selectable_floating_panes_count: 0,
+        }
+    }
+
+    #[test]
+    fn tab_index_for_branch_found() {
+        let mut s = State::default();
+        s.tabs = vec![
+            make_tab("main-tab", 0),
+            make_tab("feature-cool", 1),
+            make_tab("fix-bug", 2),
+        ];
+        assert_eq!(s.tab_index_for_branch("feature/cool"), Some(1));
+        assert_eq!(s.tab_index_for_branch("fix-bug"), Some(2));
+    }
+
+    #[test]
+    fn tab_index_for_branch_not_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("main-tab", 0)];
+        assert_eq!(s.tab_index_for_branch("nonexistent"), None);
+    }
+
     #[test]
     fn list_worktrees_clamps_selected_index() {
         let mut s = State::default();
         s.repo_name = "myrepo".into();
         s.selected_index = 5;
         let output = b"worktree /home/me/.spawn-agent/myrepo/a\nHEAD abc\nbranch refs/heads/a\n";
-        s.handle_list_worktrees(Some(0), output, "/.spawn-agent/myrepo/");
+        s.handle_list_worktrees(Some(0), output, b"", "/.spawn-agent/myrepo/");
         assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn list_worktrees_error_sets_status() {
+        let mut s = State::default();
+        s.handle_list_worktrees(Some(1), b"", b"fatal: not a git repository", "/.spawn-agent/x/");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Failed to list worktrees"));
+        assert!(s.status_message.contains("fatal: not a git repository"));
+    }
+
+    #[test]
+    fn list_worktrees_error_preserves_existing_worktrees() {
+        let mut s = state_with_worktrees();
+        let original_len = s.worktrees.len();
+        s.handle_list_worktrees(Some(1), b"", b"error", "/.spawn-agent/x/");
+        assert_eq!(s.worktrees.len(), original_len);
+    }
+
+    #[test]
+    fn git_branches_error_sets_status() {
+        let mut s = State::default();
+        s.handle_git_branches(Some(128), b"", b"fatal: bad default revision");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Failed to list branches"));
+    }
+
+    #[test]
+    fn git_branches_error_preserves_existing_branches() {
+        let mut s = state_with_worktrees();
+        let original_len = s.branches.len();
+        s.handle_git_branches(Some(1), b"", b"error");
+        assert_eq!(s.branches.len(), original_len);
+    }
+
+    #[test]
+    fn input_branch_esc_clears_buffer() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "wip".into(), ..Default::default() };
+        s.handle_key_input_branch(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert!(s.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn wrap_navigate_basic() {
+        assert_eq!(wrap_navigate(0, 3, 1), 1);
+        assert_eq!(wrap_navigate(2, 3, 1), 0);
+        assert_eq!(wrap_navigate(0, 3, -1), 2);
+        assert_eq!(wrap_navigate(0, 0, 1), 0);
     }
 }
