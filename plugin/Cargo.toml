@@ -1,0 +1,11 @@
+[package]
+name = "spawn-agent-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "spawn-agent-plugin"
+path = "src/main.rs"
+
+[dependencies]
+zellij-tile = "0.43"

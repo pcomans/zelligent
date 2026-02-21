@@ -122,8 +122,54 @@ Zellij requires an explicit copy command. Add this to your `~/.config/zellij/con
 copy_command "pbcopy"
 ```
 
+## Zellij plugin
+
+A WASM plugin that provides an interactive UI for managing worktrees, launched via a keybinding as a floating pane.
+
+### Building
+
+Requires Rust with the `wasm32-wasip1` target:
+
+```bash
+rustup target add wasm32-wasip1
+cd plugin && bash build.sh
+```
+
+This compiles the plugin and copies it to `~/.config/zellij/plugins/`.
+
+### Keybinding
+
+Add to your `~/.config/zellij/config.kdl`:
+
+```kdl
+keybinds {
+    shared_except "locked" {
+        bind "Ctrl y" {
+            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/spawn-agent-plugin.wasm" {
+                floating true
+                move_to_focused_tab true
+                agent_cmd "claude"
+            }
+        }
+    }
+}
+```
+
+### Controls
+
+| Key | Action |
+|---|---|
+| `j/k` or arrows | Navigate list |
+| `Enter` | Open selected worktree |
+| `n` | Pick from existing git branches |
+| `i` | Type a new branch name |
+| `d` then `y` | Remove selected worktree |
+| `r` | Refresh |
+| `q` / `Esc` | Close |
+
 ## Requirements
 
 - git
 - [Zellij](https://zellij.dev)
 - [lazygit](https://github.com/jesseduffield/lazygit)
+- Rust with `wasm32-wasip1` target (for building the plugin)
