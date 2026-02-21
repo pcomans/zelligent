@@ -58,6 +58,7 @@ pub struct State {
     pub status_message: String,
     pub status_is_error: bool,
     pub spawn_agent_path: String,
+    pub tabs: Vec<TabInfo>,
 }
 
 register_plugin!(State);
@@ -243,6 +244,10 @@ impl State {
         if exit_code == Some(0) {
             self.status_message = format!("Removed '{branch}'");
             self.status_is_error = false;
+            #[cfg(target_arch = "wasm32")]
+            if let Some(idx) = self.tab_index_for_branch(&branch) {
+                close_tab_with_index(idx);
+            }
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
             self.status_message = format!("Remove failed: {err}");
@@ -250,6 +255,13 @@ impl State {
         }
         self.mode = Mode::BrowseWorktrees;
         Action::Refresh
+    }
+
+    /// Find the Zellij tab position associated with a branch name.
+    /// Tab names use the branch with `/` replaced by `-` (matching spawn-agent.sh).
+    pub fn tab_index_for_branch(&self, branch: &str) -> Option<usize> {
+        let tab_name = branch.replace('/', "-");
+        self.tabs.iter().find(|t| t.name == tab_name).map(|t| t.position)
     }
 
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
@@ -413,6 +425,7 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
+            EventType::TabUpdate,
         ]);
     }
 
@@ -442,6 +455,10 @@ impl ZellijPlugin for State {
                     Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
                     _ => Action::None,
                 }
+            }
+            Event::TabUpdate(tab_info) => {
+                self.tabs = tab_info;
+                Action::None
             }
             Event::Key(key) => {
                 match self.mode {
@@ -903,6 +920,46 @@ bare
         assert!(s.status_message.contains("uncommitted changes"));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
         assert_eq!(action, Action::Refresh);
+    }
+
+    fn make_tab(name: &str, position: usize) -> TabInfo {
+        TabInfo {
+            position,
+            name: name.to_string(),
+            active: false,
+            panes_to_hide: 0,
+            is_fullscreen_active: false,
+            is_sync_panes_active: false,
+            are_floating_panes_visible: false,
+            other_focused_clients: vec![],
+            active_swap_layout_name: None,
+            is_swap_layout_dirty: false,
+            viewport_rows: 0,
+            viewport_columns: 0,
+            display_area_rows: 0,
+            display_area_columns: 0,
+            selectable_tiled_panes_count: 0,
+            selectable_floating_panes_count: 0,
+        }
+    }
+
+    #[test]
+    fn tab_index_for_branch_found() {
+        let mut s = State::default();
+        s.tabs = vec![
+            make_tab("main-tab", 0),
+            make_tab("feature-cool", 1),
+            make_tab("fix-bug", 2),
+        ];
+        assert_eq!(s.tab_index_for_branch("feature/cool"), Some(1));
+        assert_eq!(s.tab_index_for_branch("fix-bug"), Some(2));
+    }
+
+    #[test]
+    fn tab_index_for_branch_not_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("main-tab", 0)];
+        assert_eq!(s.tab_index_for_branch("nonexistent"), None);
     }
 
     #[test]
