@@ -1,6 +1,6 @@
 # spawn-subagent
 
-A shell script for spawning AI coding agents (or any command) in isolated git worktrees, each in their own tmux session.
+A shell script for spawning AI coding agents in isolated git worktrees, each in their own Zellij tab.
 
 ## Installation
 
@@ -17,9 +17,28 @@ spawn-agent <branch-name> [agent-command]
 ```
 
 - `branch-name` — created from the default branch if it doesn't exist, reattached if it does
-- `agent-command` — defaults to `$SHELL`; pass `claude`, `aider`, etc.
+- `agent-command` — command to run in the main pane (default: `$SHELL`)
+
+Examples:
+
+```bash
+spawn-agent feature/my-feature          # opens a shell
+spawn-agent feature/my-feature claude   # opens Claude Code
+```
+
+Behaviour depends on context:
+
+| Context | Result |
+|---|---|
+| Inside a Zellij session | Opens a new tab in the current session |
+| Outside Zellij, repo session exists | Attaches to the repo session, opens a new tab |
+| Outside Zellij, no repo session | Creates a new session named after the repo |
+
+Each worktree opens as a tab named after the branch (`feature/my-feature` → tab `feature-my-feature`).
 
 Worktrees are stored under `~/.spawn-agent/<repo-name>/<branch-name>`.
+
+Each tab opens with the agent command on the left (70%) and lazygit on the right (30%).
 
 ## Removing a worktree
 
@@ -27,7 +46,7 @@ Worktrees are stored under `~/.spawn-agent/<repo-name>/<branch-name>`.
 spawn-agent remove <branch-name>
 ```
 
-Runs `.spawn-agent/teardown.sh` (if present), removes the worktree, and kills the tmux session. Fails with a clear error if the worktree has uncommitted changes. The local git branch is not deleted.
+Runs `.spawn-agent/teardown.sh` (if present), removes the worktree, and prints a reminder to close the tab. Fails with a clear error if the worktree has uncommitted changes. The local git branch is not deleted.
 
 ## Init
 
@@ -59,23 +78,98 @@ WORKTREE_PATH=$2
 rm -f "$WORKTREE_PATH/.env"
 ```
 
-## Navigating tmux sessions
+## Custom layout
 
-Each worktree gets its own tmux session named after the branch.
+Create `.spawn-agent/layout.kdl` to override the default Zellij layout. Use `{{cwd}}` and `{{agent_cmd}}` as placeholders:
 
-| Action | Command |
+```kdl
+layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane command="{{agent_cmd}}" cwd="{{cwd}}" size="70%"
+        pane command="lazygit" cwd="{{cwd}}" size="30%"
+    }
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
+```
+
+## Navigating tabs
+
+Each worktree opens as a tab in your current Zellij session. The keybindings below are Zellij's defaults — they may differ if you have a custom config. See the [Zellij docs](https://zellij.dev/documentation/) for reference.
+
+| Action | Keybinding |
 |---|---|
-| Switch to another session | `Ctrl-b (` / `)` (prev/next) |
-| Pick a session interactively | `Ctrl-b s` |
-| List all sessions | `tmux list-sessions` |
-| New window in current session | `Ctrl-b c` |
-| Split pane horizontally | `Ctrl-b %` |
-| Split pane vertically | `Ctrl-b "` |
-| Switch between panes | `Ctrl-b` + arrow keys |
-| Detach from session | `Ctrl-b d` |
-| Reattach from outside tmux | `tmux attach -t <branch-name>` |
+| Next tab | `Ctrl-t n` |
+| Previous tab | `Ctrl-t p` |
+| Rename tab | `Ctrl-t r` |
+| Close tab | `Ctrl-t x` |
+| Switch between panes | `Ctrl-p` + arrow keys |
+| New pane | `Ctrl-p n` |
+| Split pane right | `Ctrl-p d` |
+| Split pane down | `Ctrl-p D` |
+
+## Zellij setup
+
+### Copy/paste (macOS)
+
+Zellij requires an explicit copy command. Add this to your `~/.config/zellij/config.kdl`:
+
+```kdl
+copy_command "pbcopy"
+```
+
+## Zellij plugin
+
+A WASM plugin that provides an interactive UI for managing worktrees, launched via a keybinding as a floating pane.
+
+### Building
+
+Requires Rust with the `wasm32-wasip1` target:
+
+```bash
+rustup target add wasm32-wasip1
+cd plugin && bash build.sh
+```
+
+This compiles the plugin and copies it to `~/.config/zellij/plugins/`.
+
+### Keybinding
+
+Add to your `~/.config/zellij/config.kdl`:
+
+```kdl
+keybinds {
+    shared_except "locked" {
+        bind "Ctrl y" {
+            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/spawn-agent-plugin.wasm" {
+                floating true
+                move_to_focused_tab true
+                agent_cmd "claude"
+            }
+        }
+    }
+}
+```
+
+### Controls
+
+| Key | Action |
+|---|---|
+| `j/k` or arrows | Navigate list |
+| `Enter` | Open selected worktree |
+| `n` | Pick from existing git branches |
+| `i` | Type a new branch name |
+| `d` then `y` | Remove selected worktree |
+| `r` | Refresh |
+| `q` / `Esc` | Close |
 
 ## Requirements
 
 - git
-- tmux
+- [Zellij](https://zellij.dev)
+- [lazygit](https://github.com/jesseduffield/lazygit)
+- Rust with `wasm32-wasip1` target (for building the plugin)

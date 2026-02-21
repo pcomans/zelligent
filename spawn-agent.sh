@@ -10,9 +10,13 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-# Require tmux
-if ! command -v tmux &>/dev/null; then
-  echo "Error: tmux is required but not installed."
+# Require zellij and lazygit
+if ! command -v zellij &>/dev/null; then
+  echo "Error: zellij is required but not installed."
+  exit 1
+fi
+if ! command -v lazygit &>/dev/null; then
+  echo "Error: lazygit is required but not installed."
   exit 1
 fi
 
@@ -51,28 +55,40 @@ if [ "$1" = "remove" ]; then
     exit 1
   fi
   BRANCH_NAME=$2
+  SESSION_NAME="${BRANCH_NAME//\//-}"
   WORKTREE_PATH="$HOME/.spawn-agent/$REPO_NAME/$BRANCH_NAME"
+  if [ ! -d "$WORKTREE_PATH" ]; then
+    echo "Error: worktree '$WORKTREE_PATH' does not exist."
+    exit 1
+  fi
   if [ -f "$REPO_ROOT/.spawn-agent/teardown.sh" ]; then
     echo "⚙️  Running .spawn-agent/teardown.sh..."
-    bash "$REPO_ROOT/.spawn-agent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"
+    if ! bash "$REPO_ROOT/.spawn-agent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"; then
+      echo "Error: teardown.sh failed. Worktree was NOT removed."
+      exit 1
+    fi
   fi
   if ! git worktree remove "$WORKTREE_PATH" 2>/dev/null; then
     echo "Error: could not remove worktree. It may have uncommitted changes."
     echo "Commit or stash your changes, then try again."
     exit 1
   fi
-  tmux kill-session -t "$BRANCH_NAME" 2>/dev/null || true
-  echo "✅ Removed worktree and session for '$BRANCH_NAME'"
+  echo "✅ Removed worktree for '$BRANCH_NAME'"
+  echo "ℹ️  Close the '$SESSION_NAME' tab manually if still open."
   echo "ℹ️  Local branch '$BRANCH_NAME' was not deleted."
   exit 0
 fi
 
 BRANCH_NAME=$1
-# Default to opening a standard shell if no agent is specified
 AGENT_CMD=${2:-"$SHELL"}
+SESSION_NAME="${BRANCH_NAME//\//-}"
 
 # Detect default base branch
-BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||') || BASE_BRANCH="main"
+if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
+  BASE_BRANCH="${BASE_REF#refs/remotes/origin/}"
+else
+  BASE_BRANCH="main"
+fi
 
 # Define the new centralized worktree path
 BASE_WORKTREE_DIR="$HOME/.spawn-agent/$REPO_NAME"
@@ -80,7 +96,7 @@ WORKTREE_PATH="$BASE_WORKTREE_DIR/$BRANCH_NAME"
 
 # Check if the worktree directory already exists
 if [ -d "$WORKTREE_PATH" ]; then
-  echo "⚠️  Worktree already exists, reattaching..."
+  echo "⚠️  Worktree already exists, opening new tab..."
 else
   mkdir -p "$BASE_WORKTREE_DIR"
   echo "🚀 Creating workspace for '$BRANCH_NAME' at $WORKTREE_PATH..."
@@ -102,16 +118,59 @@ else
   fi
 fi
 
-# Create or reattach tmux session
-if tmux has-session -t "$BRANCH_NAME" 2>/dev/null; then
-  echo "🪟 Session '$BRANCH_NAME' already exists, switching..."
+# Use repo-level layout if present, otherwise use built-in default
+if [ -f "$REPO_ROOT/.spawn-agent/layout.kdl" ]; then
+  LAYOUT_TEMPLATE="$REPO_ROOT/.spawn-agent/layout.kdl"
 else
-  echo "🪟 Creating tmux session '$BRANCH_NAME'..."
-  tmux new-session -d -s "$BRANCH_NAME" -c "$WORKTREE_PATH" "$AGENT_CMD"
+  LAYOUT_TEMPLATE=""
 fi
 
-if [ -n "$TMUX" ]; then
-  tmux switch-client -t "$BRANCH_NAME"
+# Generate temp layout files
+mkdir -p "$HOME/.spawn-agent/tmp"
+LAYOUT=$(mktemp "$HOME/.spawn-agent/tmp/layout-XXXXXX")
+trap 'rm -f "$LAYOUT"' EXIT
+
+# Pane content shared by both layouts
+pane_content() {
+  cat <<EOF
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane split_direction="vertical" {
+        pane command="$AGENT_CMD" cwd="$WORKTREE_PATH" size="70%"
+        pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+    }
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+EOF
+}
+
+if [ -n "$LAYOUT_TEMPLATE" ] && [ -n "$ZELLIJ" ]; then
+  # Inside Zellij with custom template: substitute vars, use as-is for new-tab
+  sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" > "$LAYOUT"
+elif [ -n "$LAYOUT_TEMPLATE" ]; then
+  # Outside Zellij with custom template: strip outer layout{} and wrap in a named tab
+  INNER=$(sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" | sed '1d;$d')
+  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; echo "$INNER"; echo "    }"; echo "}"; } > "$LAYOUT"
+elif [ -n "$ZELLIJ" ]; then
+  # Tab layout: no tab wrapper (new-tab provides the tab context)
+  { echo "layout {"; pane_content; echo "}"; } > "$LAYOUT"
 else
-  tmux attach-session -t "$BRANCH_NAME"
+  # Session layout: wrap in a named tab
+  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; pane_content; echo "    }"; echo "}"; } > "$LAYOUT"
+fi
+
+# Inside Zellij: open as a new tab in the current session.
+# Outside Zellij: create or attach to a repo-named session, open worktree as a tab.
+if [ -n "$ZELLIJ" ]; then
+  echo "🪟 Opening tab '$SESSION_NAME'..."
+  zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+elif zellij list-sessions --no-formatting --short 2>/dev/null | grep -qxF "$REPO_NAME"; then
+  echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
+  ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+  zellij attach "$REPO_NAME"
+else
+  echo "🪟 Creating Zellij session '$REPO_NAME'..."
+  zellij --new-session-with-layout "$LAYOUT" --session "$REPO_NAME"
 fi
