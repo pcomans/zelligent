@@ -10,9 +10,13 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-# Require zellij
+# Require zellij and lazygit
 if ! command -v zellij &>/dev/null; then
   echo "Error: zellij is required but not installed."
+  exit 1
+fi
+if ! command -v lazygit &>/dev/null; then
+  echo "Error: lazygit is required but not installed."
   exit 1
 fi
 
@@ -53,9 +57,16 @@ if [ "$1" = "remove" ]; then
   BRANCH_NAME=$2
   SESSION_NAME="${BRANCH_NAME//\//-}"
   WORKTREE_PATH="$HOME/.spawn-agent/$REPO_NAME/$BRANCH_NAME"
+  if [ ! -d "$WORKTREE_PATH" ]; then
+    echo "Error: worktree '$WORKTREE_PATH' does not exist."
+    exit 1
+  fi
   if [ -f "$REPO_ROOT/.spawn-agent/teardown.sh" ]; then
     echo "⚙️  Running .spawn-agent/teardown.sh..."
-    bash "$REPO_ROOT/.spawn-agent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"
+    if ! bash "$REPO_ROOT/.spawn-agent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"; then
+      echo "Error: teardown.sh failed. Worktree was NOT removed."
+      exit 1
+    fi
   fi
   if ! git worktree remove "$WORKTREE_PATH" 2>/dev/null; then
     echo "Error: could not remove worktree. It may have uncommitted changes."
@@ -73,7 +84,11 @@ AGENT_CMD=${2:-"$SHELL"}
 SESSION_NAME="${BRANCH_NAME//\//-}"
 
 # Detect default base branch
-BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||') || BASE_BRANCH="main"
+if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
+  BASE_BRANCH="${BASE_REF#refs/remotes/origin/}"
+else
+  BASE_BRANCH="main"
+fi
 
 # Define the new centralized worktree path
 BASE_WORKTREE_DIR="$HOME/.spawn-agent/$REPO_NAME"
@@ -81,7 +96,7 @@ WORKTREE_PATH="$BASE_WORKTREE_DIR/$BRANCH_NAME"
 
 # Check if the worktree directory already exists
 if [ -d "$WORKTREE_PATH" ]; then
-  echo "⚠️  Worktree already exists, reattaching..."
+  echo "⚠️  Worktree already exists, opening new tab..."
 else
   mkdir -p "$BASE_WORKTREE_DIR"
   echo "🚀 Creating workspace for '$BRANCH_NAME' at $WORKTREE_PATH..."
@@ -112,8 +127,8 @@ fi
 
 # Generate temp layout files
 mkdir -p "$HOME/.spawn-agent/tmp"
-LAYOUT=$(mktemp "$HOME/.spawn-agent/tmp/layout-XXXXXX.kdl")
-trap "rm -f $LAYOUT" EXIT
+LAYOUT=$(mktemp "$HOME/.spawn-agent/tmp/layout-XXXXXX")
+trap 'rm -f "$LAYOUT"' EXIT
 
 # Pane content shared by both layouts
 pane_content() {
@@ -131,8 +146,13 @@ pane_content() {
 EOF
 }
 
-if [ -n "$LAYOUT_TEMPLATE" ]; then
+if [ -n "$LAYOUT_TEMPLATE" ] && [ -n "$ZELLIJ" ]; then
+  # Inside Zellij with custom template: substitute vars, use as-is for new-tab
   sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" > "$LAYOUT"
+elif [ -n "$LAYOUT_TEMPLATE" ]; then
+  # Outside Zellij with custom template: strip outer layout{} and wrap in a named tab
+  INNER=$(sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" | sed '1d;$d')
+  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; echo "$INNER"; echo "    }"; echo "}"; } > "$LAYOUT"
 elif [ -n "$ZELLIJ" ]; then
   # Tab layout: no tab wrapper (new-tab provides the tab context)
   { echo "layout {"; pane_content; echo "}"; } > "$LAYOUT"

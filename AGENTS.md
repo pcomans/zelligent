@@ -5,7 +5,7 @@
 Run the test suite before and after changes:
 
 ```bash
-bash /tmp/spawn-agent-zellij/test.sh
+bash test.sh
 ```
 
 The suite has two levels:

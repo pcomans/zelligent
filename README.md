@@ -26,7 +26,15 @@ spawn-agent feature/my-feature          # opens a shell
 spawn-agent feature/my-feature claude   # opens Claude Code
 ```
 
-Must be run from inside an existing Zellij session. Each worktree opens as a new tab named after the branch (`feature/my-feature` → tab `feature-my-feature`).
+Behaviour depends on context:
+
+| Context | Result |
+|---|---|
+| Inside a Zellij session | Opens a new tab in the current session |
+| Outside Zellij, repo session exists | Attaches to the repo session, opens a new tab |
+| Outside Zellij, no repo session | Creates a new session named after the repo |
+
+Each worktree opens as a tab named after the branch (`feature/my-feature` → tab `feature-my-feature`).
 
 Worktrees are stored under `~/.spawn-agent/<repo-name>/<branch-name>`.
 
@@ -91,7 +99,7 @@ layout {
 
 ## Navigating tabs
 
-Each worktree opens as a tab in your current Zellij session.
+Each worktree opens as a tab in your current Zellij session. The keybindings below are Zellij's defaults — they may differ if you have a custom config. See the [Zellij docs](https://zellij.dev/documentation/) for reference.
 
 | Action | Keybinding |
 |---|---|
