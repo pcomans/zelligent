@@ -5,12 +5,12 @@
 set -e
 
 if [ -z "$1" ]; then
-  echo "Usage: spawn-agent <branch-name> [agent-command]"
-  echo "       spawn-agent remove <branch-name>"
-  echo "       spawn-agent init"
-  echo "       spawn-agent show-repo"
-  echo "       spawn-agent list-worktrees"
-  echo "       spawn-agent list-branches"
+  echo "Usage: zelligent spawn <branch-name> [agent-command]"
+  echo "       zelligent remove <branch-name>"
+  echo "       zelligent init"
+  echo "       zelligent show-repo"
+  echo "       zelligent list-worktrees"
+  echo "       zelligent list-branches"
   exit 1
 fi
 
@@ -22,7 +22,7 @@ fi
 
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME=$(basename "$REPO_ROOT")
-WORKTREES_DIR="$HOME/.spawn-agent/worktrees/$REPO_NAME"
+WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
 
 # --- Query subcommands (no zellij/lazygit needed) ---
 
@@ -56,11 +56,11 @@ fi
 
 # Handle init subcommand
 if [ "$1" = "init" ]; then
-  mkdir -p "$REPO_ROOT/.spawn-agent"
+  mkdir -p "$REPO_ROOT/.zelligent"
   for script in setup teardown; do
-    SCRIPT_PATH="$REPO_ROOT/.spawn-agent/$script.sh"
+    SCRIPT_PATH="$REPO_ROOT/.zelligent/$script.sh"
     if [ -f "$SCRIPT_PATH" ]; then
-      echo "⚠️  .spawn-agent/$script.sh already exists, skipping"
+      echo "⚠️  .zelligent/$script.sh already exists, skipping"
     else
       cat > "$SCRIPT_PATH" <<'EOF'
 #!/bin/bash
@@ -68,7 +68,7 @@ REPO_ROOT=$1
 WORKTREE_PATH=$2
 EOF
       chmod +x "$SCRIPT_PATH"
-      echo "✅ Created .spawn-agent/$script.sh"
+      echo "✅ Created .zelligent/$script.sh"
     fi
   done
   exit 0
@@ -77,7 +77,7 @@ fi
 # Handle remove subcommand
 if [ "$1" = "remove" ]; then
   if [ -z "$2" ]; then
-    echo "Usage: spawn-agent remove <branch-name>"
+    echo "Usage: zelligent remove <branch-name>"
     exit 1
   fi
   BRANCH_NAME=$2
@@ -87,9 +87,9 @@ if [ "$1" = "remove" ]; then
     echo "Error: worktree '$WORKTREE_PATH' does not exist."
     exit 1
   fi
-  if [ -f "$REPO_ROOT/.spawn-agent/teardown.sh" ]; then
-    echo "⚙️  Running .spawn-agent/teardown.sh..."
-    if ! bash "$REPO_ROOT/.spawn-agent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"; then
+  if [ -f "$REPO_ROOT/.zelligent/teardown.sh" ]; then
+    echo "⚙️  Running .zelligent/teardown.sh..."
+    if ! bash "$REPO_ROOT/.zelligent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"; then
       echo "Error: teardown.sh failed. Worktree was NOT removed."
       exit 1
     fi
@@ -105,8 +105,25 @@ if [ "$1" = "remove" ]; then
   exit 0
 fi
 
-BRANCH_NAME=$1
-AGENT_CMD=${2:-"$SHELL"}
+# Handle spawn subcommand
+if [ "$1" = "spawn" ]; then
+  if [ -z "$2" ]; then
+    echo "Usage: zelligent spawn <branch-name> [agent-command]"
+    exit 1
+  fi
+  BRANCH_NAME=$2
+  AGENT_CMD=${3:-"$SHELL"}
+else
+  echo "Unknown command: $1"
+  echo "Usage: zelligent spawn <branch-name> [agent-command]"
+  echo "       zelligent remove <branch-name>"
+  echo "       zelligent init"
+  echo "       zelligent show-repo"
+  echo "       zelligent list-worktrees"
+  echo "       zelligent list-branches"
+  exit 1
+fi
+
 SESSION_NAME="${BRANCH_NAME//\//-}"
 
 # Escape backslashes and double quotes for KDL string embedding
@@ -145,19 +162,19 @@ else
 fi
 
 # Use repo-level layout if present, otherwise use built-in default
-if [ -f "$REPO_ROOT/.spawn-agent/layout.kdl" ]; then
-  LAYOUT_TEMPLATE="$REPO_ROOT/.spawn-agent/layout.kdl"
+if [ -f "$REPO_ROOT/.zelligent/layout.kdl" ]; then
+  LAYOUT_TEMPLATE="$REPO_ROOT/.zelligent/layout.kdl"
 else
   LAYOUT_TEMPLATE=""
 fi
 
 # Generate temp layout files
-mkdir -p "$HOME/.spawn-agent/tmp"
-LAYOUT=$(mktemp "$HOME/.spawn-agent/tmp/layout-XXXXXX")
+mkdir -p "$HOME/.zelligent/tmp"
+LAYOUT=$(mktemp "$HOME/.zelligent/tmp/layout-XXXXXX")
 trap 'rm -f "$LAYOUT"' EXIT
 
 # Build the agent pane command, prepending setup.sh for new worktrees
-SETUP_SCRIPT="$REPO_ROOT/.spawn-agent/setup.sh"
+SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
             args \"-c\" \"bash \\\"\\\$1\\\" \\\"\\\$2\\\" \\\"\\\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"

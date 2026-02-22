@@ -5,25 +5,25 @@ cd "$(dirname "$0")"
 
 SHA=$(git rev-parse HEAD)
 
-# Install spawn-agent script
+# Install zelligent script
 INSTALL_DIR="$HOME/.local/bin"
 mkdir -p "$INSTALL_DIR"
 
-# Ensure spawn-agent.sh contains the expected placeholder before stamping
-if ! grep -q "__COMMIT_SHA__" spawn-agent.sh; then
-  echo "Error: spawn-agent.sh does not contain the __COMMIT_SHA__ placeholder." >&2
+# Ensure zelligent.sh contains the expected placeholder before stamping
+if ! grep -q "__COMMIT_SHA__" zelligent.sh; then
+  echo "Error: zelligent.sh does not contain the __COMMIT_SHA__ placeholder." >&2
   exit 1
 fi
 
-sed "s/__COMMIT_SHA__/$SHA/" spawn-agent.sh > "$INSTALL_DIR/spawn-agent"
+sed "s/__COMMIT_SHA__/$SHA/" zelligent.sh > "$INSTALL_DIR/zelligent"
 
 # Verify that the stamped script contains the expected SHA
-if ! grep -q "$SHA" "$INSTALL_DIR/spawn-agent"; then
-  echo "Error: Failed to stamp spawn-agent with commit SHA $SHA." >&2
+if ! grep -q "$SHA" "$INSTALL_DIR/zelligent"; then
+  echo "Error: Failed to stamp zelligent with commit SHA $SHA." >&2
   exit 1
 fi
-chmod +x "$INSTALL_DIR/spawn-agent"
-echo "Installed spawn-agent ($SHA) to $INSTALL_DIR/spawn-agent"
+chmod +x "$INSTALL_DIR/zelligent"
+echo "Installed zelligent ($SHA) to $INSTALL_DIR/zelligent"
 
 # Build and install Zellij plugin
 cd plugin

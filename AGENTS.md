@@ -25,7 +25,7 @@ This lets you test layout loading and tab creation without a live terminal.
 
 ```bash
 # The integration test does this automatically, but you can also run manually:
-SESSION=spawn-agent-test-manual
+SESSION=zelligent-test-manual
 zellij attach --create-background "$SESSION"
 ZELLIJ_SESSION_NAME="$SESSION" zellij action new-tab --layout my-layout.kdl --name test
 ZELLIJ_SESSION_NAME="$SESSION" zellij action dump-layout   # inspect the result
@@ -35,16 +35,16 @@ zellij kill-session "$SESSION"
 ### What still requires manual testing
 - Visual appearance of the tab (pane sizes, chrome rendering)
 - Agent command actually launching (claude, lazygit)
-- End-to-end: running spawn-agent.sh from inside a live Zellij session
+- End-to-end: running zelligent from inside a live Zellij session
 
 For end-to-end testing, run from inside an existing Zellij session:
 ```bash
-./spawn-agent.sh feature/test-branch claude
+zelligent spawn feature/test-branch claude
 # Expected: new tab opens with left pane (claude) + right pane (lazygit)
 # Expected: tab-bar at top, status-bar at bottom
 # Expected: tab named "feature-test-branch"
 
-./spawn-agent.sh remove feature/test-branch
+zelligent remove feature/test-branch
 # Expected: worktree removed, branch preserved, tab note printed
 ```
 
@@ -56,7 +56,7 @@ Branch names are sanitized by replacing `/` with `-`:
 
 ## Layout format
 
-The default layout (`.spawn-agent/layout.kdl` override supported) must:
+The default layout (`.zelligent/layout.kdl` override supported) must:
 - Include `plugin location="zellij:tab-bar"` as first pane
 - Include `plugin location="zellij:status-bar"` as last pane
 - NOT wrap content in a `tab { }` block (that's for session layouts, not `new-tab`)
