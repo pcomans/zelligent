@@ -11,7 +11,7 @@ pub const YELLOW: &str = "\x1b[33m";
 use crate::{Mode, Worktree};
 
 pub fn render_header(repo_name: &str, cols: usize) {
-    let title = format!(" spawn-agent: {} ", repo_name);
+    let title = format!(" zelligent: {} ", repo_name);
     let pad = cols.saturating_sub(title.len());
     println!("{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad));
 }

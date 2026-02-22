@@ -2452,13 +2452,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spawn-agent-plugin"
-version = "0.1.0"
-dependencies = [
- "zellij-tile",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3604,6 +3597,13 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
+]
+
+[[package]]
+name = "zelligent-plugin"
+version = "0.1.0"
+dependencies = [
+ "zellij-tile",
 ]
 
 [[package]]

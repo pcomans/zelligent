@@ -56,13 +56,13 @@ pub struct State {
     pub agent_cmd: String,
     pub status_message: String,
     pub status_is_error: bool,
-    pub spawn_agent_path: String,
+    pub zelligent_path: String,
     pub tabs: Vec<TabInfo>,
 }
 
 register_plugin!(State);
 
-/// Parse `spawn-agent list-worktrees` output (one branch per line).
+/// Parse `zelligent list-worktrees` output (one branch per line).
 pub fn parse_worktrees(output: &str) -> Vec<Worktree> {
     output
         .lines()
@@ -98,14 +98,14 @@ impl State {
 
     fn fire_git_toplevel(&self) {
         run_command(
-            &[&self.spawn_agent_path, "show-repo"],
+            &[&self.zelligent_path, "show-repo"],
             Self::ctx(CMD_GIT_TOPLEVEL),
         );
     }
 
     fn fire_list_worktrees(&self) {
         run_command_with_env_variables_and_cwd(
-            &[&self.spawn_agent_path, "list-worktrees"],
+            &[&self.zelligent_path, "list-worktrees"],
             BTreeMap::new(),
             PathBuf::from(&self.repo_root),
             Self::ctx(CMD_LIST_WORKTREES),
@@ -114,7 +114,7 @@ impl State {
 
     fn fire_git_branches(&self) {
         run_command_with_env_variables_and_cwd(
-            &[&self.spawn_agent_path, "list-branches"],
+            &[&self.zelligent_path, "list-branches"],
             BTreeMap::new(),
             PathBuf::from(&self.repo_root),
             Self::ctx(CMD_GIT_BRANCHES),
@@ -134,7 +134,7 @@ impl State {
         ctx.insert("branch".to_string(), branch.to_string());
 
         run_command_with_env_variables_and_cwd(
-            &[&self.spawn_agent_path, branch, &self.agent_cmd],
+            &[&self.zelligent_path, "spawn", branch, &self.agent_cmd],
             env,
             PathBuf::from(&self.repo_root),
             ctx,
@@ -151,7 +151,7 @@ impl State {
         ctx.insert("branch".to_string(), branch.to_string());
 
         run_command_with_env_variables_and_cwd(
-            &[&self.spawn_agent_path, "remove", branch],
+            &[&self.zelligent_path, "remove", branch],
             env,
             PathBuf::from(&self.repo_root),
             ctx,
@@ -269,7 +269,7 @@ impl State {
     }
 
     /// Convert a branch name to the corresponding Zellij tab name.
-    /// Tab names use the branch with `/` replaced by `-` (matching spawn-agent.sh).
+    /// Tab names use the branch with `/` replaced by `-` (matching zelligent.sh).
     pub fn tab_name_for_branch(branch: &str) -> String {
         branch.replace('/', "-")
     }
@@ -411,10 +411,10 @@ impl ZellijPlugin for State {
             .cloned()
             .unwrap_or_else(|| "claude".to_string());
 
-        self.spawn_agent_path = configuration
-            .get("spawn_agent_path")
+        self.zelligent_path = configuration
+            .get("zelligent_path")
             .cloned()
-            .unwrap_or_else(|| "spawn-agent".to_string());
+            .unwrap_or_else(|| "zelligent".to_string());
 
         request_permission(&[
             PermissionType::RunCommands,

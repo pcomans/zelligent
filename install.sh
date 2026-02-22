@@ -2,8 +2,8 @@
 set -e
 
 INSTALL_DIR="/usr/local/bin"
-SCRIPT_NAME="spawn-agent"
-REPO="pcomans/spawn-subagent"
+SCRIPT_NAME="zelligent"
+REPO="pcomans/zelligent"
 
 # Fall back to ~/.local/bin if /usr/local/bin isn't writable
 if [ ! -w "$INSTALL_DIR" ]; then
@@ -12,7 +12,7 @@ if [ ! -w "$INSTALL_DIR" ]; then
 fi
 
 echo "Installing $SCRIPT_NAME to $INSTALL_DIR..."
-curl -fsSL "https://raw.githubusercontent.com/$REPO/main/spawn-agent.sh" -o "$INSTALL_DIR/$SCRIPT_NAME"
+curl -fsSL "https://raw.githubusercontent.com/$REPO/main/zelligent.sh" -o "$INSTALL_DIR/$SCRIPT_NAME"
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 echo "✅ Installed $SCRIPT_NAME"
 
