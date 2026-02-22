@@ -80,7 +80,7 @@ git -C "$REPO_ROOT" worktree remove --force \
 git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 
 EXPECTED_CWD="$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch"
-contains "layout contains agent command"  'command="claude"'         "$out"
+contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"

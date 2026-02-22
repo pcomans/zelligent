@@ -162,7 +162,9 @@ pane_content() {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane command="$AGENT_CMD_KDL" cwd="$WORKTREE_PATH" size="70%"
+        pane command="bash" cwd="$WORKTREE_PATH" size="70%" {
+            args "-c" "exec $AGENT_CMD_KDL"
+        }
         pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
     }
     pane size=1 borderless=true {
