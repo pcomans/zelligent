@@ -1,4 +1,5 @@
 #!/bin/bash
+# commit: __COMMIT_SHA__
 
 # Exit immediately if a command exits with a non-zero status
 set -e
