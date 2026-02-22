@@ -21,6 +21,7 @@ fi
 
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME=$(basename "$REPO_ROOT")
+WORKTREES_DIR="$HOME/.spawn-agent/worktrees/$REPO_NAME"
 
 # --- Query subcommands (no zellij/lazygit needed) ---
 
@@ -31,7 +32,7 @@ if [ "$1" = "show-repo" ]; then
 fi
 
 if [ "$1" = "list-worktrees" ]; then
-  SPAWN_PREFIX="$HOME/.spawn-agent/$REPO_NAME/"
+  SPAWN_PREFIX="$WORKTREES_DIR/"
   git -C "$REPO_ROOT" worktree list --porcelain | while IFS= read -r line; do
     case "$line" in
       "worktree "*)
@@ -80,7 +81,7 @@ if [ "$1" = "remove" ]; then
   fi
   BRANCH_NAME=$2
   SESSION_NAME="${BRANCH_NAME//\//-}"
-  WORKTREE_PATH="$HOME/.spawn-agent/$REPO_NAME/$BRANCH_NAME"
+  WORKTREE_PATH="$WORKTREES_DIR/$BRANCH_NAME"
   if [ ! -d "$WORKTREE_PATH" ]; then
     echo "Error: worktree '$WORKTREE_PATH' does not exist."
     exit 1
@@ -115,14 +116,13 @@ else
 fi
 
 # Define the new centralized worktree path
-BASE_WORKTREE_DIR="$HOME/.spawn-agent/$REPO_NAME"
-WORKTREE_PATH="$BASE_WORKTREE_DIR/$BRANCH_NAME"
+WORKTREE_PATH="$WORKTREES_DIR/$BRANCH_NAME"
 
 # Check if the worktree directory already exists
 if [ -d "$WORKTREE_PATH" ]; then
   echo "⚠️  Worktree already exists, opening new tab..."
 else
-  mkdir -p "$BASE_WORKTREE_DIR"
+  mkdir -p "$WORKTREES_DIR"
   echo "🚀 Creating workspace for '$BRANCH_NAME' at $WORKTREE_PATH..."
 
   # Handle existing vs new branches
