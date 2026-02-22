@@ -4,15 +4,111 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
-if [ -z "$1" ]; then
-  echo "Usage: zelligent spawn <branch-name> [agent-command]"
-  echo "       zelligent remove <branch-name>"
-  echo "       zelligent init"
-  echo "       zelligent show-repo"
-  echo "       zelligent list-worktrees"
-  echo "       zelligent list-branches"
-  exit 1
+ZELLIJ_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/zellij"
+
+# --- Commands that do not require a git repo ---
+
+usage() {
+  echo "Usage: zelligent                              Launch/attach Zellij session for current repo"
+  echo "       zelligent spawn <branch> [agent-cmd]   Create worktree and open agent tab"
+  echo "       zelligent remove <branch>              Remove a worktree"
+  echo "       zelligent init                         Create .zelligent/ hook stubs"
+  echo "       zelligent doctor                       Check and fix zelligent setup"
+  echo "       zelligent --version                    Print version"
+  echo "       zelligent --help                       Show this help"
+}
+
+if [ "$1" = "--version" ]; then
+  echo "zelligent __COMMIT_SHA__"
+  exit 0
 fi
+
+if [ "$1" = "--help" ] || [ "$1" = "help" ]; then
+  usage
+  exit 0
+fi
+
+if [ "$1" = "doctor" ]; then
+  ERRORS=0
+
+  # 1. Check zellij is installed
+  if command -v zellij &>/dev/null; then
+    echo "  zellij: ok"
+  else
+    echo "  zellij: not found. Install with: brew install zellij"
+    ERRORS=1
+  fi
+
+  # 2. Install the Zellij plugin
+  # Find the plugin source
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    PLUGIN_SRC="$ZELLIGENT_PLUGIN_SRC"
+  else
+    ZELLIGENT_BIN=$(command -v zelligent 2>/dev/null || echo "$0")
+    ZELLIGENT_PREFIX=$(dirname "$(dirname "$ZELLIGENT_BIN")")
+    PLUGIN_SRC="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
+  fi
+
+  PLUGIN_DEST="$ZELLIJ_CONFIG_HOME/plugins/zelligent-plugin.wasm"
+
+  if [ ! -f "$PLUGIN_SRC" ]; then
+    echo "  plugin: source not found at $PLUGIN_SRC"
+    echo "          If installed from source, run: cd plugin && bash build.sh"
+    ERRORS=1
+  elif [ -f "$PLUGIN_DEST" ] && cmp -s "$PLUGIN_SRC" "$PLUGIN_DEST"; then
+    echo "  plugin: ok"
+  else
+    mkdir -p "$(dirname "$PLUGIN_DEST")"
+    cp "$PLUGIN_SRC" "$PLUGIN_DEST"
+    echo "  plugin: installed to $PLUGIN_DEST"
+  fi
+
+  # 3. Patch Zellij config
+  CONFIG="$ZELLIJ_CONFIG_HOME/config.kdl"
+  mkdir -p "$(dirname "$CONFIG")"
+  touch "$CONFIG"
+
+  if grep -qF 'zelligent-plugin.wasm' "$CONFIG"; then
+    echo "  keybinding: ok"
+  else
+    cat >> "$CONFIG" <<'KDL'
+
+keybinds {
+    shared_except "locked" {
+        bind "Ctrl y" {
+            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zelligent-plugin.wasm" {
+                floating true
+                move_to_focused_tab true
+                agent_cmd "claude"
+            }
+        }
+    }
+}
+KDL
+    echo "  keybinding: added Ctrl-y to $CONFIG"
+  fi
+
+  if [ "$(uname)" = "Darwin" ]; then
+    if grep -qF 'copy_command' "$CONFIG"; then
+      echo "  copy_command: ok"
+    else
+      echo 'copy_command "pbcopy"' >> "$CONFIG"
+      echo "  copy_command: added pbcopy to $CONFIG"
+    fi
+  fi
+
+  if [ "$ERRORS" -ne 0 ]; then
+    echo ""
+    echo "Some checks failed. Fix the issues above and run 'zelligent doctor' again."
+    exit 1
+  fi
+
+  echo ""
+  echo "All good! Restart Zellij to apply any config changes."
+  exit 0
+fi
+
+# --- Everything below requires a git repo ---
 
 # Require git repo — resolve to the main repo root even when run from a worktree.
 if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
@@ -23,6 +119,28 @@ fi
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME=$(basename "$REPO_ROOT")
 WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
+
+# No args: launch or attach to Zellij session for this repo
+if [ -z "$1" ]; then
+  # Check plugin is installed
+  if [ ! -f "$ZELLIJ_CONFIG_HOME/plugins/zelligent-plugin.wasm" ]; then
+    echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
+    exit 1
+  fi
+
+  if [ -n "$ZELLIJ" ]; then
+    echo "Already inside a Zellij session. Use 'zelligent spawn <branch>' to open a worktree tab."
+    exit 0
+  fi
+
+  if zellij list-sessions --no-formatting --short 2>/dev/null | grep -qxF "$REPO_NAME"; then
+    echo "Attaching to session '$REPO_NAME'..."
+    exec zellij attach "$REPO_NAME"
+  else
+    echo "Creating Zellij session '$REPO_NAME'..."
+    exec zellij --session "$REPO_NAME"
+  fi
+fi
 
 # --- Query subcommands (no zellij/lazygit needed) ---
 
@@ -115,12 +233,7 @@ if [ "$1" = "spawn" ]; then
   AGENT_CMD=${3:-"$SHELL"}
 else
   echo "Unknown command: $1"
-  echo "Usage: zelligent spawn <branch-name> [agent-command]"
-  echo "       zelligent remove <branch-name>"
-  echo "       zelligent init"
-  echo "       zelligent show-repo"
-  echo "       zelligent list-worktrees"
-  echo "       zelligent list-branches"
+  usage
   exit 1
 fi
 
@@ -177,7 +290,7 @@ trap 'rm -f "$LAYOUT"' EXIT
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"bash \\\"\\\$1\\\" \\\"\\\$2\\\" \\\"\\\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
+            args \"-c\" \"bash \\\"\$1\\\" \\\"\$2\\\" \\\"\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
         }"
 else
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {

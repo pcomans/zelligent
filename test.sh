@@ -120,7 +120,7 @@ git -C "$REPO_ROOT" worktree remove --force \
 git -C "$REPO_ROOT" branch -D test-no-setup-branch &>/dev/null || true
 
 contains "no setup.sh: uses direct command"  'exec claude' "$out_no_setup"
-excludes "no setup.sh: no setup preamble"    'setup.sh'         "$out_no_setup"
+excludes "no setup.sh: no setup preamble"    '.zelligent/setup.sh'    "$out_no_setup"
 
 # Test: multi-word AGENT_CMD with arguments
 out_multi=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
@@ -161,12 +161,67 @@ contains "quoted cmd: quotes are escaped" 'exec claude -p \"Sag Hallo auf Deutsc
 
 rm -rf "$MOCK_BIN_QUOTE"
 
+# ── --version and --help ──────────────────────────────────────────────────────
+echo "Version and help:"
+
+out=$("$SCRIPT" --version 2>&1); code=$?
+check "--version exits 0" "0" "$code"
+contains "--version prints zelligent" "zelligent" "$out"
+
+out=$("$SCRIPT" --help 2>&1); code=$?
+check "--help exits 0" "0" "$code"
+contains "--help prints usage" "Usage:" "$out"
+contains "--help lists doctor" "doctor" "$out"
+contains "--help lists spawn" "spawn" "$out"
+
+out=$("$SCRIPT" help 2>&1); code=$?
+check "help exits 0" "0" "$code"
+contains "help prints usage" "Usage:" "$out"
+
+# ── No-args behavior ─────────────────────────────────────────────────────────
+echo "No-args behavior:"
+
+# No args outside git repo: exits non-zero with git error
+NONGIT_NOARGS=$(mktemp -d)
+out=$(cd "$NONGIT_NOARGS" && "$SCRIPT" 2>&1); code=$?
+check "no args in non-git dir exits non-zero" "1" "$code"
+contains "no args in non-git dir prints git error" "not inside a git repository" "$out"
+rm -rf "$NONGIT_NOARGS"
+
+# No args with plugin not installed: tells user to run doctor
+MOCK_NOARGS_NOPLUGIN=$(mktemp -d)
+out=$(XDG_CONFIG_HOME="$MOCK_NOARGS_NOPLUGIN" "$SCRIPT" 2>&1); code=$?
+check "no args without plugin exits non-zero" "1" "$code"
+contains "no args without plugin: suggests doctor" "zelligent doctor" "$out"
+rm -rf "$MOCK_NOARGS_NOPLUGIN"
+
+# No args inside Zellij: prints spawn suggestion
+MOCK_NOARGS_ZELLIJ=$(mktemp -d)
+mkdir -p "$MOCK_NOARGS_ZELLIJ/zellij/plugins"
+touch "$MOCK_NOARGS_ZELLIJ/zellij/plugins/zelligent-plugin.wasm"
+out=$(ZELLIJ=1 XDG_CONFIG_HOME="$MOCK_NOARGS_ZELLIJ" "$SCRIPT" 2>&1); code=$?
+check "no args inside zellij exits 0" "0" "$code"
+contains "no args inside zellij: suggests spawn" "zelligent spawn" "$out"
+rm -rf "$MOCK_NOARGS_ZELLIJ"
+
+# No args outside Zellij with mock zellij (no existing session): creates session
+MOCK_NOARGS_BIN=$(mktemp -d)
+MOCK_NOARGS_CFG=$(mktemp -d)
+mkdir -p "$MOCK_NOARGS_CFG/zellij/plugins"
+touch "$MOCK_NOARGS_CFG/zellij/plugins/zelligent-plugin.wasm"
+cat > "$MOCK_NOARGS_BIN/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "list-sessions" ]; then echo ""; exit 0; fi
+echo "zellij $*"
+MOCK
+chmod +x "$MOCK_NOARGS_BIN/zellij"
+out=$(ZELLIJ="" XDG_CONFIG_HOME="$MOCK_NOARGS_CFG" PATH="$MOCK_NOARGS_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+check "no args creates session" "0" "$code"
+contains "no args: prints session message" "session" "$out"
+rm -rf "$MOCK_NOARGS_BIN" "$MOCK_NOARGS_CFG"
+
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
-
-out=$("$SCRIPT" 2>&1); code=$?
-check "no args exits non-zero" "1" "$code"
-contains "no args prints usage" "Usage:" "$out"
 
 out=$("$SCRIPT" remove 2>&1); code=$?
 check "remove without branch exits non-zero" "1" "$code"
@@ -188,6 +243,124 @@ out=$(cd "$NONGIT" && "$SCRIPT" spawn some-branch 2>&1); code=$?
 check "non-git dir exits non-zero" "1" "$code"
 contains "non-git dir prints error" "not inside a git repository" "$out"
 rm -rf "$NONGIT"
+
+# ── Doctor subcommand ────────────────────────────────────────────────────────
+echo "Doctor subcommand:"
+
+# doctor without zellij in PATH: exits non-zero
+MOCK_DR_NOZELLIJ=$(mktemp -d)
+MOCK_DR_HOME=$(mktemp -d)
+# Keep system PATH for basic commands, but ensure no zellij
+out=$(HOME="$MOCK_DR_HOME" PATH="$MOCK_DR_NOZELLIJ:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor without zellij exits non-zero" "1" "$code"
+contains "doctor without zellij: prints error" "not found" "$out"
+rm -rf "$MOCK_DR_NOZELLIJ" "$MOCK_DR_HOME"
+
+# doctor happy path: installs plugin and patches config
+MOCK_DR_BIN=$(mktemp -d)
+MOCK_DR_HOME=$(mktemp -d)
+FAKE_WASM=$(mktemp)
+echo "fake-wasm-content" > "$FAKE_WASM"
+cat > "$MOCK_DR_BIN/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN/zellij"
+
+out=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
+  PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor exits 0" "0" "$code"
+check "doctor creates plugin dir" "true" \
+  "$([ -d "$MOCK_DR_HOME/.config/zellij/plugins" ] && echo true || echo false)"
+check "doctor installs plugin" "true" \
+  "$([ -f "$MOCK_DR_HOME/.config/zellij/plugins/zelligent-plugin.wasm" ] && echo true || echo false)"
+check "doctor creates config.kdl" "true" \
+  "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
+CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
+contains "doctor adds keybinding" "zelligent-plugin.wasm" "$CONFIG_CONTENT"
+contains "doctor adds Ctrl y" "Ctrl y" "$CONFIG_CONTENT"
+
+# doctor idempotent: run again, should say "ok" / "already"
+CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
+out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
+  PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code2=$?
+check "doctor idempotent exits 0" "0" "$code2"
+contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
+contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
+CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
+check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
+
+rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME"
+rm -f "$FAKE_WASM"
+
+# doctor with existing keybinds block in config: appends without corrupting
+MOCK_DR_BIN2=$(mktemp -d)
+MOCK_DR_HOME2=$(mktemp -d)
+FAKE_WASM2=$(mktemp)
+echo "fake-wasm" > "$FAKE_WASM2"
+cat > "$MOCK_DR_BIN2/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN2/zellij"
+mkdir -p "$MOCK_DR_HOME2/.config/zellij"
+cat > "$MOCK_DR_HOME2/.config/zellij/config.kdl" <<'KDL'
+keybinds {
+    shared_except "locked" {
+        bind "Ctrl x" {
+            Quit
+        }
+    }
+}
+KDL
+
+out=$(HOME="$MOCK_DR_HOME2" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM2" \
+  PATH="$MOCK_DR_BIN2:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with existing keybinds exits 0" "0" "$code"
+CONFIG_CONTENT2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
+contains "doctor preserves existing keybinds" "Ctrl x" "$CONFIG_CONTENT2"
+contains "doctor adds new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
+
+rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2"
+rm -f "$FAKE_WASM2"
+
+# doctor with plugin source not found: prints error
+MOCK_DR_BIN3=$(mktemp -d)
+MOCK_DR_HOME3=$(mktemp -d)
+cat > "$MOCK_DR_BIN3/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN3/zellij"
+
+out=$(HOME="$MOCK_DR_HOME3" ZELLIGENT_PLUGIN_SRC="/nonexistent/path.wasm" \
+  PATH="$MOCK_DR_BIN3:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with missing plugin source exits non-zero" "1" "$code"
+contains "doctor with missing plugin source: prints error" "source not found" "$out"
+
+rm -rf "$MOCK_DR_BIN3" "$MOCK_DR_HOME3"
+
+# doctor respects XDG_CONFIG_HOME
+MOCK_DR_BIN4=$(mktemp -d)
+MOCK_DR_HOME4=$(mktemp -d)
+MOCK_XDG=$(mktemp -d)
+FAKE_WASM4=$(mktemp)
+echo "fake-wasm" > "$FAKE_WASM4"
+cat > "$MOCK_DR_BIN4/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN4/zellij"
+
+out=$(HOME="$MOCK_DR_HOME4" XDG_CONFIG_HOME="$MOCK_XDG" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM4" \
+  PATH="$MOCK_DR_BIN4:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with XDG_CONFIG_HOME exits 0" "0" "$code"
+check "doctor uses XDG_CONFIG_HOME for plugin" "true" \
+  "$([ -f "$MOCK_XDG/zellij/plugins/zelligent-plugin.wasm" ] && echo true || echo false)"
+check "doctor uses XDG_CONFIG_HOME for config" "true" \
+  "$([ -f "$MOCK_XDG/zellij/config.kdl" ] && echo true || echo false)"
+# Should NOT have created anything under ~/.config
+check "doctor does not use ~/.config when XDG set" "false" \
+  "$([ -d "$MOCK_DR_HOME4/.config/zellij" ] && echo true || echo false)"
+
+rm -rf "$MOCK_DR_BIN4" "$MOCK_DR_HOME4" "$MOCK_XDG"
+rm -f "$FAKE_WASM4"
 
 # ── Query subcommands ────────────────────────────────────────────────────────
 echo "Query subcommands:"
