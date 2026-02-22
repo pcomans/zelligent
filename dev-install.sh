@@ -24,6 +24,11 @@ echo "Installed zelligent ($STAMP) to $INSTALL_DIR/zelligent"
 # Build and install Zellij plugin
 cd plugin
 sed -i.bak "s/version = \"0.0.0-dev\"/version = \"$VERSION\"/" Cargo.toml
+if ! grep -q "version = \"$VERSION\"" Cargo.toml; then
+  echo "Error: Failed to stamp version into Cargo.toml" >&2
+  mv Cargo.toml.bak Cargo.toml
+  exit 1
+fi
 bash build.sh
 mv Cargo.toml.bak Cargo.toml
 

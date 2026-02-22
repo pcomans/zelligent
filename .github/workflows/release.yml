@@ -29,6 +29,7 @@ jobs:
         run: |
           VERSION=$(cat ../VERSION)
           sed -i.bak "s/version = \"0.0.0-dev\"/version = \"$VERSION\"/" Cargo.toml
+          grep -q "version = \"$VERSION\"" Cargo.toml || { echo "Failed to stamp Cargo.toml"; exit 1; }
           cargo build --release
         working-directory: plugin
 
@@ -37,6 +38,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p release-staging
           sed "s/__COMMIT_SHA__/$VERSION/" zelligent.sh > release-staging/zelligent.sh
+          chmod +x release-staging/zelligent.sh
           cp plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm release-staging/
           cp README.md release-staging/
           tar -czf "zelligent-${VERSION}.tar.gz" -C release-staging .

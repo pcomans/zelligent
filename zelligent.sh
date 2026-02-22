@@ -71,12 +71,12 @@ if [ "$1" = "doctor" ]; then
   if grep -qF 'zelligent-plugin.wasm' "$CONFIG"; then
     echo "  keybinding: ok"
   else
-    cat >> "$CONFIG" <<'KDL'
+    cat >> "$CONFIG" <<KDL
 
 keybinds {
     shared_except "locked" {
         bind "Ctrl y" {
-            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zelligent-plugin.wasm" {
+            LaunchOrFocusPlugin "file:$PLUGIN_DEST" {
                 floating true
                 move_to_focused_tab true
                 agent_cmd "claude"
@@ -234,6 +234,12 @@ if [ "$1" = "spawn" ]; then
 else
   echo "Unknown command: $1"
   usage
+  exit 1
+fi
+
+# Check zellij is available before creating any worktrees
+if ! command -v zellij &>/dev/null; then
+  echo "Error: zellij not found. Run 'zelligent doctor' to set up." >&2
   exit 1
 fi
 
