@@ -53,14 +53,18 @@ if [ "$1" = "doctor" ]; then
 
   if [ ! -f "$PLUGIN_SRC" ]; then
     echo "  plugin: source not found at $PLUGIN_SRC"
-    echo "          If installed from source, run: cd plugin && bash build.sh"
+    echo "          If installed from source, run: bash dev-install.sh"
     ERRORS=1
   elif [ -f "$PLUGIN_DEST" ] && cmp -s "$PLUGIN_SRC" "$PLUGIN_DEST"; then
     echo "  plugin: ok"
   else
     mkdir -p "$(dirname "$PLUGIN_DEST")"
-    cp "$PLUGIN_SRC" "$PLUGIN_DEST"
-    echo "  plugin: installed to $PLUGIN_DEST"
+    if cp "$PLUGIN_SRC" "$PLUGIN_DEST"; then
+      echo "  plugin: installed to $PLUGIN_DEST"
+    else
+      echo "  plugin: failed to install to $PLUGIN_DEST"
+      ERRORS=1
+    fi
   fi
 
   # 3. Patch Zellij config
