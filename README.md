@@ -128,7 +128,7 @@ A WASM plugin that provides an interactive UI for managing worktrees, launched v
 
 ### Building
 
-Requires Rust with the `wasm32-wasip1` target:
+Requires Rust (via [rustup](https://rustup.rs)) with the `wasm32-wasip1` target:
 
 ```bash
 rustup target add wasm32-wasip1
@@ -136,6 +136,11 @@ cd plugin && bash build.sh
 ```
 
 This compiles the plugin and copies it to `~/.config/zellij/plugins/`.
+
+> **Note:** If you also have Rust installed via Homebrew, its `cargo` may take precedence and fail with "can't find crate for core". Fix by ensuring rustup's toolchain is first on PATH:
+> ```bash
+> PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash build.sh
+> ```
 
 ### Keybinding
 

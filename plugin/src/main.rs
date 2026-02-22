@@ -28,7 +28,6 @@ impl Default for Mode {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Worktree {
-    pub path: String,
     pub branch: String,
 }
 
@@ -63,31 +62,14 @@ pub struct State {
 
 register_plugin!(State);
 
-/// Parse `git worktree list --porcelain` output, returning only worktrees managed by spawn-agent.
-/// `spawn_suffix` is `/.spawn-agent/<repo_name>/` — matched anywhere in the path to avoid
-/// depending on $HOME which isn't available in the WASM sandbox.
-pub fn parse_worktrees(output: &str, spawn_suffix: &str) -> Vec<Worktree> {
-    let mut worktrees = Vec::new();
-    let mut current_path = String::new();
-
-    for line in output.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            current_path = path.to_string();
-        } else if let Some(branch_ref) = line.strip_prefix("branch ") {
-            if current_path.contains(spawn_suffix) {
-                let branch = branch_ref
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(branch_ref)
-                    .to_string();
-                worktrees.push(Worktree {
-                    path: current_path.clone(),
-                    branch,
-                });
-            }
-        }
-    }
-
-    worktrees
+/// Parse `spawn-agent list-worktrees` output (one branch per line).
+pub fn parse_worktrees(output: &str) -> Vec<Worktree> {
+    output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .map(|branch| Worktree { branch })
+        .collect()
 }
 
 /// Parse `git branch --format=%(refname:short)` output into a list of branch names.
@@ -115,17 +97,15 @@ impl State {
     }
 
     fn fire_git_toplevel(&self) {
-        // Use --git-common-dir to get the main repo's .git dir even from a worktree.
-        // This ensures repo_name is always the main repo, not a worktree subdirectory.
         run_command(
-            &["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            &[&self.spawn_agent_path, "show-repo"],
             Self::ctx(CMD_GIT_TOPLEVEL),
         );
     }
 
     fn fire_list_worktrees(&self) {
         run_command_with_env_variables_and_cwd(
-            &["git", "worktree", "list", "--porcelain"],
+            &[&self.spawn_agent_path, "list-worktrees"],
             BTreeMap::new(),
             PathBuf::from(&self.repo_root),
             Self::ctx(CMD_LIST_WORKTREES),
@@ -134,7 +114,7 @@ impl State {
 
     fn fire_git_branches(&self) {
         run_command_with_env_variables_and_cwd(
-            &["git", "branch", "--format=%(refname:short)"],
+            &[&self.spawn_agent_path, "list-branches"],
             BTreeMap::new(),
             PathBuf::from(&self.repo_root),
             Self::ctx(CMD_GIT_BRANCHES),
@@ -205,23 +185,24 @@ impl State {
             self.status_is_error = true;
             return Action::None;
         }
-        // --git-common-dir returns e.g. "/path/to/repo/.git" — strip the /.git suffix
-        let git_dir = String::from_utf8_lossy(stdout).trim().to_string();
-        let root = git_dir
-            .strip_suffix("/.git")
-            .unwrap_or(&git_dir)
-            .to_string();
-        self.repo_name = root
-            .rsplit('/')
-            .next()
-            .unwrap_or("unknown")
-            .to_string();
-        self.repo_root = root;
+        let output = String::from_utf8_lossy(stdout);
+        for line in output.lines() {
+            if let Some(val) = line.strip_prefix("repo_root=") {
+                self.repo_root = val.to_string();
+            } else if let Some(val) = line.strip_prefix("repo_name=") {
+                self.repo_name = val.to_string();
+            }
+        }
+        if self.repo_root.is_empty() || self.repo_name.is_empty() {
+            self.status_message = "Failed to parse repo info".to_string();
+            self.status_is_error = true;
+            return Action::None;
+        }
         self.mode = Mode::BrowseWorktrees;
         Action::FetchWorktreesAndBranches
     }
 
-    pub fn handle_list_worktrees(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8], spawn_prefix: &str) {
+    pub fn handle_list_worktrees(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
             self.status_message = format!("Failed to list worktrees: {err}");
@@ -229,7 +210,7 @@ impl State {
             return;
         }
         let output = String::from_utf8_lossy(stdout);
-        self.worktrees = parse_worktrees(&output, spawn_prefix);
+        self.worktrees = parse_worktrees(&output);
         if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
             self.selected_index = self.worktrees.len() - 1;
         }
@@ -448,8 +429,7 @@ impl ZellijPlugin for State {
                 match context.get("cmd_type").map(|s| s.as_str()) {
                     Some(CMD_GIT_TOPLEVEL) => self.handle_git_toplevel(exit_code, &stdout, &stderr),
                     Some(CMD_LIST_WORKTREES) => {
-                        let suffix = format!("/.spawn-agent/{}/", self.repo_name);
-                        self.handle_list_worktrees(exit_code, &stdout, &stderr, &suffix);
+                        self.handle_list_worktrees(exit_code, &stdout, &stderr);
                         Action::None
                     }
                     Some(CMD_GIT_BRANCHES) => {
@@ -532,9 +512,9 @@ mod tests {
         let mut s = State::default();
         s.mode = Mode::BrowseWorktrees;
         s.worktrees = vec![
-            Worktree { path: "/wt/feat-a".into(), branch: "feat-a".into() },
-            Worktree { path: "/wt/feat-b".into(), branch: "feat-b".into() },
-            Worktree { path: "/wt/feat-c".into(), branch: "feat-c".into() },
+            Worktree { branch: "feat-a".into() },
+            Worktree { branch: "feat-b".into() },
+            Worktree { branch: "feat-c".into() },
         ];
         s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
         s
@@ -543,52 +523,27 @@ mod tests {
     // --- Parsing tests ---
 
     #[test]
-    fn parse_worktrees_filters_by_suffix() {
-        let output = "\
-worktree /Users/me/code/myrepo
-HEAD abc123
-branch refs/heads/main
-
-worktree /Users/me/.spawn-agent/myrepo/feature/cool
-HEAD def456
-branch refs/heads/feature/cool
-
-worktree /Users/me/.spawn-agent/myrepo/fix-bug
-HEAD 789abc
-branch refs/heads/fix-bug
-
-worktree /Users/me/.spawn-agent/other-repo/feature/cool
-HEAD 111222
-branch refs/heads/feature/cool
-";
-        let suffix = "/.spawn-agent/myrepo/";
-        let wts = parse_worktrees(output, suffix);
-
+    fn parse_worktrees_basic() {
+        let output = "feature/cool\nfix-bug\n";
+        let wts = parse_worktrees(output);
         assert_eq!(wts.len(), 2);
         assert_eq!(wts[0].branch, "feature/cool");
-        assert_eq!(wts[0].path, "/Users/me/.spawn-agent/myrepo/feature/cool");
         assert_eq!(wts[1].branch, "fix-bug");
     }
 
     #[test]
     fn parse_worktrees_empty_output() {
-        let wts = parse_worktrees("", "/.spawn-agent/x/");
+        let wts = parse_worktrees("");
         assert!(wts.is_empty());
     }
 
     #[test]
-    fn parse_worktrees_bare_entry_skipped() {
-        let output = "\
-worktree /Users/me/code/myrepo
-HEAD abc123
-branch refs/heads/main
-
-worktree /Users/me/.spawn-agent/myrepo/dev
-HEAD def456
-bare
-";
-        let wts = parse_worktrees(output, "/.spawn-agent/myrepo/");
-        assert!(wts.is_empty());
+    fn parse_worktrees_strips_whitespace() {
+        let output = "  feat-a \n\n  feat-b  \n";
+        let wts = parse_worktrees(output);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].branch, "feat-a");
+        assert_eq!(wts[1].branch, "feat-b");
     }
 
     #[test]
@@ -852,8 +807,7 @@ bare
     #[test]
     fn git_toplevel_sets_repo() {
         let mut s = State::default();
-        // --git-common-dir returns the .git directory
-        let action = s.handle_git_toplevel(Some(0), b"/home/user/myrepo/.git\n", b"");
+        let action = s.handle_git_toplevel(Some(0), b"repo_root=/home/user/myrepo\nrepo_name=myrepo\n", b"");
         assert_eq!(s.repo_root, "/home/user/myrepo");
         assert_eq!(s.repo_name, "myrepo");
         assert_eq!(s.mode, Mode::BrowseWorktrees);
@@ -861,10 +815,10 @@ bare
     }
 
     #[test]
-    fn git_toplevel_from_worktree() {
+    fn git_toplevel_parses_by_key() {
         let mut s = State::default();
-        // Even when launched from a worktree, --git-common-dir points to the main repo
-        let action = s.handle_git_toplevel(Some(0), b"/home/user/myrepo/.git\n", b"");
+        // Order should not matter
+        let action = s.handle_git_toplevel(Some(0), b"repo_name=myrepo\nrepo_root=/home/user/myrepo\n", b"");
         assert_eq!(s.repo_root, "/home/user/myrepo");
         assert_eq!(s.repo_name, "myrepo");
         assert_eq!(action, Action::FetchWorktreesAndBranches);
@@ -877,6 +831,15 @@ bare
         assert!(s.status_is_error);
         assert!(s.status_message.contains("not a git repo"));
         assert_eq!(s.mode, Mode::Loading);
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn git_toplevel_missing_fields() {
+        let mut s = State::default();
+        let action = s.handle_git_toplevel(Some(0), b"repo_root=/foo\n", b"");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Failed to parse repo info"));
         assert_eq!(action, Action::None);
     }
 
@@ -970,17 +933,15 @@ bare
     #[test]
     fn list_worktrees_clamps_selected_index() {
         let mut s = State::default();
-        s.repo_name = "myrepo".into();
         s.selected_index = 5;
-        let output = b"worktree /home/me/.spawn-agent/myrepo/a\nHEAD abc\nbranch refs/heads/a\n";
-        s.handle_list_worktrees(Some(0), output, b"", "/.spawn-agent/myrepo/");
+        s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
         assert_eq!(s.selected_index, 0);
     }
 
     #[test]
     fn list_worktrees_error_sets_status() {
         let mut s = State::default();
-        s.handle_list_worktrees(Some(1), b"", b"fatal: not a git repository", "/.spawn-agent/x/");
+        s.handle_list_worktrees(Some(1), b"", b"fatal: not a git repository");
         assert!(s.status_is_error);
         assert!(s.status_message.contains("Failed to list worktrees"));
         assert!(s.status_message.contains("fatal: not a git repository"));
@@ -990,7 +951,7 @@ bare
     fn list_worktrees_error_preserves_existing_worktrees() {
         let mut s = state_with_worktrees();
         let original_len = s.worktrees.len();
-        s.handle_list_worktrees(Some(1), b"", b"error", "/.spawn-agent/x/");
+        s.handle_list_worktrees(Some(1), b"", b"error");
         assert_eq!(s.worktrees.len(), original_len);
     }
 
