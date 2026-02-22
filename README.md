@@ -45,7 +45,7 @@ Behaviour depends on context:
 
 Each worktree opens as a tab named after the branch (`feature/my-feature` → tab `feature-my-feature`).
 
-Worktrees are stored under `~/.zelligent/<repo-name>/<branch-name>`.
+Worktrees are stored under `~/.zelligent/worktrees/<repo-name>/<branch-name>`.
 
 Each tab opens with the agent command on the left (70%) and lazygit on the right (30%).
 

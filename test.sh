@@ -303,7 +303,7 @@ MOCK
   check "script exits 0 (integration)" "0" "$int_code"
 
   git -C "$REPO_ROOT" worktree remove --force \
-    "$HOME/.zelligent/$REPO_NAME/integration-test-branch" &>/dev/null || true
+    "$HOME/.zelligent/worktrees/$REPO_NAME/integration-test-branch" &>/dev/null || true
   git -C "$REPO_ROOT" branch -D integration-test-branch &>/dev/null || true
   rm -rf "$MOCK_BIN_INT"
 
