@@ -109,6 +109,9 @@ BRANCH_NAME=$1
 AGENT_CMD=${2:-"$SHELL"}
 SESSION_NAME="${BRANCH_NAME//\//-}"
 
+# Escape double quotes for KDL string embedding
+AGENT_CMD_KDL="${AGENT_CMD//\"/\\\"}"
+
 # Detect default base branch
 if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
   BASE_BRANCH="${BASE_REF#refs/remotes/origin/}"
@@ -162,7 +165,9 @@ pane_content() {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane command="$AGENT_CMD" cwd="$WORKTREE_PATH" size="70%"
+        pane command="bash" cwd="$WORKTREE_PATH" size="70%" {
+            args "-c" "exec $AGENT_CMD_KDL"
+        }
         pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
     }
     pane size=1 borderless=true {

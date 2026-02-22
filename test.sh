@@ -80,7 +80,7 @@ git -C "$REPO_ROOT" worktree remove --force \
 git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 
 EXPECTED_CWD="$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch"
-contains "layout contains agent command"  'command="claude"'         "$out"
+contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"
@@ -88,6 +88,32 @@ contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 
 rm -rf "$MOCK_BIN_LAYOUT"
+
+# ── Quoted agent command ─────────────────────────────────────────────────────
+echo "Quoted agent command:"
+
+MOCK_BIN_QUOTE=$(mktemp -d)
+cat > "$MOCK_BIN_QUOTE/zellij" <<'MOCK'
+#!/bin/bash
+echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
+MOCK
+cat > "$MOCK_BIN_QUOTE/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_BIN_QUOTE/zellij" "$MOCK_BIN_QUOTE/lazygit"
+
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_QUOTE:$PATH" \
+  "$SCRIPT" test-quoted-branch 'claude -p "Sag Hallo auf Deutsch"' 2>&1)
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-quoted-branch" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D test-quoted-branch &>/dev/null || true
+
+contains "quoted cmd: quotes are escaped" 'exec claude -p \"Sag Hallo auf Deutsch\"' "$out"
+
+rm -rf "$MOCK_BIN_QUOTE"
 
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
