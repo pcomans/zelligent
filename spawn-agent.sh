@@ -109,8 +109,9 @@ BRANCH_NAME=$1
 AGENT_CMD=${2:-"$SHELL"}
 SESSION_NAME="${BRANCH_NAME//\//-}"
 
-# Escape double quotes for KDL string embedding
-AGENT_CMD_KDL="${AGENT_CMD//\"/\\\"}"
+# Escape backslashes and double quotes for KDL string embedding
+AGENT_CMD_KDL="${AGENT_CMD//\\/\\\\}"
+AGENT_CMD_KDL="${AGENT_CMD_KDL//\"/\\\"}"
 
 # Detect default base branch
 if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
