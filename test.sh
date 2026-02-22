@@ -104,10 +104,17 @@ excludes "existing worktree: no setup preamble"   'setup.sh'         "$out_exist
 
 # Test: new worktree WITHOUT setup.sh should use direct command
 SETUP_SH="$REPO_ROOT/.spawn-agent/setup.sh"
-mv "$SETUP_SH" "$SETUP_SH.bak"
+SETUP_SH_BAK="$SETUP_SH.bak"
+restore_setup() {
+  if [ -e "$SETUP_SH_BAK" ]; then
+    mv "$SETUP_SH_BAK" "$SETUP_SH"
+  fi
+}
+trap restore_setup EXIT INT TERM
+mv "$SETUP_SH" "$SETUP_SH_BAK"
 out_no_setup=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" test-no-setup-branch claude 2>&1)
-mv "$SETUP_SH.bak" "$SETUP_SH"
+restore_setup
 git -C "$REPO_ROOT" worktree remove --force \
   "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-no-setup-branch" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D test-no-setup-branch &>/dev/null || true

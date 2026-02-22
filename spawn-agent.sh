@@ -160,7 +160,7 @@ trap 'rm -f "$LAYOUT"' EXIT
 SETUP_SCRIPT="$REPO_ROOT/.spawn-agent/setup.sh"
 if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"bash '$SETUP_SCRIPT' '$REPO_ROOT' '$WORKTREE_PATH' && exec $AGENT_CMD_KDL || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; }\"
+            args \"-c\" \"bash \\\"\\\$1\\\" \\\"\\\$2\\\" \\\"\\\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
         }"
 else
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
