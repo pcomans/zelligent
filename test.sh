@@ -6,7 +6,8 @@
 PASS=0
 FAIL=0
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/spawn-agent.sh"
-REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
+REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
 
 pass() { echo "  ✅ $1"; ((PASS++)); }

@@ -13,23 +13,20 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-# Require git repo
-if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+# Require git repo — resolve to the main repo root even when run from a worktree.
+if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
   echo "Error: not inside a git repository." >&2
   exit 1
 fi
 
+REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME=$(basename "$REPO_ROOT")
 
 # --- Query subcommands (no zellij/lazygit needed) ---
 
 if [ "$1" = "show-repo" ]; then
-  # Use --git-common-dir to resolve the main repo root even from a worktree.
-  GIT_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
-  MAIN_ROOT="${GIT_DIR%/.git}"
-  MAIN_NAME=$(basename "$MAIN_ROOT")
-  echo "repo_root=$MAIN_ROOT"
-  echo "repo_name=$MAIN_NAME"
+  echo "repo_root=$REPO_ROOT"
+  echo "repo_name=$REPO_NAME"
   exit 0
 fi
 
