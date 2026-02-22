@@ -89,6 +89,33 @@ excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 
 rm -rf "$MOCK_BIN_LAYOUT"
 
+# ── Quoted agent command ─────────────────────────────────────────────────────
+echo "Quoted agent command:"
+
+MOCK_BIN_QUOTE=$(mktemp -d)
+cat > "$MOCK_BIN_QUOTE/zellij" <<'MOCK'
+#!/bin/bash
+echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
+MOCK
+cat > "$MOCK_BIN_QUOTE/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_BIN_QUOTE/zellij" "$MOCK_BIN_QUOTE/lazygit"
+
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_QUOTE:$PATH" \
+  "$SCRIPT" test-quoted-branch 'claude -p "Sag Hallo auf Deutsch"' 2>&1)
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-quoted-branch" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D test-quoted-branch &>/dev/null || true
+
+contains "quoted cmd: quotes are escaped" 'claude -p \"Sag Hallo auf Deutsch\"' "$out"
+excludes "quoted cmd: no unescaped inner quotes" 'command="claude -p "Sag' "$out"
+
+rm -rf "$MOCK_BIN_QUOTE"
+
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
 

@@ -106,6 +106,7 @@ fi
 
 BRANCH_NAME=$1
 AGENT_CMD=${2:-"$SHELL"}
+AGENT_CMD_KDL="${AGENT_CMD//\"/\\\"}"
 SESSION_NAME="${BRANCH_NAME//\//-}"
 
 # Detect default base branch
@@ -161,7 +162,7 @@ pane_content() {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane command="$AGENT_CMD" cwd="$WORKTREE_PATH" size="70%"
+        pane command="$AGENT_CMD_KDL" cwd="$WORKTREE_PATH" size="70%"
         pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
     }
     pane size=1 borderless=true {
@@ -172,10 +173,10 @@ EOF
 
 if [ -n "$LAYOUT_TEMPLATE" ] && [ -n "$ZELLIJ" ]; then
   # Inside Zellij with custom template: substitute vars, use as-is for new-tab
-  sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" > "$LAYOUT"
+  sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD_KDL|g" "$LAYOUT_TEMPLATE" > "$LAYOUT"
 elif [ -n "$LAYOUT_TEMPLATE" ]; then
   # Outside Zellij with custom template: strip outer layout{} and wrap in a named tab
-  INNER=$(sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" | sed '1d;$d')
+  INNER=$(sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD_KDL|g" "$LAYOUT_TEMPLATE" | sed '1d;$d')
   { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; echo "$INNER"; echo "    }"; echo "}"; } > "$LAYOUT"
 elif [ -n "$ZELLIJ" ]; then
   # Tab layout: no tab wrapper (new-tab provides the tab context)
