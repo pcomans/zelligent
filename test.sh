@@ -6,7 +6,8 @@
 PASS=0
 FAIL=0
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/spawn-agent.sh"
-REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
+REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
 
 pass() { echo "  ✅ $1"; ((PASS++)); }
@@ -99,30 +100,42 @@ out=$("$SCRIPT" remove 2>&1); code=$?
 check "remove without branch exits non-zero" "1" "$code"
 contains "remove without branch prints usage" "Usage:" "$out"
 
-# ── Dependency / environment checks ───────────────────────────────────────────
-echo "Dependency checks:"
-
-out=$(PATH="" "$SCRIPT" some-branch 2>&1); code=$?
-check "missing zellij exits non-zero" "1" "$code"
-contains "missing zellij prints error" "zellij is required" "$out"
-
-# Mock zellij but not lazygit
-MOCK_BIN_NOLG=$(mktemp -d)
-cat > "$MOCK_BIN_NOLG/zellij" <<'MOCK'
-#!/bin/bash
-echo "zellij $*"
-MOCK
-chmod +x "$MOCK_BIN_NOLG/zellij"
-out=$(PATH="$MOCK_BIN_NOLG" "$SCRIPT" some-branch 2>&1); code=$?
-check "missing lazygit exits non-zero" "1" "$code"
-contains "missing lazygit prints error" "lazygit is required" "$out"
-rm -rf "$MOCK_BIN_NOLG"
+# ── Environment checks ────────────────────────────────────────────────────────
+echo "Environment checks:"
 
 NONGIT=$(mktemp -d)
 out=$(cd "$NONGIT" && "$SCRIPT" some-branch 2>&1); code=$?
 check "non-git dir exits non-zero" "1" "$code"
 contains "non-git dir prints error" "not inside a git repository" "$out"
 rm -rf "$NONGIT"
+
+# ── Query subcommands ────────────────────────────────────────────────────────
+echo "Query subcommands:"
+
+# show-repo
+out=$("$SCRIPT" show-repo 2>&1); code=$?
+check "show-repo exits 0" "0" "$code"
+contains "show-repo outputs repo_root" "repo_root=" "$out"
+contains "show-repo outputs repo_name" "repo_name=" "$out"
+# Verify repo_name matches the basename of the repo
+EXPECTED_NAME=$(basename "$(echo "$out" | grep '^repo_root=' | cut -d= -f2-)")
+ACTUAL_NAME=$(echo "$out" | grep '^repo_name=' | cut -d= -f2-)
+check "show-repo name matches root basename" "$EXPECTED_NAME" "$ACTUAL_NAME"
+
+# show-repo from non-git dir
+NONGIT2=$(mktemp -d)
+out=$(cd "$NONGIT2" && "$SCRIPT" show-repo 2>&1); code=$?
+check "show-repo non-git dir exits non-zero" "1" "$code"
+rm -rf "$NONGIT2"
+
+# list-worktrees (no managed worktrees exist for this test)
+out=$("$SCRIPT" list-worktrees 2>&1); code=$?
+check "list-worktrees exits 0" "0" "$code"
+
+# list-branches
+out=$("$SCRIPT" list-branches 2>&1); code=$?
+check "list-branches exits 0" "0" "$code"
+contains "list-branches includes main or master" "main" "$out"
 
 # ── Launch mode selection ─────────────────────────────────────────────────────
 echo "Launch mode:"

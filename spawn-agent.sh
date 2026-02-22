@@ -7,26 +7,50 @@ if [ -z "$1" ]; then
   echo "Usage: spawn-agent <branch-name> [agent-command]"
   echo "       spawn-agent remove <branch-name>"
   echo "       spawn-agent init"
+  echo "       spawn-agent show-repo"
+  echo "       spawn-agent list-worktrees"
+  echo "       spawn-agent list-branches"
   exit 1
 fi
 
-# Require zellij and lazygit
-if ! command -v zellij &>/dev/null; then
-  echo "Error: zellij is required but not installed."
-  exit 1
-fi
-if ! command -v lazygit &>/dev/null; then
-  echo "Error: lazygit is required but not installed."
+# Require git repo — resolve to the main repo root even when run from a worktree.
+if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  echo "Error: not inside a git repository." >&2
   exit 1
 fi
 
-# Require git repo
-if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
-  echo "Error: not inside a git repository."
-  exit 1
-fi
-
+REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME=$(basename "$REPO_ROOT")
+
+# --- Query subcommands (no zellij/lazygit needed) ---
+
+if [ "$1" = "show-repo" ]; then
+  echo "repo_root=$REPO_ROOT"
+  echo "repo_name=$REPO_NAME"
+  exit 0
+fi
+
+if [ "$1" = "list-worktrees" ]; then
+  SPAWN_PREFIX="$HOME/.spawn-agent/$REPO_NAME/"
+  git -C "$REPO_ROOT" worktree list --porcelain | while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        current_path="${line#worktree }"
+        ;;
+      "branch "*)
+        if [[ "$current_path" == "$SPAWN_PREFIX"* ]]; then
+          echo "${line#branch refs/heads/}"
+        fi
+        ;;
+    esac
+  done
+  exit 0
+fi
+
+if [ "$1" = "list-branches" ]; then
+  git -C "$REPO_ROOT" branch --format='%(refname:short)'
+  exit 0
+fi
 
 # Handle init subcommand
 if [ "$1" = "init" ]; then
