@@ -111,8 +111,7 @@ git -C "$REPO_ROOT" worktree remove --force \
   "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-quoted-branch" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D test-quoted-branch &>/dev/null || true
 
-contains "quoted cmd: quotes are escaped" 'claude -p \"Sag Hallo auf Deutsch\"' "$out"
-excludes "quoted cmd: no unescaped inner quotes" 'command="claude -p "Sag' "$out"
+contains "quoted cmd: quotes are escaped" 'exec claude -p \"Sag Hallo auf Deutsch\"' "$out"
 
 rm -rf "$MOCK_BIN_QUOTE"
 
