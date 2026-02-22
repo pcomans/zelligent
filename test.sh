@@ -76,10 +76,10 @@ out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" test-layout-branch claude 2>&1)
 # Cleanup worktree/branch created by the script
 git -C "$REPO_ROOT" worktree remove --force \
-  "$HOME/.spawn-agent/$REPO_NAME/test-layout-branch" &>/dev/null || true
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 
-EXPECTED_CWD="$HOME/.spawn-agent/$REPO_NAME/test-layout-branch"
+EXPECTED_CWD="$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch"
 contains "layout contains agent command"  'command="claude"'         "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
