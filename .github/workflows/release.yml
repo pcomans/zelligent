@@ -13,13 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust wasm32-wasip1 target
-        run: rustup target add wasm32-wasip1
-
-      - name: Build WASM plugin
-        run: cargo build --release
-        working-directory: plugin
-
       - name: Validate tag matches VERSION file
         run: |
           FILE_VERSION="v$(cat VERSION)"
@@ -28,6 +21,16 @@ jobs:
             echo "Error: VERSION file ($FILE_VERSION) does not match tag ($TAG_VERSION)" >&2
             exit 1
           fi
+
+      - name: Install Rust wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+
+      - name: Stamp and build WASM plugin
+        run: |
+          VERSION=$(cat ../VERSION)
+          sed -i.bak "s/version = \"0.0.0-dev\"/version = \"$VERSION\"/" Cargo.toml
+          cargo build --release
+        working-directory: plugin
 
       - name: Stage release artifacts
         run: |

@@ -23,7 +23,9 @@ echo "Installed zelligent ($STAMP) to $INSTALL_DIR/zelligent"
 
 # Build and install Zellij plugin
 cd plugin
+sed -i.bak "s/version = \"0.0.0-dev\"/version = \"$VERSION\"/" Cargo.toml
 bash build.sh
+mv Cargo.toml.bak Cargo.toml
 
 # Also install plugin to share dir for `zelligent doctor` compatibility
 SHARE_DIR="$HOME/.local/share/zelligent"
