@@ -86,6 +86,15 @@ The default layout (`.spawn-agent/layout.kdl` override supported) must:
 - The "less than 0 characters" error from Zellij is a display bug masking a name validation failure.
 - Sanitize branch names by replacing `/` with `-`.
 
+### Tab index vs position (plugin API)
+- Each tab has a stable **index** (assigned at creation, never changes) and a **position** (visual slot in the tab bar, shifts when earlier tabs are closed).
+- `TabInfo.position` from `TabUpdate` events gives the **position**, not the index.
+- `close_tab_with_index` and `rename_tab` expect the internal **index**, not the position. Passing a position will target the wrong tab whenever a tab has been closed earlier in the session. ([zellij-org/zellij#3535](https://github.com/zellij-org/zellij/issues/3535))
+- **Workaround:** Use `go_to_tab_name(name)` + `close_focused_tab()` instead of `close_tab_with_index`. Name-based lookup is immune to index/position mismatch.
+- When closing a tab this way, save the active tab name first and call `go_to_tab_name` again afterward to return focus.
+- Always guard with `self.tabs.iter().any(|t| t.name == tab_name)` before proceeding — if the tab doesn't exist, `go_to_tab_name` is a no-op and `close_focused_tab` would close whatever tab is currently focused.
+- There is no plugin API to obtain a tab's internal index. The only reliable identifier is the tab name.
+
 ### $ZELLIJ environment variable
 - Set by Zellij when running inside a session. Use `[ -n "$ZELLIJ" ]` to detect this.
 - Unset it (`ZELLIJ=""`) when testing the outside-Zellij code path.

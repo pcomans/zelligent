@@ -80,7 +80,7 @@ git -C "$REPO_ROOT" worktree remove --force \
 git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 
 EXPECTED_CWD="$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch"
-contains "layout contains agent command"  'claude'                    "$out"
+contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"
@@ -99,7 +99,7 @@ git -C "$REPO_ROOT" worktree remove --force \
   "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 
-contains "existing worktree: uses direct command" 'command="claude"' "$out_existing"
+contains "existing worktree: uses direct command" 'exec claude' "$out_existing"
 excludes "existing worktree: no setup preamble"   'setup.sh'         "$out_existing"
 
 # Test: new worktree WITHOUT setup.sh should use direct command
@@ -112,7 +112,7 @@ git -C "$REPO_ROOT" worktree remove --force \
   "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-no-setup-branch" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D test-no-setup-branch &>/dev/null || true
 
-contains "no setup.sh: uses direct command"  'command="claude"' "$out_no_setup"
+contains "no setup.sh: uses direct command"  'exec claude' "$out_no_setup"
 excludes "no setup.sh: no setup preamble"    'setup.sh'         "$out_no_setup"
 
 # Test: multi-word AGENT_CMD with arguments
@@ -122,11 +122,37 @@ git -C "$REPO_ROOT" worktree remove --force \
   "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-multi-cmd-branch" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D test-multi-cmd-branch &>/dev/null || true
 
-contains "multi-word cmd: contains full command" 'claude "pls fix the bug" --model claude-sonnet-4-6' "$out_multi"
+contains "multi-word cmd: contains full command" 'claude \"pls fix the bug\" --model claude-sonnet-4-6' "$out_multi"
 contains "multi-word cmd: contains exec"         'exec claude'   "$out_multi"
 contains "multi-word cmd: contains model flag"   'claude-sonnet-4-6' "$out_multi"
 
 rm -rf "$MOCK_BIN_LAYOUT"
+
+# ── Quoted agent command ─────────────────────────────────────────────────────
+echo "Quoted agent command:"
+
+MOCK_BIN_QUOTE=$(mktemp -d)
+cat > "$MOCK_BIN_QUOTE/zellij" <<'MOCK'
+#!/bin/bash
+echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
+MOCK
+cat > "$MOCK_BIN_QUOTE/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_BIN_QUOTE/zellij" "$MOCK_BIN_QUOTE/lazygit"
+
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_QUOTE:$PATH" \
+  "$SCRIPT" test-quoted-branch 'claude -p "Sag Hallo auf Deutsch"' 2>&1)
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-quoted-branch" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D test-quoted-branch &>/dev/null || true
+
+contains "quoted cmd: quotes are escaped" 'exec claude -p \"Sag Hallo auf Deutsch\"' "$out"
+
+rm -rf "$MOCK_BIN_QUOTE"
 
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"

@@ -245,9 +245,19 @@ impl State {
         if exit_code == Some(0) {
             self.status_message = format!("Removed '{branch}'");
             self.status_is_error = false;
+            // Close the worktree's tab if it exists. We use go_to_tab_name
+            // instead of close_tab_with_index because the latter expects an
+            // internal tab index, but TabInfo only exposes position (which
+            // diverges from index when tabs are closed).
             #[cfg(target_arch = "wasm32")]
-            if let Some(idx) = self.tab_index_for_branch(&branch) {
-                close_tab_with_index(idx);
+            if self.has_tab_for_branch(&branch) {
+                let tab_name = Self::tab_name_for_branch(&branch);
+                let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
+                go_to_tab_name(&tab_name);
+                close_focused_tab();
+                if let Some(name) = return_tab {
+                    go_to_tab_name(&name);
+                }
             }
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
@@ -258,11 +268,16 @@ impl State {
         Action::Refresh
     }
 
-    /// Find the Zellij tab position associated with a branch name.
+    /// Convert a branch name to the corresponding Zellij tab name.
     /// Tab names use the branch with `/` replaced by `-` (matching spawn-agent.sh).
-    pub fn tab_index_for_branch(&self, branch: &str) -> Option<usize> {
-        let tab_name = branch.replace('/', "-");
-        self.tabs.iter().find(|t| t.name == tab_name).map(|t| t.position)
+    pub fn tab_name_for_branch(branch: &str) -> String {
+        branch.replace('/', "-")
+    }
+
+    /// Check whether a tab with the given branch's name exists.
+    pub fn has_tab_for_branch(&self, branch: &str) -> bool {
+        let tab_name = Self::tab_name_for_branch(branch);
+        self.tabs.iter().any(|t| t.name == tab_name)
     }
 
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
@@ -890,11 +905,11 @@ mod tests {
         assert_eq!(action, Action::Refresh);
     }
 
-    fn make_tab(name: &str, position: usize) -> TabInfo {
+    fn make_tab(name: &str, active: bool) -> TabInfo {
         TabInfo {
-            position,
+            position: 0,
             name: name.to_string(),
-            active: false,
+            active,
             panes_to_hide: 0,
             is_fullscreen_active: false,
             is_sync_panes_active: false,
@@ -912,22 +927,31 @@ mod tests {
     }
 
     #[test]
-    fn tab_index_for_branch_found() {
-        let mut s = State::default();
-        s.tabs = vec![
-            make_tab("main-tab", 0),
-            make_tab("feature-cool", 1),
-            make_tab("fix-bug", 2),
-        ];
-        assert_eq!(s.tab_index_for_branch("feature/cool"), Some(1));
-        assert_eq!(s.tab_index_for_branch("fix-bug"), Some(2));
+    fn tab_name_for_branch_replaces_slashes() {
+        assert_eq!(State::tab_name_for_branch("feature/cool"), "feature-cool");
+        assert_eq!(State::tab_name_for_branch("a/b/c"), "a-b-c");
+        assert_eq!(State::tab_name_for_branch("fix-bug"), "fix-bug");
     }
 
     #[test]
-    fn tab_index_for_branch_not_found() {
+    fn has_tab_for_branch_found() {
         let mut s = State::default();
-        s.tabs = vec![make_tab("main-tab", 0)];
-        assert_eq!(s.tab_index_for_branch("nonexistent"), None);
+        s.tabs = vec![make_tab("feature-cool", false), make_tab("fix-bug", false)];
+        assert!(s.has_tab_for_branch("feature/cool"));
+        assert!(s.has_tab_for_branch("fix-bug"));
+    }
+
+    #[test]
+    fn has_tab_for_branch_not_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("main", false)];
+        assert!(!s.has_tab_for_branch("nonexistent"));
+    }
+
+    #[test]
+    fn has_tab_for_branch_empty_tabs() {
+        let s = State::default();
+        assert!(!s.has_tab_for_branch("anything"));
     }
 
     #[test]

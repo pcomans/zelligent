@@ -1,4 +1,5 @@
 #!/bin/bash
+# commit: __COMMIT_SHA__
 
 # Exit immediately if a command exits with a non-zero status
 set -e
@@ -108,6 +109,9 @@ BRANCH_NAME=$1
 AGENT_CMD=${2:-"$SHELL"}
 SESSION_NAME="${BRANCH_NAME//\//-}"
 
+# Escape double quotes for KDL string embedding
+AGENT_CMD_KDL="${AGENT_CMD//\"/\\\"}"
+
 # Detect default base branch
 if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
   BASE_BRANCH="${BASE_REF#refs/remotes/origin/}"
@@ -155,10 +159,12 @@ trap 'rm -f "$LAYOUT"' EXIT
 SETUP_SCRIPT="$REPO_ROOT/.spawn-agent/setup.sh"
 if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"bash '$SETUP_SCRIPT' '$REPO_ROOT' '$WORKTREE_PATH' && exec $AGENT_CMD || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; }\"
+            args \"-c\" \"bash '$SETUP_SCRIPT' '$REPO_ROOT' '$WORKTREE_PATH' && exec $AGENT_CMD_KDL || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; }\"
         }"
 else
-  AGENT_PANE="pane command=\"$AGENT_CMD\" cwd=\"$WORKTREE_PATH\" size=\"70%\""
+  AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
+            args \"-c\" \"exec $AGENT_CMD_KDL\"
+        }"
 fi
 
 # Pane content shared by both layouts
