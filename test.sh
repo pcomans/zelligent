@@ -88,6 +88,7 @@ contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 contains "new worktree: setup.sh runs as preamble" 'setup.sh'        "$out"
 contains "new worktree: agent starts via exec"     'exec claude'     "$out"
+excludes "new worktree: no invalid KDL \\$ escape" '"\$'             "$out"
 
 # Test: existing worktree should NOT include setup.sh preamble
 # Re-create the worktree so it already exists, then run the script again
