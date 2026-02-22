@@ -11,4 +11,4 @@ Run the dev install script, using the PATH workaround for Homebrew Rust:
 PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
 ```
 
-After installing, verify `~/.config/zellij/config.kdl` references `zelligent-plugin.wasm` (not the old `spawn-agent-plugin.wasm`). If it doesn't, update it.
+After installing, verify `~/.config/zellij/config.kdl` references `zelligent-plugin.wasm`.
