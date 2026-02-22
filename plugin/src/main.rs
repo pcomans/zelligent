@@ -248,11 +248,16 @@ impl State {
             #[cfg(target_arch = "wasm32")]
             {
                 let tab_name = branch.replace('/', "-");
-                let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
-                go_to_tab_name(&tab_name);
-                close_focused_tab();
-                if let Some(name) = return_tab {
-                    go_to_tab_name(&name);
+                // Guard: only proceed if the tab exists. Without this,
+                // go_to_tab_name would be a no-op and close_focused_tab
+                // would close whatever tab happens to be focused.
+                if self.tabs.iter().any(|t| t.name == tab_name) {
+                    let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
+                    go_to_tab_name(&tab_name);
+                    close_focused_tab();
+                    if let Some(name) = return_tab {
+                        go_to_tab_name(&name);
+                    }
                 }
             }
         } else {
