@@ -80,12 +80,51 @@ git -C "$REPO_ROOT" worktree remove --force \
 git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 
 EXPECTED_CWD="$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch"
-contains "layout contains agent command"  'command="claude"'         "$out"
+contains "layout contains agent command"  'claude'                    "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
+contains "new worktree: setup.sh runs as preamble" 'setup.sh'        "$out"
+contains "new worktree: agent starts via exec"     'exec claude'     "$out"
+
+# Test: existing worktree should NOT include setup.sh preamble
+# Re-create the worktree so it already exists, then run the script again
+git -C "$REPO_ROOT" worktree add -b test-layout-branch \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch" HEAD &>/dev/null
+out_existing=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
+  "$SCRIPT" test-layout-branch claude 2>&1)
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-layout-branch" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
+
+contains "existing worktree: uses direct command" 'command="claude"' "$out_existing"
+excludes "existing worktree: no setup preamble"   'setup.sh'         "$out_existing"
+
+# Test: new worktree WITHOUT setup.sh should use direct command
+SETUP_SH="$REPO_ROOT/.spawn-agent/setup.sh"
+mv "$SETUP_SH" "$SETUP_SH.bak"
+out_no_setup=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
+  "$SCRIPT" test-no-setup-branch claude 2>&1)
+mv "$SETUP_SH.bak" "$SETUP_SH"
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-no-setup-branch" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D test-no-setup-branch &>/dev/null || true
+
+contains "no setup.sh: uses direct command"  'command="claude"' "$out_no_setup"
+excludes "no setup.sh: no setup preamble"    'setup.sh'         "$out_no_setup"
+
+# Test: multi-word AGENT_CMD with arguments
+out_multi=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
+  "$SCRIPT" test-multi-cmd-branch 'claude "pls fix the bug" --model claude-sonnet-4-6' 2>&1)
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.spawn-agent/worktrees/$REPO_NAME/test-multi-cmd-branch" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D test-multi-cmd-branch &>/dev/null || true
+
+contains "multi-word cmd: contains full command" 'claude "pls fix the bug" --model claude-sonnet-4-6' "$out_multi"
+contains "multi-word cmd: contains exec"         'exec claude'   "$out_multi"
+contains "multi-word cmd: contains model flag"   'claude-sonnet-4-6' "$out_multi"
 
 rm -rf "$MOCK_BIN_LAYOUT"
 
@@ -157,7 +196,7 @@ chmod +x "$MOCK_BIN/zellij" "$MOCK_BIN/lazygit"
 # Shared cleanup for worktrees created during launch-mode tests
 cleanup_test_branch() {
   git -C "$REPO_ROOT" worktree remove --force \
-    "$HOME/.spawn-agent/$REPO_NAME/some-branch" &>/dev/null || true
+    "$HOME/.spawn-agent/worktrees/$REPO_NAME/some-branch" &>/dev/null || true
   git -C "$REPO_ROOT" branch -D some-branch &>/dev/null || true
 }
 

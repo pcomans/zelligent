@@ -118,10 +118,13 @@ fi
 # Define the new centralized worktree path
 WORKTREE_PATH="$WORKTREES_DIR/$BRANCH_NAME"
 
+NEW_WORKTREE=false
+
 # Check if the worktree directory already exists
 if [ -d "$WORKTREE_PATH" ]; then
   echo "⚠️  Worktree already exists, opening new tab..."
 else
+  NEW_WORKTREE=true
   mkdir -p "$WORKTREES_DIR"
   echo "🚀 Creating workspace for '$BRANCH_NAME' at $WORKTREE_PATH..."
 
@@ -134,12 +137,6 @@ else
     git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$BASE_BRANCH"
   fi
 
-  # Run per-repo setup if present
-  if [ -f "$REPO_ROOT/.spawn-agent/setup.sh" ]; then
-    echo "⚙️  Running .spawn-agent/setup.sh..."
-    bash "$REPO_ROOT/.spawn-agent/setup.sh" "$REPO_ROOT" "$WORKTREE_PATH"
-    echo "✅ Setup complete"
-  fi
 fi
 
 # Use repo-level layout if present, otherwise use built-in default
@@ -154,6 +151,16 @@ mkdir -p "$HOME/.spawn-agent/tmp"
 LAYOUT=$(mktemp "$HOME/.spawn-agent/tmp/layout-XXXXXX")
 trap 'rm -f "$LAYOUT"' EXIT
 
+# Build the agent pane command, prepending setup.sh for new worktrees
+SETUP_SCRIPT="$REPO_ROOT/.spawn-agent/setup.sh"
+if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
+  AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
+            args \"-c\" \"bash '$SETUP_SCRIPT' '$REPO_ROOT' '$WORKTREE_PATH' && exec $AGENT_CMD || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; }\"
+        }"
+else
+  AGENT_PANE="pane command=\"$AGENT_CMD\" cwd=\"$WORKTREE_PATH\" size=\"70%\""
+fi
+
 # Pane content shared by both layouts
 pane_content() {
   cat <<EOF
@@ -161,7 +168,7 @@ pane_content() {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane command="$AGENT_CMD" cwd="$WORKTREE_PATH" size="70%"
+        $AGENT_PANE
         pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
     }
     pane size=1 borderless=true {

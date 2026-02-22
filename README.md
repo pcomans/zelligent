@@ -58,7 +58,7 @@ Creates `.spawn-agent/setup.sh` and `.spawn-agent/teardown.sh` in the current re
 
 ## Per-repo hooks
 
-Create `.spawn-agent/setup.sh` to run custom setup when a worktree is created (copy `.env`, install deps, etc.):
+Create `.spawn-agent/setup.sh` to run custom setup when a worktree is created (copy `.env`, install deps, etc.). The setup script runs **inside the new Zellij tab** as a preamble to the agent command, so you can see its progress. If the setup script fails (non-zero exit), the agent command will not start and the pane stays open so you can read the error.
 
 ```bash
 #!/bin/bash
@@ -66,7 +66,10 @@ REPO_ROOT=$1
 WORKTREE_PATH=$2
 
 cp "$REPO_ROOT/.env" "$WORKTREE_PATH/"
+cd "$WORKTREE_PATH" && npm install
 ```
+
+The setup script only runs once when the worktree is first created. Reopening an existing worktree skips it.
 
 Create `.spawn-agent/teardown.sh` to clean up when a worktree is removed (stop dev servers, remove copied files, etc.):
 
@@ -80,7 +83,10 @@ rm -f "$WORKTREE_PATH/.env"
 
 ## Custom layout
 
-Create `.spawn-agent/layout.kdl` to override the default Zellij layout. Use `{{cwd}}` and `{{agent_cmd}}` as placeholders:
+Create `.spawn-agent/layout.kdl` to override the default Zellij layout. Use `{{cwd}}` and `{{agent_cmd}}` as placeholders.
+
+> **Note:** Custom layouts bypass the automatic `setup.sh` preamble. If you need setup to run before the agent, wrap it in your template's command, e.g. `command="bash"` with `args "-c" "bash .spawn-agent/setup.sh /repo /worktree && exec {{agent_cmd}}"`.
+
 
 ```kdl
 layout {
