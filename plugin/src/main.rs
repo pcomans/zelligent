@@ -245,19 +245,18 @@ impl State {
         if exit_code == Some(0) {
             self.status_message = format!("Removed '{branch}'");
             self.status_is_error = false;
+            // Close the worktree's tab if it exists. We use go_to_tab_name
+            // instead of close_tab_with_index because the latter expects an
+            // internal tab index, but TabInfo only exposes position (which
+            // diverges from index when tabs are closed).
             #[cfg(target_arch = "wasm32")]
-            {
-                let tab_name = branch.replace('/', "-");
-                // Guard: only proceed if the tab exists. Without this,
-                // go_to_tab_name would be a no-op and close_focused_tab
-                // would close whatever tab happens to be focused.
-                if self.tabs.iter().any(|t| t.name == tab_name) {
-                    let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
-                    go_to_tab_name(&tab_name);
-                    close_focused_tab();
-                    if let Some(name) = return_tab {
-                        go_to_tab_name(&name);
-                    }
+            if self.has_tab_for_branch(&branch) {
+                let tab_name = Self::tab_name_for_branch(&branch);
+                let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
+                go_to_tab_name(&tab_name);
+                close_focused_tab();
+                if let Some(name) = return_tab {
+                    go_to_tab_name(&name);
                 }
             }
         } else {
@@ -267,6 +266,18 @@ impl State {
         }
         self.mode = Mode::BrowseWorktrees;
         Action::Refresh
+    }
+
+    /// Convert a branch name to the corresponding Zellij tab name.
+    /// Tab names use the branch with `/` replaced by `-` (matching spawn-agent.sh).
+    pub fn tab_name_for_branch(branch: &str) -> String {
+        branch.replace('/', "-")
+    }
+
+    /// Check whether a tab with the given branch's name exists.
+    pub fn has_tab_for_branch(&self, branch: &str) -> bool {
+        let tab_name = Self::tab_name_for_branch(branch);
+        self.tabs.iter().any(|t| t.name == tab_name)
     }
 
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
@@ -892,6 +903,55 @@ mod tests {
         assert!(s.status_message.contains("uncommitted changes"));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
         assert_eq!(action, Action::Refresh);
+    }
+
+    fn make_tab(name: &str, active: bool) -> TabInfo {
+        TabInfo {
+            position: 0,
+            name: name.to_string(),
+            active,
+            panes_to_hide: 0,
+            is_fullscreen_active: false,
+            is_sync_panes_active: false,
+            are_floating_panes_visible: false,
+            other_focused_clients: vec![],
+            active_swap_layout_name: None,
+            is_swap_layout_dirty: false,
+            viewport_rows: 0,
+            viewport_columns: 0,
+            display_area_rows: 0,
+            display_area_columns: 0,
+            selectable_tiled_panes_count: 0,
+            selectable_floating_panes_count: 0,
+        }
+    }
+
+    #[test]
+    fn tab_name_for_branch_replaces_slashes() {
+        assert_eq!(State::tab_name_for_branch("feature/cool"), "feature-cool");
+        assert_eq!(State::tab_name_for_branch("a/b/c"), "a-b-c");
+        assert_eq!(State::tab_name_for_branch("fix-bug"), "fix-bug");
+    }
+
+    #[test]
+    fn has_tab_for_branch_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feature-cool", false), make_tab("fix-bug", false)];
+        assert!(s.has_tab_for_branch("feature/cool"));
+        assert!(s.has_tab_for_branch("fix-bug"));
+    }
+
+    #[test]
+    fn has_tab_for_branch_not_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("main", false)];
+        assert!(!s.has_tab_for_branch("nonexistent"));
+    }
+
+    #[test]
+    fn has_tab_for_branch_empty_tabs() {
+        let s = State::default();
+        assert!(!s.has_tab_for_branch("anything"));
     }
 
     #[test]
