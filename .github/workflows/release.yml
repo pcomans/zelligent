@@ -20,6 +20,15 @@ jobs:
         run: cargo build --release
         working-directory: plugin
 
+      - name: Validate tag matches VERSION file
+        run: |
+          FILE_VERSION="v$(cat VERSION)"
+          TAG_VERSION="${GITHUB_REF_NAME}"
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: VERSION file ($FILE_VERSION) does not match tag ($TAG_VERSION)" >&2
+            exit 1
+          fi
+
       - name: Stage release artifacts
         run: |
           VERSION="${GITHUB_REF_NAME}"

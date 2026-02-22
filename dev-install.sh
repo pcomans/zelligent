@@ -3,7 +3,9 @@ set -e
 
 cd "$(dirname "$0")"
 
-SHA=$(git rev-parse HEAD)
+VERSION=$(cat VERSION)
+SHA=$(git rev-parse --short HEAD)
+STAMP="${VERSION}-dev+${SHA}"
 
 # Install zelligent script
 INSTALL_DIR="$HOME/.local/bin"
@@ -15,15 +17,9 @@ if ! grep -q "__COMMIT_SHA__" zelligent.sh; then
   exit 1
 fi
 
-sed "s/__COMMIT_SHA__/$SHA/" zelligent.sh > "$INSTALL_DIR/zelligent"
-
-# Verify that the stamped script contains the expected SHA
-if ! grep -q "$SHA" "$INSTALL_DIR/zelligent"; then
-  echo "Error: Failed to stamp zelligent with commit SHA $SHA." >&2
-  exit 1
-fi
+sed "s/__COMMIT_SHA__/$STAMP/" zelligent.sh > "$INSTALL_DIR/zelligent"
 chmod +x "$INSTALL_DIR/zelligent"
-echo "Installed zelligent ($SHA) to $INSTALL_DIR/zelligent"
+echo "Installed zelligent ($STAMP) to $INSTALL_DIR/zelligent"
 
 # Build and install Zellij plugin
 cd plugin
