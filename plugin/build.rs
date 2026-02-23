@@ -5,10 +5,18 @@ fn main() {
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
+        .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
     let sha = sha.trim();
-    println!("cargo:rustc-env=ZELLIGENT_GIT_SHA={sha}");
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    println!("cargo:rerun-if-changed=../.git/refs");
+
+    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let version = if sha.is_empty() {
+        pkg_version
+    } else {
+        format!("{pkg_version}+{sha}")
+    };
+
+    println!("cargo:rustc-env=ZELLIGENT_VERSION={version}");
+    println!("cargo:rerun-if-changed=../.git/index");
 }

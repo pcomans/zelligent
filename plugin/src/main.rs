@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA"));
+const VERSION: &str = env!("ZELLIGENT_VERSION");
 
 // Command context keys used to route RunCommandResult
 const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
@@ -65,10 +65,12 @@ pub struct State {
 register_plugin!(State);
 
 /// Sanitize a user-supplied string into a valid git branch name.
-/// Replaces characters that are forbidden in git refs with hyphens,
-/// collapses consecutive hyphens, and strips leading/trailing hyphens and dots.
+/// Replaces characters and sequences forbidden in git refs, collapses
+/// consecutive hyphens and slashes, and strips leading/trailing hyphens,
+/// dots, and slashes.
 pub fn sanitize_branch_name(name: &str) -> String {
-    let replaced: String = name
+    // Replace characters forbidden in git refs with hyphens
+    let s: String = name
         .chars()
         .map(|c| match c {
             ' ' | '\t' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' => '-',
@@ -77,22 +79,26 @@ pub fn sanitize_branch_name(name: &str) -> String {
         })
         .collect();
 
-    // Collapse consecutive hyphens
+    // Replace forbidden multi-character sequences
+    let s = s.replace("@{", "-").replace("..", "-").replace("/.", "/-");
+
+    // Collapse consecutive hyphens and consecutive slashes
     let mut result = String::new();
-    let mut prev_hyphen = false;
-    for c in replaced.chars() {
-        if c == '-' {
-            if !prev_hyphen {
-                result.push(c);
-            }
-            prev_hyphen = true;
-        } else {
-            result.push(c);
-            prev_hyphen = false;
+    let mut prev = '\0';
+    for c in s.chars() {
+        if (c == '-' && prev == '-') || (c == '/' && prev == '/') {
+            continue;
         }
+        result.push(c);
+        prev = c;
     }
 
-    result.trim_matches(|c| c == '-' || c == '.').to_string()
+    // Strip reserved .lock suffix
+    if result.ends_with(".lock") {
+        result.truncate(result.len() - 5);
+    }
+
+    result.trim_matches(|c| c == '-' || c == '.' || c == '/').to_string()
 }
 
 /// Parse `zelligent list-worktrees` output (one branch per line).
@@ -610,6 +616,27 @@ mod tests {
     fn sanitize_empty_returns_empty() {
         assert_eq!(sanitize_branch_name(""), "");
         assert_eq!(sanitize_branch_name("   "), "");
+    }
+
+    #[test]
+    fn sanitize_git_ref_sequences() {
+        assert_eq!(sanitize_branch_name("foo..bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("foo@{1}"), "foo-1}");
+        assert_eq!(sanitize_branch_name("foo//bar"), "foo/bar");
+        assert_eq!(sanitize_branch_name("foo/.bar"), "foo/-bar");
+        assert_eq!(sanitize_branch_name("foo.lock"), "foo");
+        assert_eq!(sanitize_branch_name("/leading"), "leading");
+        assert_eq!(sanitize_branch_name("trailing/"), "trailing");
+    }
+
+    // --- InputBranch integration tests ---
+
+    #[test]
+    fn input_branch_enter_sanitizes_and_spawns() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "claude alerts".into(), ..Default::default() };
+        let action = s.handle_key_input_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("claude-alerts".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
     }
 
     // --- Parsing tests ---
