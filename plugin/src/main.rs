@@ -227,7 +227,8 @@ impl State {
     pub fn handle_git_toplevel(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Action {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
-            self.status_message = format!("Not a git repo: {err}");
+            let cwd = self.initial_cwd.display();
+            self.status_message = format!("{cwd} is not a git repo: {err}");
             self.status_is_error = true;
             return Action::None;
         }
@@ -997,7 +998,7 @@ mod tests {
         let mut s = State::default();
         let action = s.handle_git_toplevel(Some(128), b"", b"not a git repo");
         assert!(s.status_is_error);
-        assert!(s.status_message.contains("not a git repo"));
+        assert!(s.status_message.contains("is not a git repo"));
         assert_eq!(s.mode, Mode::Loading);
         assert_eq!(action, Action::None);
     }
