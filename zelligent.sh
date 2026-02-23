@@ -241,9 +241,8 @@ if [ "$1" = "remove" ]; then
       exit 1
     fi
   fi
-  if ! git worktree remove "$WORKTREE_PATH"; then
+  if ! git worktree remove "$WORKTREE_PATH" 2>/dev/null; then
     echo "Error: could not remove worktree. It may have uncommitted changes." >&2
-    echo "Commit or stash your changes, then try again." >&2
     exit 1
   fi
   echo "✅ Removed worktree for '$BRANCH_NAME'"
