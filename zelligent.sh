@@ -43,8 +43,13 @@ if [ "$1" = "doctor" ]; then
   PLUGIN_PATH=""
   PLUGIN_MODE=""
   if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
-    PLUGIN_MODE="custom"
+    if [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
+      echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
+      ERRORS=1
+    else
+      PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
+      PLUGIN_MODE="custom"
+    fi
   else
     ZELLIGENT_BIN=$(command -v zelligent 2>/dev/null || echo "$0")
     ZELLIGENT_PREFIX=$(dirname "$(dirname "$ZELLIGENT_BIN")")
@@ -151,8 +156,8 @@ WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
 
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
-  # Check plugin is installed
-  if [ ! -f "$ZELLIJ_CONFIG_HOME/plugins/zelligent-plugin.wasm" ]; then
+  # Check plugin is available
+  if [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
     echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
     exit 1
   fi
