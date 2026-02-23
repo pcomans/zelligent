@@ -117,7 +117,15 @@ KDL
     fi
   fi
 
-  # 5. Grant plugin permissions
+  # 5. Serialization interval (keeps session snapshots fresh for resurrection)
+  if grep -qF 'serialization_interval' "$CONFIG"; then
+    echo "  serialization_interval: ok"
+  else
+    echo 'serialization_interval 5' >> "$CONFIG"
+    echo "  serialization_interval: set to 5s in $CONFIG"
+  fi
+
+  # 6. Grant plugin permissions
   if [ "$(uname)" = "Darwin" ]; then
     PERM_FILE="$HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
   else

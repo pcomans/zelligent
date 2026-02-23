@@ -166,6 +166,12 @@ These are Zellij's default keybindings:
 | Close tab | `Ctrl-t x` |
 | Switch panes | `Ctrl-p` + arrow keys |
 
+## Session resurrection
+
+Zellij automatically saves your session layout periodically and restores it when you reattach. By default it snapshots every 60 seconds, which means tabs you closed in the last minute can reappear after a restart.
+
+`zelligent doctor` sets `serialization_interval 5` in your Zellij config so snapshots are taken every 5 seconds. This keeps the saved state close to what you actually see, so closed tabs stay closed after resurrection.
+
 ## Installing from source
 
 ```bash
