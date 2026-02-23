@@ -12,7 +12,7 @@ if [ ! -f "$WASM" ]; then
   exit 1
 fi
 
-DEST="$HOME/.config/zellij/plugins"
+DEST="$HOME/.local/share/zelligent"
 mkdir -p "$DEST"
 cp "$WASM" "$DEST/zelligent-plugin.wasm"
 echo "Installed to $DEST/zelligent-plugin.wasm"

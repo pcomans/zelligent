@@ -39,32 +39,21 @@ if [ "$1" = "doctor" ]; then
     ERRORS=1
   fi
 
-  # 2. Install the Zellij plugin
-  # Find the plugin source
+  # 2. Find the Zellij plugin
   if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    PLUGIN_SRC="$ZELLIGENT_PLUGIN_SRC"
+    PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
   else
     ZELLIGENT_BIN=$(command -v zelligent 2>/dev/null || echo "$0")
     ZELLIGENT_PREFIX=$(dirname "$(dirname "$ZELLIGENT_BIN")")
-    PLUGIN_SRC="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
+    PLUGIN_PATH="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
   fi
 
-  PLUGIN_DEST="$ZELLIJ_CONFIG_HOME/plugins/zelligent-plugin.wasm"
-
-  if [ ! -f "$PLUGIN_SRC" ]; then
-    echo "  plugin: source not found at $PLUGIN_SRC"
+  if [ ! -f "$PLUGIN_PATH" ]; then
+    echo "  plugin: not found at $PLUGIN_PATH"
     echo "          If installed from source, run: bash dev-install.sh"
     ERRORS=1
-  elif [ -f "$PLUGIN_DEST" ] && cmp -s "$PLUGIN_SRC" "$PLUGIN_DEST"; then
-    echo "  plugin: ok"
   else
-    mkdir -p "$(dirname "$PLUGIN_DEST")"
-    if cp "$PLUGIN_SRC" "$PLUGIN_DEST"; then
-      echo "  plugin: installed to $PLUGIN_DEST"
-    else
-      echo "  plugin: failed to install to $PLUGIN_DEST"
-      ERRORS=1
-    fi
+    echo "  plugin: ok ($PLUGIN_PATH)"
   fi
 
   # 3. Patch Zellij config
@@ -80,7 +69,7 @@ if [ "$1" = "doctor" ]; then
 keybinds {
     shared_except "locked" {
         bind "Ctrl y" {
-            LaunchOrFocusPlugin "file:$PLUGIN_DEST" {
+            LaunchOrFocusPlugin "file:$PLUGIN_PATH" {
                 floating true
                 move_to_focused_tab true
                 agent_cmd "$SHELL"
@@ -110,17 +99,17 @@ KDL
   mkdir -p "$(dirname "$PERM_FILE")"
   touch "$PERM_FILE"
 
-  if grep -qF "$PLUGIN_DEST" "$PERM_FILE"; then
+  if grep -qF "$PLUGIN_PATH" "$PERM_FILE"; then
     echo "  permissions: ok"
   else
     cat >> "$PERM_FILE" <<PERMS
-"$PLUGIN_DEST" {
+"$PLUGIN_PATH" {
     ChangeApplicationState
     ReadApplicationState
     RunCommands
 }
 PERMS
-    echo "  permissions: granted for $PLUGIN_DEST"
+    echo "  permissions: granted for $PLUGIN_PATH"
   fi
 
   if [ "$ERRORS" -ne 0 ]; then
