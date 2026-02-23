@@ -59,6 +59,7 @@ pub struct State {
     pub status_message: String,
     pub status_is_error: bool,
     pub zelligent_path: String,
+    pub initial_cwd: PathBuf,
     pub tabs: Vec<TabInfo>,
     /// Flipped to `true` after the first successful worktree list load.
     /// Auto-selection of the active tab's worktree only happens before this
@@ -140,8 +141,10 @@ impl State {
     }
 
     fn fire_git_toplevel(&self) {
-        run_command(
+        run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "show-repo"],
+            BTreeMap::new(),
+            self.initial_cwd.clone(),
             Self::ctx(CMD_GIT_TOPLEVEL),
         );
     }
@@ -487,6 +490,8 @@ impl ZellijPlugin for State {
             .get("zelligent_path")
             .cloned()
             .unwrap_or_else(|| "zelligent".to_string());
+
+        self.initial_cwd = get_plugin_ids().initial_cwd;
 
         request_permission(&[
             PermissionType::RunCommands,
