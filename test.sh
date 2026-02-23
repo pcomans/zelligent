@@ -31,6 +31,15 @@ contains() {
   fi
 }
 
+not_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if echo "$haystack" | grep -qF "$needle"; then
+    fail "$desc (expected NOT to contain: '$needle')"
+  else
+    pass "$desc"
+  fi
+}
+
 excludes() {
   local desc="$1" needle="$2" haystack="$3"
   if echo "$haystack" | grep -qF "$needle"; then
@@ -290,7 +299,8 @@ fi
 check "doctor creates permissions.kdl" "true" \
   "$([ -f "$PERM_FILE" ] && echo true || echo false)"
 PERM_CONTENT=$(cat "$PERM_FILE")
-contains "doctor permissions use file: prefix" "file:$FAKE_WASM" "$PERM_CONTENT"
+contains "doctor permissions use bare path" "$FAKE_WASM" "$PERM_CONTENT"
+not_contains "doctor permissions omit file: prefix" "file:$FAKE_WASM" "$PERM_CONTENT"
 
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
