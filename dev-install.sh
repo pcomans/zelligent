@@ -37,3 +37,10 @@ SHARE_DIR="$HOME/.local/share/zelligent"
 mkdir -p "$SHARE_DIR"
 cp "target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
 echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
+
+# Update Zellij config to point at the dev plugin path
+CONFIG="$HOME/.config/zellij/config.kdl"
+if [ -f "$CONFIG" ]; then
+  sed -i.bak "s|file:[^ ]*zelligent-plugin\.wasm|file:$SHARE_DIR/zelligent-plugin.wasm|g" "$CONFIG" && rm "$CONFIG.bak"
+  echo "Updated $CONFIG to reference $SHARE_DIR/zelligent-plugin.wasm"
+fi
