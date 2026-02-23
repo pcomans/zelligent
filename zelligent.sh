@@ -231,19 +231,19 @@ if [ "$1" = "remove" ]; then
   SESSION_NAME="${BRANCH_NAME//\//-}"
   WORKTREE_PATH="$WORKTREES_DIR/$BRANCH_NAME"
   if [ ! -d "$WORKTREE_PATH" ]; then
-    echo "Error: worktree '$WORKTREE_PATH' does not exist."
+    echo "Error: worktree '$WORKTREE_PATH' does not exist." >&2
     exit 1
   fi
   if [ -f "$REPO_ROOT/.zelligent/teardown.sh" ]; then
     echo "⚙️  Running .zelligent/teardown.sh..."
     if ! bash "$REPO_ROOT/.zelligent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"; then
-      echo "Error: teardown.sh failed. Worktree was NOT removed."
+      echo "Error: teardown.sh failed. Worktree was NOT removed." >&2
       exit 1
     fi
   fi
-  if ! git worktree remove "$WORKTREE_PATH" 2>/dev/null; then
-    echo "Error: could not remove worktree. It may have uncommitted changes."
-    echo "Commit or stash your changes, then try again."
+  if ! git worktree remove "$WORKTREE_PATH"; then
+    echo "Error: could not remove worktree. It may have uncommitted changes." >&2
+    echo "Commit or stash your changes, then try again." >&2
     exit 1
   fi
   echo "✅ Removed worktree for '$BRANCH_NAME'"
