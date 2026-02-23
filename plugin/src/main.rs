@@ -520,17 +520,18 @@ impl ZellijPlugin for State {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_worktree_list(&self.worktrees, self.selected_index, rows);
                 ui::render_status(&self.status_message, self.status_is_error);
-                ui::render_footer(&self.mode);
+                ui::render_footer(&self.mode, concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA")));
             }
             Mode::SelectBranch => {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_branch_list(&self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(&self.mode);
+                ui::render_footer(&self.mode, concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA")));
             }
             Mode::InputBranch => {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_input(&self.input_buffer);
-                ui::render_footer(&self.mode);
+                ui::render_status(&self.status_message, self.status_is_error);
+                ui::render_footer(&self.mode, concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA")));
             }
             Mode::Confirming => {
                 ui::render_header(&self.repo_name, cols);

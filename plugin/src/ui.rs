@@ -78,7 +78,7 @@ pub fn render_confirm(branch: &str) {
     println!("  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel");
 }
 
-pub fn render_footer(mode: &Mode) {
+pub fn render_footer(mode: &Mode, version: &str) {
     println!();
     match mode {
         Mode::Loading => {}
@@ -100,6 +100,7 @@ pub fn render_footer(mode: &Mode) {
         }
         Mode::Confirming => {}
     }
+    println!("  {DIM}{version}{RESET}");
 }
 
 pub fn render_status(message: &str, is_error: bool) {
