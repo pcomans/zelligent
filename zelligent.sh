@@ -40,18 +40,32 @@ if [ "$1" = "doctor" ]; then
   fi
 
   # 2. Find the Zellij plugin
+  PLUGIN_PATH=""
+  PLUGIN_MODE=""
   if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
     PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
+    PLUGIN_MODE="custom"
   else
     ZELLIGENT_BIN=$(command -v zelligent 2>/dev/null || echo "$0")
     ZELLIGENT_PREFIX=$(dirname "$(dirname "$ZELLIGENT_BIN")")
-    PLUGIN_PATH="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
+    HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
+    DEV_PLUGIN="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
+    if [ -f "$HOMEBREW_PLUGIN" ]; then
+      PLUGIN_PATH="$HOMEBREW_PLUGIN"
+      PLUGIN_MODE="homebrew"
+    elif [ -f "$DEV_PLUGIN" ]; then
+      PLUGIN_PATH="$DEV_PLUGIN"
+      PLUGIN_MODE="dev"
+    fi
   fi
 
-  if [ ! -f "$PLUGIN_PATH" ]; then
-    echo "  plugin: not found at $PLUGIN_PATH"
-    echo "          If installed from source, run: bash dev-install.sh"
+  if [ -z "$PLUGIN_PATH" ]; then
+    echo "  plugin: not found"
+    echo "          Install with: brew install pcomans/zelligent/zelligent"
+    echo "          Or from source: bash dev-install.sh"
     ERRORS=1
+  elif [ "$PLUGIN_MODE" = "dev" ]; then
+    echo "  plugin: 🔧 dev build ($PLUGIN_PATH)"
   else
     echo "  plugin: ok ($PLUGIN_PATH)"
   fi
