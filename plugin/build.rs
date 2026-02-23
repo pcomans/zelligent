@@ -9,5 +9,6 @@ fn main() {
         .unwrap_or_default();
     let sha = sha.trim();
     println!("cargo:rustc-env=ZELLIGENT_GIT_SHA={sha}");
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/refs");
 }
