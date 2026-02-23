@@ -178,7 +178,7 @@ if [ -z "$1" ]; then
     exit 0
   fi
 
-  if zellij list-sessions --no-formatting --short 2>/dev/null | grep -qxF "$REPO_NAME"; then
+  if zellij list-sessions --no-formatting 2>/dev/null | grep -v EXITED | grep -qF "$REPO_NAME"; then
     echo "Attaching to session '$REPO_NAME'..."
     exec zellij attach "$REPO_NAME"
   else
@@ -384,7 +384,7 @@ fi
 if [ -n "$ZELLIJ" ]; then
   echo "🪟 Opening tab '$SESSION_NAME'..."
   zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
-elif zellij list-sessions --no-formatting --short 2>/dev/null | grep -qxF "$REPO_NAME"; then
+elif zellij list-sessions --no-formatting 2>/dev/null | grep -v EXITED | grep -qF "$REPO_NAME"; then
   echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
   ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
   zellij attach "$REPO_NAME"
