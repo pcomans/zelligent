@@ -9,31 +9,55 @@
                            ▀▀▀
 ```
 
-A shell script for spawning AI coding agents in isolated git worktrees, each in their own Zellij tab.
+Spawn AI coding agents in isolated git worktrees, each in their own Zellij tab.
 
 ## Installation
 
+### Homebrew (recommended)
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pcomans/zelligent/main/install.sh | bash
+brew install pcomans/zelligent/zelligent
+zelligent doctor
 ```
 
-Installs `zelligent` to `/usr/local/bin` (or `~/.local/bin` if that isn't writable).
+`brew install` pulls in Zellij and lazygit automatically. `zelligent doctor` installs the Zellij plugin and configures the keybinding.
+
+### From source (for contributors)
+
+```bash
+git clone https://github.com/pcomans/zelligent.git
+cd zelligent
+PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+```
+
+Requires [Rust via rustup](https://rustup.rs) with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`).
 
 ## Usage
 
 ```bash
-zelligent spawn <branch-name> [agent-command]
+zelligent                                   # launch/attach session for current repo
+zelligent spawn <branch-name> [agent-cmd]   # create worktree and open agent tab
+zelligent remove <branch-name>              # remove a worktree
+zelligent init                              # create .zelligent/ hook stubs
+zelligent doctor                            # check and fix zelligent setup
 ```
+
+### Quick start
+
+```bash
+cd my-project
+zelligent                                   # opens a Zellij session for this repo
+zelligent spawn feature/my-feature claude   # opens Claude Code in a new worktree tab
+```
+
+### `zelligent` (no arguments)
+
+Launches or attaches to a Zellij session named after the current repo. If the session already exists, it reattaches — all your worktree tabs are still there.
+
+### `zelligent spawn`
 
 - `branch-name` — created from the default branch if it doesn't exist, reattached if it does
 - `agent-command` — command to run in the main pane (default: `$SHELL`)
-
-Examples:
-
-```bash
-zelligent spawn feature/my-feature          # opens a shell
-zelligent spawn feature/my-feature claude   # opens Claude Code
-```
 
 Behaviour depends on context:
 
@@ -49,21 +73,24 @@ Worktrees are stored under `~/.zelligent/worktrees/<repo-name>/<branch-name>`.
 
 Each tab opens with the agent command on the left (70%) and lazygit on the right (30%).
 
-## Removing a worktree
-
-```bash
-zelligent remove <branch-name>
-```
+### `zelligent remove`
 
 Runs `.zelligent/teardown.sh` (if present), removes the worktree, and prints a reminder to close the tab. Fails with a clear error if the worktree has uncommitted changes. The local git branch is not deleted.
 
-## Init
-
-```bash
-zelligent init
-```
+### `zelligent init`
 
 Creates `.zelligent/setup.sh` and `.zelligent/teardown.sh` in the current repo if they don't already exist.
+
+### `zelligent doctor`
+
+Checks and fixes your zelligent installation:
+
+- Verifies Zellij is installed
+- Installs the Zellij plugin to `~/.config/zellij/plugins/`
+- Adds the `Ctrl-y` keybinding to your Zellij config
+- Adds `copy_command "pbcopy"` on macOS
+
+Safe to run repeatedly — idempotent by design.
 
 ## Per-repo hooks
 
@@ -127,55 +154,9 @@ Each worktree opens as a tab in your current Zellij session. The keybindings bel
 | Split pane right | `Ctrl-p d` |
 | Split pane down | `Ctrl-p D` |
 
-## Zellij setup
-
-### Copy/paste (macOS)
-
-Zellij requires an explicit copy command. Add this to your `~/.config/zellij/config.kdl`:
-
-```kdl
-copy_command "pbcopy"
-```
-
 ## Zellij plugin
 
-A WASM plugin that provides an interactive UI for managing worktrees, launched via a keybinding as a floating pane.
-
-### Building
-
-Requires Rust (via [rustup](https://rustup.rs)) with the `wasm32-wasip1` target:
-
-```bash
-rustup target add wasm32-wasip1
-cd plugin && bash build.sh
-```
-
-This compiles the plugin and copies it to `~/.config/zellij/plugins/`.
-
-> **Note:** If you also have Rust installed via Homebrew, its `cargo` may take precedence and fail with "can't find crate for core". Fix by ensuring rustup's toolchain is first on PATH:
-> ```bash
-> PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash build.sh
-> ```
-
-### Keybinding
-
-Add to your `~/.config/zellij/config.kdl`:
-
-```kdl
-keybinds {
-    shared_except "locked" {
-        bind "Ctrl y" {
-            LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zelligent-plugin.wasm" {
-                floating true
-                move_to_focused_tab true
-                agent_cmd "claude"
-            }
-        }
-    }
-}
-```
-
-### Controls
+The plugin provides an interactive UI for managing worktrees, launched via `Ctrl-y` as a floating pane.
 
 | Key | Action |
 |---|---|
@@ -186,10 +167,3 @@ keybinds {
 | `d` then `y` | Remove selected worktree |
 | `r` | Refresh |
 | `q` / `Esc` | Close |
-
-## Requirements
-
-- git
-- [Zellij](https://zellij.dev)
-- [lazygit](https://github.com/jesseduffield/lazygit)
-- Rust with `wasm32-wasip1` target (for building the plugin)

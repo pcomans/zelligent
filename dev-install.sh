@@ -3,7 +3,9 @@ set -e
 
 cd "$(dirname "$0")"
 
-SHA=$(git rev-parse HEAD)
+VERSION=$(cat VERSION)
+SHA=$(git rev-parse --short HEAD)
+STAMP="${VERSION}-dev+${SHA}"
 
 # Install zelligent script
 INSTALL_DIR="$HOME/.local/bin"
@@ -15,16 +17,23 @@ if ! grep -q "__COMMIT_SHA__" zelligent.sh; then
   exit 1
 fi
 
-sed "s/__COMMIT_SHA__/$SHA/" zelligent.sh > "$INSTALL_DIR/zelligent"
-
-# Verify that the stamped script contains the expected SHA
-if ! grep -q "$SHA" "$INSTALL_DIR/zelligent"; then
-  echo "Error: Failed to stamp zelligent with commit SHA $SHA." >&2
-  exit 1
-fi
+sed "s/__COMMIT_SHA__/$STAMP/" zelligent.sh > "$INSTALL_DIR/zelligent"
 chmod +x "$INSTALL_DIR/zelligent"
-echo "Installed zelligent ($SHA) to $INSTALL_DIR/zelligent"
+echo "Installed zelligent ($STAMP) to $INSTALL_DIR/zelligent"
 
 # Build and install Zellij plugin
 cd plugin
+sed -i.bak "s/version = \"0.0.0-dev\"/version = \"$VERSION\"/" Cargo.toml
+if ! grep -q "version = \"$VERSION\"" Cargo.toml; then
+  echo "Error: Failed to stamp version into Cargo.toml" >&2
+  mv Cargo.toml.bak Cargo.toml
+  exit 1
+fi
 bash build.sh
+mv Cargo.toml.bak Cargo.toml
+
+# Also install plugin to share dir for `zelligent doctor` compatibility
+SHARE_DIR="$HOME/.local/share/zelligent"
+mkdir -p "$SHARE_DIR"
+cp "target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
+echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
