@@ -62,6 +62,37 @@ pub struct State {
 
 register_plugin!(State);
 
+/// Sanitize a user-supplied string into a valid git branch name.
+/// Replaces characters that are forbidden in git refs with hyphens,
+/// collapses consecutive hyphens, and strips leading/trailing hyphens and dots.
+pub fn sanitize_branch_name(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|c| match c {
+            ' ' | '\t' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+
+    // Collapse consecutive hyphens
+    let mut result = String::new();
+    let mut prev_hyphen = false;
+    for c in replaced.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            result.push(c);
+            prev_hyphen = false;
+        }
+    }
+
+    result.trim_matches(|c| c == '-' || c == '.').to_string()
+}
+
 /// Parse `zelligent list-worktrees` output (one branch per line).
 pub fn parse_worktrees(output: &str) -> Vec<Worktree> {
     output
@@ -359,7 +390,7 @@ impl State {
 
         match key.bare_key {
             BareKey::Enter if no_mod => {
-                let branch = self.input_buffer.trim().to_string();
+                let branch = sanitize_branch_name(self.input_buffer.trim());
                 if !branch.is_empty() {
                     self.status_message = format!("Spawning '{branch}'...");
                     self.status_is_error = false;
@@ -533,6 +564,46 @@ mod tests {
         ];
         s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
         s
+    }
+
+    // --- sanitize_branch_name tests ---
+
+    #[test]
+    fn sanitize_spaces_become_hyphens() {
+        assert_eq!(sanitize_branch_name("claude alerts"), "claude-alerts");
+        assert_eq!(sanitize_branch_name("my new feature"), "my-new-feature");
+    }
+
+    #[test]
+    fn sanitize_collapses_consecutive_hyphens() {
+        assert_eq!(sanitize_branch_name("foo  bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("a ~ b"), "a-b");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_trailing() {
+        assert_eq!(sanitize_branch_name(" leading"), "leading");
+        assert_eq!(sanitize_branch_name("trailing "), "trailing");
+        assert_eq!(sanitize_branch_name(".dotted."), "dotted");
+    }
+
+    #[test]
+    fn sanitize_invalid_chars() {
+        assert_eq!(sanitize_branch_name("feat~1"), "feat-1");
+        assert_eq!(sanitize_branch_name("foo:bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("a?b*c"), "a-b-c");
+    }
+
+    #[test]
+    fn sanitize_valid_name_unchanged() {
+        assert_eq!(sanitize_branch_name("feat/new-thing"), "feat/new-thing");
+        assert_eq!(sanitize_branch_name("fix-bug_123"), "fix-bug_123");
+    }
+
+    #[test]
+    fn sanitize_empty_returns_empty() {
+        assert_eq!(sanitize_branch_name(""), "");
+        assert_eq!(sanitize_branch_name("   "), "");
     }
 
     // --- Parsing tests ---
