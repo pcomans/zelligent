@@ -8,6 +8,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up remote HEAD
+        run: git remote set-head origin --auto
 
       - name: Run shell tests
         run: bash test.sh
