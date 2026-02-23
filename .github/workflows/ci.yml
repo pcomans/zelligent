@@ -20,9 +20,9 @@ jobs:
       - name: Install wasm target
         run: rustup target add wasm32-wasip1
 
-      - name: Run plugin tests
+      - name: Run plugin tests (native target)
         working-directory: plugin
-        run: cargo test
+        run: cargo test --target "$(rustc -vV | awk '/^host:/ {print $2}')"
 
       - name: Build WASM plugin
         working-directory: plugin
