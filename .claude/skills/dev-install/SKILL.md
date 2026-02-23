@@ -1,7 +1,6 @@
 ---
 name: dev-install
 description: Build and install zelligent (CLI + Zellij plugin) locally for development
-disable-model-invocation: true
 allowed-tools: Bash
 ---
 
