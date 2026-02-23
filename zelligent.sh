@@ -76,7 +76,7 @@ if [ "$1" = "doctor" ]; then
   touch "$CONFIG"
 
   if grep -qF 'zelligent-plugin.wasm' "$CONFIG"; then
-    echo "  keybinding: ok"
+    echo "  keybinding: ok ($CONFIG)"
   else
     cat >> "$CONFIG" <<KDL
 
