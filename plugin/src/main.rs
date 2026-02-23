@@ -560,7 +560,11 @@ impl ZellijPlugin for State {
             Mode::Loading => {
                 ui::render_header("loading...", cols);
                 println!();
-                println!("  Waiting for permissions...");
+                if self.status_is_error {
+                    ui::render_status(&self.status_message, self.status_is_error);
+                } else {
+                    println!("  Waiting for permissions...");
+                }
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(&self.repo_name, cols);

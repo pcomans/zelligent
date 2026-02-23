@@ -126,18 +126,17 @@ KDL
   mkdir -p "$(dirname "$PERM_FILE")"
   touch "$PERM_FILE"
 
-  PLUGIN_LOCATION="file:$PLUGIN_PATH"
-  if grep -qF "$PLUGIN_LOCATION" "$PERM_FILE"; then
+  if grep -qF "$PLUGIN_PATH" "$PERM_FILE"; then
     echo "  permissions: ok"
   else
     cat >> "$PERM_FILE" <<PERMS
-"$PLUGIN_LOCATION" {
+"$PLUGIN_PATH" {
     ChangeApplicationState
     ReadApplicationState
     RunCommands
 }
 PERMS
-    echo "  permissions: granted for $PLUGIN_LOCATION"
+    echo "  permissions: granted for $PLUGIN_PATH"
   fi
 
   if [ "$ERRORS" -ne 0 ]; then
