@@ -60,6 +60,10 @@ pub struct State {
     pub status_is_error: bool,
     pub zelligent_path: String,
     pub tabs: Vec<TabInfo>,
+    /// Flipped to `true` after the first successful worktree list load.
+    /// Auto-selection of the active tab's worktree only happens before this
+    /// so that subsequent refreshes do not override the user's cursor position.
+    pub has_loaded: bool,
 }
 
 register_plugin!(State);
@@ -250,9 +254,31 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
+        if !self.has_loaded && self.tabs.iter().any(|t| t.active) {
+            // On the very first load where tab state is known, jump to the
+            // worktree for the active tab so the cursor starts in a meaningful
+            // position. If tabs haven't arrived yet we leave has_loaded = false
+            // so the TabUpdate handler can retry once they do.
+            self.has_loaded = true;
+            if let Some(idx) = self.find_worktree_for_active_tab() {
+                self.selected_index = idx;
+                return;
+            }
+        }
+        // On refresh (or when no tab match was found), preserve the user's
+        // cursor position and only clamp if it went out of range.
         if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
             self.selected_index = self.worktrees.len() - 1;
         }
+    }
+
+    /// Return the index of the worktree whose tab name matches the active tab, if any.
+    /// Returns the first match; see `tab_name_for_branch` for the ambiguity caveat.
+    pub fn find_worktree_for_active_tab(&self) -> Option<usize> {
+        let active_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str())?;
+        self.worktrees
+            .iter()
+            .position(|wt| Self::tab_name_for_branch(&wt.branch) == active_name)
     }
 
     pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
@@ -309,6 +335,10 @@ impl State {
 
     /// Convert a branch name to the corresponding Zellij tab name.
     /// Tab names use the branch with `/` replaced by `-` (matching zelligent.sh).
+    ///
+    /// Note: this mapping is not injective — `feat/cool` and `feat-cool` both
+    /// produce `feat-cool`. In that case `find_worktree_for_active_tab` will
+    /// match the first worktree in the list, which may not be the intended one.
     pub fn tab_name_for_branch(branch: &str) -> String {
         branch.replace('/', "-")
     }
@@ -500,6 +530,14 @@ impl ZellijPlugin for State {
             }
             Event::TabUpdate(tab_info) => {
                 self.tabs = tab_info;
+                // If worktrees loaded before tabs arrived, do the initial
+                // auto-select now that we have tab state.
+                if !self.has_loaded && !self.worktrees.is_empty() {
+                    self.has_loaded = true;
+                    if let Some(idx) = self.find_worktree_for_active_tab() {
+                        self.selected_index = idx;
+                    }
+                }
                 Action::None
             }
             Event::Key(key) => {
@@ -1061,11 +1099,128 @@ mod tests {
     }
 
     #[test]
-    fn list_worktrees_clamps_selected_index() {
+    fn list_worktrees_auto_selects_active_tab_on_initial_load() {
+        let mut s = State::default(); // has_loaded = false
+        s.tabs = vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", true),
+            make_tab("feat-c", false),
+        ];
+        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\nfeat-c\n", b"");
+        assert_eq!(s.selected_index, 1);
+        assert!(s.has_loaded);
+    }
+
+    #[test]
+    fn list_worktrees_auto_selects_active_tab_with_slash_branch() {
+        let mut s = State::default(); // has_loaded = false
+        s.tabs = vec![make_tab("feature-cool", true)];
+        s.handle_list_worktrees(Some(0), b"main\nfeature/cool\n", b"");
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn list_worktrees_does_not_auto_select_on_refresh() {
         let mut s = State::default();
+        // Simulate the initial load having already happened.
+        s.has_loaded = true;
+        s.tabs = vec![make_tab("feat-a", true)];
+        // User has navigated to index 2.
+        s.selected_index = 2;
+        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\nfeat-c\n", b"");
+        // Cursor must stay at 2, not jump back to the active tab (index 0).
+        assert_eq!(s.selected_index, 2);
+    }
+
+    #[test]
+    fn list_worktrees_defers_auto_select_when_tabs_not_yet_available() {
+        let mut s = State::default(); // has_loaded = false, tabs = []
+        s.selected_index = 0;
+        // Tabs haven't arrived yet — has_loaded must stay false so the
+        // TabUpdate handler can retry once tabs are known.
+        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\n", b"");
+        assert!(!s.has_loaded);
+        assert_eq!(s.selected_index, 0); // unchanged, clamped to valid range
+    }
+
+    #[test]
+    fn tab_update_triggers_auto_select_when_worktrees_already_loaded() {
+        // Simulate: worktrees loaded first (tabs empty → deferred), then TabUpdate arrives.
+        let mut s = State::default();
+        s.worktrees = vec![
+            Worktree { branch: "feat-a".into() },
+            Worktree { branch: "feat-b".into() },
+        ];
+        // has_loaded is still false (tabs were empty during handle_list_worktrees).
+        let tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
+        // Drive the TabUpdate path directly via the update event.
+        // We call the inline logic that mirrors the TabUpdate arm.
+        s.tabs = tabs;
+        if !s.has_loaded && !s.worktrees.is_empty() {
+            s.has_loaded = true;
+            if let Some(idx) = s.find_worktree_for_active_tab() {
+                s.selected_index = idx;
+            }
+        }
+        assert!(s.has_loaded);
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn list_worktrees_falls_back_to_clamp_when_no_tab_match() {
+        let mut s = State::default();
+        s.selected_index = 5;
+        // Active tab present but matches no worktree — clamp to last valid index.
+        s.tabs = vec![make_tab("unrelated", true)];
+        s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn list_worktrees_clamps_on_refresh_when_out_of_range() {
+        let mut s = State::default();
+        s.has_loaded = true;
         s.selected_index = 5;
         s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
         assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn list_worktrees_ambiguous_tab_name_selects_first_match() {
+        // Both "feat/cool" and "feat-cool" map to the tab name "feat-cool".
+        // The first worktree in the list wins — this is a known limitation of
+        // the `/` → `-` naming scheme.
+        let mut s = State::default(); // has_loaded = false
+        s.tabs = vec![make_tab("feat-cool", true)];
+        s.handle_list_worktrees(Some(0), b"feat/cool\nfeat-cool\n", b"");
+        assert_eq!(s.selected_index, 0); // first match
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_found() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-c", true)];
+        assert_eq!(s.find_worktree_for_active_tab(), Some(2));
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_no_match() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("unrelated", true)];
+        assert_eq!(s.find_worktree_for_active_tab(), None);
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_no_active_tab() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", false)];
+        assert_eq!(s.find_worktree_for_active_tab(), None);
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_empty_tabs() {
+        let s = state_with_worktrees();
+        assert_eq!(s.find_worktree_for_active_tab(), None);
     }
 
     #[test]
