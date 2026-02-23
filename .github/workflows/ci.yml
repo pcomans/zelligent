@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  test-shell:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shell tests
+        run: bash test.sh
+
+  test-plugin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wasm target
+        run: rustup target add wasm32-wasip1
+
+      - name: Run plugin tests
+        working-directory: plugin
+        run: cargo test
+
+      - name: Build WASM plugin
+        working-directory: plugin
+        run: cargo build --target wasm32-wasip1 --release
