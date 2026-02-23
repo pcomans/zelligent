@@ -83,7 +83,7 @@ keybinds {
             LaunchOrFocusPlugin "file:$PLUGIN_DEST" {
                 floating true
                 move_to_focused_tab true
-                agent_cmd "claude"
+                agent_cmd "$SHELL"
             }
         }
     }

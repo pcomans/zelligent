@@ -409,7 +409,7 @@ impl ZellijPlugin for State {
         self.agent_cmd = configuration
             .get("agent_cmd")
             .cloned()
-            .unwrap_or_else(|| "claude".to_string());
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()));
 
         self.zelligent_path = configuration
             .get("zelligent_path")
