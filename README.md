@@ -22,6 +22,8 @@ zelligent doctor
 
 `brew install` pulls in Zellij and lazygit automatically. `zelligent doctor` installs the Zellij plugin and configures the keybinding.
 
+On first launch, Zellij will ask you to grant the plugin permission to access state and run commands. **You must select `y` to allow this** — the plugin needs these permissions to manage worktrees and tabs.
+
 ### From source (for contributors)
 
 ```bash
