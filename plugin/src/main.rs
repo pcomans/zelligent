@@ -396,6 +396,9 @@ impl State {
                     self.status_is_error = false;
                     self.mode = Mode::BrowseWorktrees;
                     return Action::Spawn(branch);
+                } else {
+                    self.status_message = "Invalid branch name".to_string();
+                    self.status_is_error = true;
                 }
             }
             BareKey::Esc if no_mod => {
