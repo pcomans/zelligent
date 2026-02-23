@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA"));
+
 // Command context keys used to route RunCommandResult
 const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
 const CMD_LIST_WORKTREES: &str = "list_worktrees";
@@ -520,18 +522,18 @@ impl ZellijPlugin for State {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_worktree_list(&self.worktrees, self.selected_index, rows);
                 ui::render_status(&self.status_message, self.status_is_error);
-                ui::render_footer(&self.mode, concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA")));
+                ui::render_footer(&self.mode, VERSION);
             }
             Mode::SelectBranch => {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_branch_list(&self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(&self.mode, concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA")));
+                ui::render_footer(&self.mode, VERSION);
             }
             Mode::InputBranch => {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_input(&self.input_buffer);
                 ui::render_status(&self.status_message, self.status_is_error);
-                ui::render_footer(&self.mode, concat!(env!("CARGO_PKG_VERSION"), "+", env!("ZELLIGENT_GIT_SHA")));
+                ui::render_footer(&self.mode, VERSION);
             }
             Mode::Confirming => {
                 ui::render_header(&self.repo_name, cols);
@@ -855,6 +857,8 @@ mod tests {
         let action = s.handle_key_input_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::None);
         assert_eq!(s.mode, Mode::InputBranch);
+        assert!(s.status_is_error);
+        assert_eq!(s.status_message, "Invalid branch name");
     }
 
     #[test]
