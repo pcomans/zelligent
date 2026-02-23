@@ -190,36 +190,40 @@ contains "no args in non-git dir prints git error" "not inside a git repository"
 rm -rf "$NONGIT_NOARGS"
 
 # No args with plugin not installed: tells user to run doctor
-MOCK_NOARGS_NOPLUGIN=$(mktemp -d)
-out=$(XDG_CONFIG_HOME="$MOCK_NOARGS_NOPLUGIN" "$SCRIPT" 2>&1); code=$?
+# Use a restricted PATH without zelligent and no ZELLIGENT_PLUGIN_SRC
+MOCK_NOARGS_BIN_NONE=$(mktemp -d)
+cat > "$MOCK_NOARGS_BIN_NONE/git" <<'MOCK'
+#!/bin/bash
+# Proxy to real git
+/usr/bin/git "$@"
+MOCK
+chmod +x "$MOCK_NOARGS_BIN_NONE/git"
+out=$(ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN_NONE:/usr/bin:/bin" "$SCRIPT" 2>&1); code=$?
 check "no args without plugin exits non-zero" "1" "$code"
 contains "no args without plugin: suggests doctor" "zelligent doctor" "$out"
-rm -rf "$MOCK_NOARGS_NOPLUGIN"
+rm -rf "$MOCK_NOARGS_BIN_NONE"
 
 # No args inside Zellij: prints spawn suggestion
-MOCK_NOARGS_ZELLIJ=$(mktemp -d)
-mkdir -p "$MOCK_NOARGS_ZELLIJ/zellij/plugins"
-touch "$MOCK_NOARGS_ZELLIJ/zellij/plugins/zelligent-plugin.wasm"
-out=$(ZELLIJ=1 XDG_CONFIG_HOME="$MOCK_NOARGS_ZELLIJ" "$SCRIPT" 2>&1); code=$?
+# zelligent is in PATH (we're running from the repo), so the check passes
+out=$(ZELLIJ=1 ZELLIGENT_PLUGIN_SRC="$SCRIPT" "$SCRIPT" 2>&1); code=$?
 check "no args inside zellij exits 0" "0" "$code"
 contains "no args inside zellij: suggests spawn" "zelligent spawn" "$out"
-rm -rf "$MOCK_NOARGS_ZELLIJ"
 
 # No args outside Zellij with mock zellij (no existing session): creates session
 MOCK_NOARGS_BIN=$(mktemp -d)
-MOCK_NOARGS_CFG=$(mktemp -d)
-mkdir -p "$MOCK_NOARGS_CFG/zellij/plugins"
-touch "$MOCK_NOARGS_CFG/zellij/plugins/zelligent-plugin.wasm"
 cat > "$MOCK_NOARGS_BIN/zellij" <<'MOCK'
 #!/bin/bash
 if [ "$1" = "list-sessions" ]; then echo ""; exit 0; fi
 echo "zellij $*"
 MOCK
-chmod +x "$MOCK_NOARGS_BIN/zellij"
-out=$(ZELLIJ="" XDG_CONFIG_HOME="$MOCK_NOARGS_CFG" PATH="$MOCK_NOARGS_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+cat > "$MOCK_NOARGS_BIN/zelligent" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_NOARGS_BIN/zellij" "$MOCK_NOARGS_BIN/zelligent"
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
 check "no args creates session" "0" "$code"
 contains "no args: prints session message" "session" "$out"
-rm -rf "$MOCK_NOARGS_BIN" "$MOCK_NOARGS_CFG"
+rm -rf "$MOCK_NOARGS_BIN"
 
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
@@ -257,10 +261,11 @@ check "doctor without zellij exits non-zero" "1" "$code"
 contains "doctor without zellij: prints error" "not found" "$out"
 rm -rf "$MOCK_DR_NOZELLIJ" "$MOCK_DR_HOME"
 
-# doctor happy path: installs plugin and patches config
+# doctor happy path: patches config with plugin reference
 MOCK_DR_BIN=$(mktemp -d)
 MOCK_DR_HOME=$(mktemp -d)
-FAKE_WASM=$(mktemp)
+FAKE_WASM_DIR=$(mktemp -d)
+FAKE_WASM="$FAKE_WASM_DIR/zelligent-plugin.wasm"
 echo "fake-wasm-content" > "$FAKE_WASM"
 cat > "$MOCK_DR_BIN/zellij" <<'MOCK'
 #!/bin/bash
@@ -270,10 +275,6 @@ chmod +x "$MOCK_DR_BIN/zellij"
 out=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code=$?
 check "doctor exits 0" "0" "$code"
-check "doctor creates plugin dir" "true" \
-  "$([ -d "$MOCK_DR_HOME/.config/zellij/plugins" ] && echo true || echo false)"
-check "doctor installs plugin" "true" \
-  "$([ -f "$MOCK_DR_HOME/.config/zellij/plugins/zelligent-plugin.wasm" ] && echo true || echo false)"
 check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
 CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
@@ -290,13 +291,13 @@ contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
 
-rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME"
-rm -f "$FAKE_WASM"
+rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
 # doctor with existing keybinds block in config: appends without corrupting
 MOCK_DR_BIN2=$(mktemp -d)
 MOCK_DR_HOME2=$(mktemp -d)
-FAKE_WASM2=$(mktemp)
+FAKE_WASM_DIR2=$(mktemp -d)
+FAKE_WASM2="$FAKE_WASM_DIR2/zelligent-plugin.wasm"
 echo "fake-wasm" > "$FAKE_WASM2"
 cat > "$MOCK_DR_BIN2/zellij" <<'MOCK'
 #!/bin/bash
@@ -320,8 +321,7 @@ CONFIG_CONTENT2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
 contains "doctor preserves existing keybinds" "Ctrl x" "$CONFIG_CONTENT2"
 contains "doctor adds new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
 
-rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2"
-rm -f "$FAKE_WASM2"
+rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2" "$FAKE_WASM_DIR2"
 
 # doctor with plugin source not found: prints error
 MOCK_DR_BIN3=$(mktemp -d)
@@ -342,7 +342,8 @@ rm -rf "$MOCK_DR_BIN3" "$MOCK_DR_HOME3"
 MOCK_DR_BIN4=$(mktemp -d)
 MOCK_DR_HOME4=$(mktemp -d)
 MOCK_XDG=$(mktemp -d)
-FAKE_WASM4=$(mktemp)
+FAKE_WASM_DIR4=$(mktemp -d)
+FAKE_WASM4="$FAKE_WASM_DIR4/zelligent-plugin.wasm"
 echo "fake-wasm" > "$FAKE_WASM4"
 cat > "$MOCK_DR_BIN4/zellij" <<'MOCK'
 #!/bin/bash
@@ -352,16 +353,13 @@ chmod +x "$MOCK_DR_BIN4/zellij"
 out=$(HOME="$MOCK_DR_HOME4" XDG_CONFIG_HOME="$MOCK_XDG" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM4" \
   PATH="$MOCK_DR_BIN4:$PATH" "$SCRIPT" doctor 2>&1); code=$?
 check "doctor with XDG_CONFIG_HOME exits 0" "0" "$code"
-check "doctor uses XDG_CONFIG_HOME for plugin" "true" \
-  "$([ -f "$MOCK_XDG/zellij/plugins/zelligent-plugin.wasm" ] && echo true || echo false)"
 check "doctor uses XDG_CONFIG_HOME for config" "true" \
   "$([ -f "$MOCK_XDG/zellij/config.kdl" ] && echo true || echo false)"
 # Should NOT have created anything under ~/.config
 check "doctor does not use ~/.config when XDG set" "false" \
   "$([ -d "$MOCK_DR_HOME4/.config/zellij" ] && echo true || echo false)"
 
-rm -rf "$MOCK_DR_BIN4" "$MOCK_DR_HOME4" "$MOCK_XDG"
-rm -f "$FAKE_WASM4"
+rm -rf "$MOCK_DR_BIN4" "$MOCK_DR_HOME4" "$MOCK_XDG" "$FAKE_WASM_DIR4"
 
 # ── Query subcommands ────────────────────────────────────────────────────────
 echo "Query subcommands:"
