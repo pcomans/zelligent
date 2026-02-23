@@ -281,6 +281,17 @@ CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 contains "doctor adds keybinding" "zelligent-plugin.wasm" "$CONFIG_CONTENT"
 contains "doctor adds Ctrl y" "Ctrl y" "$CONFIG_CONTENT"
 
+# doctor writes permissions with file: prefix matching the config keybinding
+if [ "$(uname)" = "Darwin" ]; then
+  PERM_FILE="$MOCK_DR_HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+else
+  PERM_FILE="$MOCK_DR_HOME/.cache/zellij/permissions.kdl"
+fi
+check "doctor creates permissions.kdl" "true" \
+  "$([ -f "$PERM_FILE" ] && echo true || echo false)"
+PERM_CONTENT=$(cat "$PERM_FILE")
+contains "doctor permissions use file: prefix" "file:$FAKE_WASM" "$PERM_CONTENT"
+
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
