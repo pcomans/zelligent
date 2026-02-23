@@ -75,7 +75,15 @@ if [ "$1" = "doctor" ]; then
     echo "  plugin: ok ($PLUGIN_PATH)"
   fi
 
-  # 3. Patch Zellij config
+  # 3. Patch Zellij config (only if plugin was found)
+  if [ -z "$PLUGIN_PATH" ]; then
+    if [ "$ERRORS" -ne 0 ]; then
+      echo ""
+      echo "Some checks failed. Fix the issues above and run 'zelligent doctor' again."
+      exit 1
+    fi
+  fi
+
   CONFIG="$ZELLIJ_CONFIG_HOME/config.kdl"
   mkdir -p "$(dirname "$CONFIG")"
   touch "$CONFIG"
@@ -157,7 +165,10 @@ WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
   # Check plugin is available
-  if [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ] && [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
+    echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
+    exit 1
+  elif [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
     echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
     exit 1
   fi
