@@ -101,6 +101,28 @@ KDL
     fi
   fi
 
+  # 5. Grant plugin permissions
+  if [ "$(uname)" = "Darwin" ]; then
+    PERM_FILE="$HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+  else
+    PERM_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/zellij/permissions.kdl"
+  fi
+  mkdir -p "$(dirname "$PERM_FILE")"
+  touch "$PERM_FILE"
+
+  if grep -qF "$PLUGIN_DEST" "$PERM_FILE"; then
+    echo "  permissions: ok"
+  else
+    cat >> "$PERM_FILE" <<PERMS
+"$PLUGIN_DEST" {
+    ChangeApplicationState
+    ReadApplicationState
+    RunCommands
+}
+PERMS
+    echo "  permissions: granted for $PLUGIN_DEST"
+  fi
+
   if [ "$ERRORS" -ne 0 ]; then
     echo ""
     echo "Some checks failed. Fix the issues above and run 'zelligent doctor' again."
