@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
+const VERSION: &str = env!("ZELLIGENT_VERSION");
+
 // Command context keys used to route RunCommandResult
 const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
 const CMD_LIST_WORKTREES: &str = "list_worktrees";
@@ -61,6 +63,43 @@ pub struct State {
 }
 
 register_plugin!(State);
+
+/// Sanitize a user-supplied string into a valid git branch name.
+/// Replaces characters and sequences forbidden in git refs, collapses
+/// consecutive hyphens and slashes, and strips leading/trailing hyphens,
+/// dots, and slashes.
+pub fn sanitize_branch_name(name: &str) -> String {
+    // Replace characters forbidden in git refs with hyphens
+    let s: String = name
+        .chars()
+        .map(|c| match c {
+            ' ' | '\t' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+
+    // Replace forbidden multi-character sequences
+    let s = s.replace("@{", "-").replace("..", "-").replace("/.", "/-");
+
+    // Collapse consecutive hyphens and consecutive slashes
+    let mut result = String::new();
+    let mut prev = '\0';
+    for c in s.chars() {
+        if (c == '-' && prev == '-') || (c == '/' && prev == '/') {
+            continue;
+        }
+        result.push(c);
+        prev = c;
+    }
+
+    // Strip reserved .lock suffix
+    if result.ends_with(".lock") {
+        result.truncate(result.len() - 5);
+    }
+
+    result.trim_matches(|c| c == '-' || c == '.' || c == '/').to_string()
+}
 
 /// Parse `zelligent list-worktrees` output (one branch per line).
 pub fn parse_worktrees(output: &str) -> Vec<Worktree> {
@@ -359,12 +398,15 @@ impl State {
 
         match key.bare_key {
             BareKey::Enter if no_mod => {
-                let branch = self.input_buffer.trim().to_string();
+                let branch = sanitize_branch_name(self.input_buffer.trim());
                 if !branch.is_empty() {
                     self.status_message = format!("Spawning '{branch}'...");
                     self.status_is_error = false;
                     self.mode = Mode::BrowseWorktrees;
                     return Action::Spawn(branch);
+                } else {
+                    self.status_message = "Invalid branch name".to_string();
+                    self.status_is_error = true;
                 }
             }
             BareKey::Esc if no_mod => {
@@ -486,17 +528,18 @@ impl ZellijPlugin for State {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_worktree_list(&self.worktrees, self.selected_index, rows);
                 ui::render_status(&self.status_message, self.status_is_error);
-                ui::render_footer(&self.mode);
+                ui::render_footer(&self.mode, VERSION);
             }
             Mode::SelectBranch => {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_branch_list(&self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(&self.mode);
+                ui::render_footer(&self.mode, VERSION);
             }
             Mode::InputBranch => {
                 ui::render_header(&self.repo_name, cols);
                 ui::render_input(&self.input_buffer);
-                ui::render_footer(&self.mode);
+                ui::render_status(&self.status_message, self.status_is_error);
+                ui::render_footer(&self.mode, VERSION);
             }
             Mode::Confirming => {
                 ui::render_header(&self.repo_name, cols);
@@ -533,6 +576,67 @@ mod tests {
         ];
         s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
         s
+    }
+
+    // --- sanitize_branch_name tests ---
+
+    #[test]
+    fn sanitize_spaces_become_hyphens() {
+        assert_eq!(sanitize_branch_name("claude alerts"), "claude-alerts");
+        assert_eq!(sanitize_branch_name("my new feature"), "my-new-feature");
+    }
+
+    #[test]
+    fn sanitize_collapses_consecutive_hyphens() {
+        assert_eq!(sanitize_branch_name("foo  bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("a ~ b"), "a-b");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_trailing() {
+        assert_eq!(sanitize_branch_name(" leading"), "leading");
+        assert_eq!(sanitize_branch_name("trailing "), "trailing");
+        assert_eq!(sanitize_branch_name(".dotted."), "dotted");
+    }
+
+    #[test]
+    fn sanitize_invalid_chars() {
+        assert_eq!(sanitize_branch_name("feat~1"), "feat-1");
+        assert_eq!(sanitize_branch_name("foo:bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("a?b*c"), "a-b-c");
+    }
+
+    #[test]
+    fn sanitize_valid_name_unchanged() {
+        assert_eq!(sanitize_branch_name("feat/new-thing"), "feat/new-thing");
+        assert_eq!(sanitize_branch_name("fix-bug_123"), "fix-bug_123");
+    }
+
+    #[test]
+    fn sanitize_empty_returns_empty() {
+        assert_eq!(sanitize_branch_name(""), "");
+        assert_eq!(sanitize_branch_name("   "), "");
+    }
+
+    #[test]
+    fn sanitize_git_ref_sequences() {
+        assert_eq!(sanitize_branch_name("foo..bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("foo@{1}"), "foo-1}");
+        assert_eq!(sanitize_branch_name("foo//bar"), "foo/bar");
+        assert_eq!(sanitize_branch_name("foo/.bar"), "foo/-bar");
+        assert_eq!(sanitize_branch_name("foo.lock"), "foo");
+        assert_eq!(sanitize_branch_name("/leading"), "leading");
+        assert_eq!(sanitize_branch_name("trailing/"), "trailing");
+    }
+
+    // --- InputBranch integration tests ---
+
+    #[test]
+    fn input_branch_enter_sanitizes_and_spawns() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "claude alerts".into(), ..Default::default() };
+        let action = s.handle_key_input_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("claude-alerts".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
     }
 
     // --- Parsing tests ---
@@ -780,6 +884,8 @@ mod tests {
         let action = s.handle_key_input_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::None);
         assert_eq!(s.mode, Mode::InputBranch);
+        assert!(s.status_is_error);
+        assert_eq!(s.status_message, "Invalid branch name");
     }
 
     #[test]
