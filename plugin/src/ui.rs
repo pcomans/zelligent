@@ -19,8 +19,17 @@ pub fn render_header(repo_name: &str, cols: usize) {
 pub fn render_worktree_list(worktrees: &[Worktree], selected: usize, rows: usize) {
     if worktrees.is_empty() {
         println!();
-        println!("  {DIM}No worktrees found.{RESET}");
-        println!("  {DIM}Press {RESET}n{DIM} to pick a branch or {RESET}i{DIM} to type one.{RESET}");
+        println!("  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}");
+        println!("  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}");
+        println!("  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}");
+        println!("  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}");
+        println!("  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}");
+        println!("  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}");
+        println!("  {CYAN}                             ██{RESET}");
+        println!("  {CYAN}                           ▀▀▀{RESET}");
+        println!();
+        println!("  {DIM}n{RESET}  pick an existing branch");
+        println!("  {DIM}i{RESET}  type a new branch name");
         return;
     }
 
