@@ -9,94 +9,104 @@
                            ▀▀▀
 ```
 
-Spawn AI coding agents in isolated git worktrees, each in their own Zellij tab.
+Zelligent runs AI coding agents in isolated git worktrees, each in its own [Zellij](https://zellij.dev) tab.
 
-## Installation
+You give it a branch name and an agent command. It creates a worktree, opens a new tab with the agent on the left and [lazygit](https://github.com/jesseduffield/lazygit) on the right. When you're done, it cleans up the worktree.
 
-### Homebrew (recommended)
+## Quick start
+
+Install with Homebrew (pulls in Zellij and lazygit automatically):
 
 ```bash
 brew install pcomans/zelligent/zelligent
+```
+
+Run the setup wizard:
+
+```bash
 zelligent doctor
 ```
 
-`brew install` pulls in Zellij and lazygit automatically. `zelligent doctor` installs the Zellij plugin and configures the keybinding.
+This installs the Zellij plugin, adds the `Ctrl-y` keybinding to your Zellij config, and sets up clipboard support on macOS. Safe to run more than once.
 
-On first launch, Zellij will ask you to grant the plugin permission to access state and run commands. **You must select `y` to allow this** — the plugin needs these permissions to manage worktrees and tabs.
-
-### From source (for contributors)
+Start a session:
 
 ```bash
-git clone https://github.com/pcomans/zelligent.git
-cd zelligent
-PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+cd my-project
+zelligent
 ```
 
-Requires [Rust via rustup](https://rustup.rs) with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`).
+This opens a Zellij session named after your repo. If the session already exists, it reattaches to it.
 
-## Usage
+Spawn an agent in a new worktree:
 
 ```bash
+zelligent spawn feature/my-feature claude
+```
+
+This creates a git worktree branched from your default branch, opens a new Zellij tab, and runs `claude` (Claude Code) in it. The tab is split 70/30 between the agent and lazygit.
+
+On first launch, Zellij will ask you to grant the plugin permissions. Select `y` — the plugin needs these to manage worktrees and tabs.
+
+## How it works
+
+Zelligent has two parts: a shell script that manages git worktrees and Zellij sessions, and a Rust plugin (compiled to WASM) that provides an interactive UI inside Zellij.
+
+### The CLI
+
+The `zelligent` command handles worktree creation, layout generation, and session management.
+
+When you run `zelligent spawn feature/auth claude`:
+
+1. It creates a git worktree at `~/.zelligent/worktrees/<repo>/<branch>/`, branched from your default branch (usually `main`)
+2. It generates a Zellij layout file (KDL format) with two panes: agent left, lazygit right
+3. If you're inside Zellij, it opens a new tab. If you're outside, it creates or attaches to the repo's session
+
+If the branch already exists, it reuses the existing worktree instead of creating a new one.
+
+### The plugin
+
+Press `Ctrl-y` inside Zellij to open the plugin as a floating pane. It lists your active worktrees and lets you create, open, or remove them without leaving the terminal.
+
+| Key | Action |
+|---|---|
+| `j/k` or arrows | Navigate the list |
+| `Enter` | Open the selected worktree |
+| `n` | Pick from existing git branches |
+| `i` | Type a new branch name |
+| `d` then `y` | Remove the selected worktree |
+| `r` | Refresh |
+| `q` / `Esc` | Close |
+
+When you remove a worktree through the plugin, it also closes the corresponding tab.
+
+## Commands
+
+```
 zelligent                                   # launch/attach session for current repo
 zelligent spawn <branch-name> [agent-cmd]   # create worktree and open agent tab
 zelligent remove <branch-name>              # remove a worktree
 zelligent init                              # create .zelligent/ hook stubs
-zelligent doctor                            # check and fix zelligent setup
+zelligent doctor                            # check and fix setup
 ```
 
-### Quick start
-
-```bash
-cd my-project
-zelligent                                   # opens a Zellij session for this repo
-zelligent spawn feature/my-feature claude   # opens Claude Code in a new worktree tab
-```
-
-### `zelligent` (no arguments)
-
-Launches or attaches to a Zellij session named after the current repo. If the session already exists, it reattaches — all your worktree tabs are still there.
-
-### `zelligent spawn`
-
-- `branch-name` — created from the default branch if it doesn't exist, reattached if it does
-- `agent-command` — command to run in the main pane (default: `$SHELL`)
-
-Behaviour depends on context:
+`zelligent spawn` adapts to context:
 
 | Context | Result |
 |---|---|
 | Inside a Zellij session | Opens a new tab in the current session |
-| Outside Zellij, repo session exists | Attaches to the repo session, opens a new tab |
-| Outside Zellij, no repo session | Creates a new session named after the repo |
+| Outside Zellij, session exists | Attaches to the session, opens a new tab |
+| Outside Zellij, no session | Creates a new session |
 
-Each worktree opens as a tab named after the branch (`feature/my-feature` → tab `feature-my-feature`).
-
-Worktrees are stored under `~/.zelligent/worktrees/<repo-name>/<branch-name>`.
-
-Each tab opens with the agent command on the left (70%) and lazygit on the right (30%).
-
-### `zelligent remove`
-
-Runs `.zelligent/teardown.sh` (if present), removes the worktree, and prints a reminder to close the tab. Fails with a clear error if the worktree has uncommitted changes. The local git branch is not deleted.
-
-### `zelligent init`
-
-Creates `.zelligent/setup.sh` and `.zelligent/teardown.sh` in the current repo if they don't already exist.
-
-### `zelligent doctor`
-
-Checks and fixes your zelligent installation:
-
-- Verifies Zellij is installed
-- Installs the Zellij plugin to `~/.config/zellij/plugins/`
-- Adds the `Ctrl-y` keybinding to your Zellij config
-- Adds `copy_command "pbcopy"` on macOS
-
-Safe to run repeatedly — idempotent by design.
+`zelligent remove` refuses to delete worktrees with uncommitted changes. The local branch is kept.
 
 ## Per-repo hooks
 
-Create `.zelligent/setup.sh` to run custom setup when a worktree is created (copy `.env`, install deps, etc.). The setup script runs **inside the new Zellij tab** as a preamble to the agent command, so you can see its progress. If the setup script fails (non-zero exit), the agent command will not start and the pane stays open so you can read the error.
+Run `zelligent init` to create hook stubs, or create them manually.
+
+### Setup hook
+
+`.zelligent/setup.sh` runs inside the new tab when a worktree is first created. Use it to copy config files, install dependencies, or anything else the agent needs before it starts.
 
 ```bash
 #!/bin/bash
@@ -107,9 +117,11 @@ cp "$REPO_ROOT/.env" "$WORKTREE_PATH/"
 cd "$WORKTREE_PATH" && npm install
 ```
 
-The setup script only runs once when the worktree is first created. Reopening an existing worktree skips it.
+If the setup script fails, the agent command won't start and the pane stays open so you can read the error. The script only runs on first creation — reopening an existing worktree skips it.
 
-Create `.zelligent/teardown.sh` to clean up when a worktree is removed (stop dev servers, remove copied files, etc.):
+### Teardown hook
+
+`.zelligent/teardown.sh` runs when a worktree is removed:
 
 ```bash
 #!/bin/bash
@@ -121,10 +133,7 @@ rm -f "$WORKTREE_PATH/.env"
 
 ## Custom layout
 
-Create `.zelligent/layout.kdl` to override the default Zellij layout. Use `{{cwd}}` and `{{agent_cmd}}` as placeholders.
-
-> **Note:** Custom layouts bypass the automatic `setup.sh` preamble. If you need setup to run before the agent, wrap it in your template's command, e.g. `command="bash"` with `args "-c" "bash .zelligent/setup.sh /repo /worktree && exec {{agent_cmd}}"`.
-
+Create `.zelligent/layout.kdl` to override the default tab layout. Use `{{cwd}}` and `{{agent_cmd}}` as placeholders:
 
 ```kdl
 layout {
@@ -141,9 +150,11 @@ layout {
 }
 ```
 
+Custom layouts bypass the automatic `setup.sh` preamble. If you need setup to run before the agent, wrap it in your command, e.g. `args "-c" "bash .zelligent/setup.sh /repo /worktree && exec {{agent_cmd}}"`.
+
 ## Navigating tabs
 
-Each worktree opens as a tab in your current Zellij session. The keybindings below are Zellij's defaults — they may differ if you have a custom config. See the [Zellij docs](https://zellij.dev/documentation/) for reference.
+These are Zellij's default keybindings:
 
 | Action | Keybinding |
 |---|---|
@@ -151,21 +162,14 @@ Each worktree opens as a tab in your current Zellij session. The keybindings bel
 | Previous tab | `Ctrl-t p` |
 | Rename tab | `Ctrl-t r` |
 | Close tab | `Ctrl-t x` |
-| Switch between panes | `Ctrl-p` + arrow keys |
-| New pane | `Ctrl-p n` |
-| Split pane right | `Ctrl-p d` |
-| Split pane down | `Ctrl-p D` |
+| Switch panes | `Ctrl-p` + arrow keys |
 
-## Zellij plugin
+## Installing from source
 
-The plugin provides an interactive UI for managing worktrees, launched via `Ctrl-y` as a floating pane.
+```bash
+git clone https://github.com/pcomans/zelligent.git
+cd zelligent
+PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+```
 
-| Key | Action |
-|---|---|
-| `j/k` or arrows | Navigate list |
-| `Enter` | Open selected worktree |
-| `n` | Pick from existing git branches |
-| `i` | Type a new branch name |
-| `d` then `y` | Remove selected worktree |
-| `r` | Refresh |
-| `q` / `Esc` | Close |
+Requires [Rust via rustup](https://rustup.rs) with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`).
