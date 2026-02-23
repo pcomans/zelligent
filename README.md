@@ -13,6 +13,8 @@ Zelligent runs AI coding agents in isolated git worktrees, each in its own [Zell
 
 You give it a branch name and an agent command. It creates a worktree, opens a new tab with the agent on the left and [lazygit](https://github.com/jesseduffield/lazygit) on the right. When you're done, it cleans up the worktree.
 
+Use the CLI to spawn worktrees, or press **`Ctrl-y`** inside Zellij to manage them from an interactive plugin UI.
+
 ## Quick start
 
 Install with Homebrew (pulls in Zellij and lazygit automatically):
