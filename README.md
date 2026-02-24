@@ -29,7 +29,7 @@ Run the setup wizard:
 zelligent doctor
 ```
 
-This installs the Zellij plugin, adds the `Ctrl-y` keybinding to your Zellij config, and sets up clipboard support on macOS. Safe to run more than once.
+This installs the Zellij plugin, adds the `Ctrl-y` keybinding to your Zellij config, and syncs the bundled Claude skill to `~/.claude/skills/zelligent-spawn-claude/SKILL.md` (Homebrew installs use a symlink to keep it updated across upgrades). It also sets up clipboard support on macOS. Safe to run more than once.
 
 Start a session:
 

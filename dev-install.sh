@@ -38,6 +38,17 @@ mkdir -p "$SHARE_DIR"
 cp "target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
 echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
 
+# Install bundled Claude skill for `zelligent doctor`
+SKILL_SRC=".claude/skills/zelligent-spawn-claude/SKILL.md"
+SKILL_DST_DIR="$SHARE_DIR/skills/zelligent-spawn-claude"
+if [ ! -f "$SKILL_SRC" ]; then
+  echo "Error: Missing bundled skill at $SKILL_SRC" >&2
+  exit 1
+fi
+mkdir -p "$SKILL_DST_DIR"
+cp "$SKILL_SRC" "$SKILL_DST_DIR/SKILL.md"
+echo "Installed Claude skill to $SKILL_DST_DIR/SKILL.md"
+
 # Update Zellij config to point at the dev plugin path
 CONFIG="$HOME/.config/zellij/config.kdl"
 if [ -f "$CONFIG" ]; then

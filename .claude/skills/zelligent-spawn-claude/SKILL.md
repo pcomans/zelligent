@@ -1,10 +1,15 @@
 ---
 name: zelligent-spawn-claude
-description: Use zelligent CLI to spawn Claude subagents into isolated git worktrees, each opened in a new Zellij tab. Trigger when asked to run multiple parallel agents or split tasks across separate branches/tabs.
+description: Use zelligent CLI to spawn Claude subagents into isolated git worktrees, each opened in a new Zellij tab. Trigger when asked to spawn agents, run parallel Claude instances, or split tasks across separate branches/tabs.
 allowed-tools: Bash
 ---
 
 Use the CLI flow only. Do not use the interactive plugin UI.
+
+## Important limitation
+
+- Spawning a sub-agent in a separate Zellij tab does not stream its feedback back into this chat.
+- If the user expects review findings or any concrete output in this conversation (for example a code review), do not delegate via `zelligent spawn`; do the review directly in this agent.
 
 ## Workflow
 
