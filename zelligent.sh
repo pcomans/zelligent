@@ -30,6 +30,9 @@ fi
 
 if [ "$1" = "doctor" ]; then
   ERRORS=0
+  ZELLIGENT_BIN=$(command -v zelligent 2>/dev/null || echo "$0")
+  ZELLIGENT_PREFIX=$(dirname "$(dirname "$ZELLIGENT_BIN")")
+  SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
   # 1. Check zellij is installed
   if command -v zellij &>/dev/null; then
@@ -51,8 +54,6 @@ if [ "$1" = "doctor" ]; then
       PLUGIN_MODE="custom"
     fi
   else
-    ZELLIGENT_BIN=$(command -v zelligent 2>/dev/null || echo "$0")
-    ZELLIGENT_PREFIX=$(dirname "$(dirname "$ZELLIGENT_BIN")")
     HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
     DEV_PLUGIN="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
     if [ -f "$HOMEBREW_PLUGIN" ]; then
@@ -75,7 +76,7 @@ if [ "$1" = "doctor" ]; then
     echo "  plugin: ok ($PLUGIN_PATH)"
   fi
 
-  # 3. Patch Zellij config (only if plugin was found)
+  # 3. Check plugin was found before continuing setup
   if [ -z "$PLUGIN_PATH" ]; then
     if [ "$ERRORS" -ne 0 ]; then
       echo ""
@@ -145,6 +146,47 @@ KDL
 }
 PERMS
     echo "  permissions: granted for $PLUGIN_PATH"
+  fi
+
+  # 6. Sync bundled Claude skill (if available)
+  SKILL_SOURCE=""
+  SKILL_MODE=""
+  if [ -n "$ZELLIGENT_SKILL_SRC" ]; then
+    if [ ! -f "$ZELLIGENT_SKILL_SRC" ]; then
+      echo "  claude skill: source not found ($ZELLIGENT_SKILL_SRC)"
+      ERRORS=1
+    else
+      SKILL_SOURCE="$ZELLIGENT_SKILL_SRC"
+      SKILL_MODE="custom"
+    fi
+  else
+    HOMEBREW_SKILL="$ZELLIGENT_PREFIX/share/zelligent/skills/zelligent-spawn-claude/SKILL.md"
+    DEV_SKILL="$HOME/.local/share/zelligent/skills/zelligent-spawn-claude/SKILL.md"
+    SOURCE_SKILL="$SCRIPT_DIR/.claude/skills/zelligent-spawn-claude/SKILL.md"
+    if [ -f "$HOMEBREW_SKILL" ]; then
+      SKILL_SOURCE="$HOMEBREW_SKILL"
+      SKILL_MODE="homebrew"
+    elif [ -f "$DEV_SKILL" ]; then
+      SKILL_SOURCE="$DEV_SKILL"
+      SKILL_MODE="dev"
+    elif [ -f "$SOURCE_SKILL" ]; then
+      SKILL_SOURCE="$SOURCE_SKILL"
+      SKILL_MODE="source"
+    fi
+  fi
+
+  SKILL_DEST="$HOME/.claude/skills/zelligent-spawn-claude/SKILL.md"
+  if [ -z "$SKILL_SOURCE" ]; then
+    echo "  claude skill: not bundled (skipped)"
+  else
+    mkdir -p "$(dirname "$SKILL_DEST")"
+    if [ "$SKILL_MODE" = "homebrew" ]; then
+      ln -sfn "$SKILL_SOURCE" "$SKILL_DEST"
+      echo "  claude skill: linked ($SKILL_DEST -> $SKILL_SOURCE)"
+    else
+      cp "$SKILL_SOURCE" "$SKILL_DEST"
+      echo "  claude skill: synced ($SKILL_DEST)"
+    fi
   fi
 
   if [ "$ERRORS" -ne 0 ]; then
