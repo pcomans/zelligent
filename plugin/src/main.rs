@@ -1,6 +1,7 @@
 mod ui;
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
@@ -562,37 +563,43 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        self.render_to(&mut std::io::stdout(), rows, cols);
+    }
+}
+
+impl State {
+    pub fn render_to(&self, w: &mut impl Write, rows: usize, cols: usize) {
         match self.mode {
             Mode::Loading => {
-                ui::render_header("loading...", cols);
-                println!();
+                ui::render_header(w, "loading...", cols);
+                writeln!(w).unwrap();
                 if self.status_is_error {
-                    ui::render_status(&self.status_message, self.status_is_error);
+                    ui::render_status(w, &self.status_message, self.status_is_error);
                 } else {
-                    println!("  Waiting for permissions...");
+                    writeln!(w, "  Waiting for permissions...").unwrap();
                 }
             }
             Mode::BrowseWorktrees => {
-                ui::render_header(&self.repo_name, cols);
-                ui::render_worktree_list(&self.worktrees, self.selected_index, rows);
-                ui::render_status(&self.status_message, self.status_is_error);
-                ui::render_footer(&self.mode, VERSION);
+                ui::render_header(w, &self.repo_name, cols);
+                ui::render_worktree_list(w, &self.worktrees, self.selected_index, rows);
+                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_footer(w, &self.mode, VERSION);
             }
             Mode::SelectBranch => {
-                ui::render_header(&self.repo_name, cols);
-                ui::render_branch_list(&self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(&self.mode, VERSION);
+                ui::render_header(w, &self.repo_name, cols);
+                ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
+                ui::render_footer(w, &self.mode, VERSION);
             }
             Mode::InputBranch => {
-                ui::render_header(&self.repo_name, cols);
-                ui::render_input(&self.input_buffer);
-                ui::render_status(&self.status_message, self.status_is_error);
-                ui::render_footer(&self.mode, VERSION);
+                ui::render_header(w, &self.repo_name, cols);
+                ui::render_input(w, &self.input_buffer);
+                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_footer(w, &self.mode, VERSION);
             }
             Mode::Confirming => {
-                ui::render_header(&self.repo_name, cols);
+                ui::render_header(w, &self.repo_name, cols);
                 if let Some(wt) = self.worktrees.get(self.selected_index) {
-                    ui::render_confirm(&wt.branch);
+                    ui::render_confirm(w, &wt.branch);
                 }
             }
         }
@@ -1280,5 +1287,202 @@ mod tests {
         assert_eq!(wrap_navigate(2, 3, 1), 0);
         assert_eq!(wrap_navigate(0, 3, -1), 2);
         assert_eq!(wrap_navigate(0, 0, 1), 0);
+    }
+
+    // --- Render snapshot tests ---
+
+    fn render_to_string(state: &State, rows: usize, cols: usize) -> String {
+        let mut buf = Vec::new();
+        state.render_to(&mut buf, rows, cols);
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn state_with_branches() -> State {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = vec![
+            "main".into(),
+            "feat-a".into(),
+            "feat-b".into(),
+            "dev".into(),
+        ];
+        s.selected_index = 0;
+        s
+    }
+
+    #[test]
+    fn render_loading_mode() {
+        let s = State::default();
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_loading_with_error() {
+        let s = State {
+            status_message: "Permission denied".into(),
+            status_is_error: true,
+            ..Default::default()
+        };
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_browse_with_worktrees() {
+        let s = state_with_worktrees();
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_browse_empty() {
+        let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_browse_with_status_message() {
+        let mut s = state_with_worktrees();
+        s.status_message = "Spawned worktree for feat-d".into();
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_browse_with_error_message() {
+        let mut s = state_with_worktrees();
+        s.status_message = "Failed to spawn worktree".into();
+        s.status_is_error = true;
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_select_branch() {
+        let s = state_with_branches();
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_select_branch_empty() {
+        let s = State {
+            mode: Mode::SelectBranch,
+            filtered_branches: vec![],
+            ..Default::default()
+        };
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_input_branch_empty() {
+        let s = State { mode: Mode::InputBranch, ..Default::default() };
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_input_branch_with_text() {
+        let s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "feat/my-feature".into(),
+            ..Default::default()
+        };
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_confirming() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.selected_index = 1;
+        insta::assert_snapshot!(render_to_string(&s, 20, 80));
+    }
+
+    #[test]
+    fn render_worktree_list_scrolling() {
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            worktrees: (0..20)
+                .map(|i| Worktree { branch: format!("branch-{i}") })
+                .collect(),
+            selected_index: 15,
+            ..Default::default()
+        };
+        // Small viewport forces scrolling
+        insta::assert_snapshot!(render_to_string(&s, 10, 80));
+    }
+
+    // --- Interaction flow tests ---
+
+    #[test]
+    fn flow_browse_navigate_and_render() {
+        let mut s = state_with_worktrees();
+        let initial = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_browse_initial", initial);
+
+        // Navigate down
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        let after_j = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_browse_after_j", after_j);
+
+        // Navigate down again
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        let after_jj = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_browse_after_jj", after_jj);
+    }
+
+    #[test]
+    fn flow_browse_to_branch_picker() {
+        let mut s = state_with_worktrees();
+        s.filtered_branches = s.branches.clone();
+
+        // Press 'n' to enter branch picker
+        s.handle_key_browse(&key(BareKey::Char('n')));
+        assert_eq!(s.mode, Mode::SelectBranch);
+        let picker = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_branch_picker", picker);
+
+        // Navigate down in picker
+        s.handle_key_select_branch(&key(BareKey::Char('j')));
+        let picker_moved = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_branch_picker_after_j", picker_moved);
+
+        // Escape back
+        s.handle_key_select_branch(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn flow_browse_to_input_branch() {
+        let mut s = state_with_worktrees();
+
+        // Press 'i' to enter input mode
+        s.handle_key_browse(&key(BareKey::Char('i')));
+        assert_eq!(s.mode, Mode::InputBranch);
+        let empty_input = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_input_empty", empty_input);
+
+        // Type a branch name
+        s.handle_key_input_branch(&key(BareKey::Char('f')));
+        s.handle_key_input_branch(&key(BareKey::Char('i')));
+        s.handle_key_input_branch(&key(BareKey::Char('x')));
+        let typed = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_input_typed", typed);
+
+        // Backspace
+        s.handle_key_input_branch(&key(BareKey::Backspace));
+        let after_bs = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_input_after_backspace", after_bs);
+    }
+
+    #[test]
+    fn flow_browse_to_confirm_delete() {
+        let mut s = state_with_worktrees();
+        s.selected_index = 1; // feat-b
+
+        // Press 'd' to confirm delete
+        s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(s.mode, Mode::Confirming);
+        let confirm = render_to_string(&s, 20, 80);
+        insta::assert_snapshot!("flow_confirm_delete", confirm);
+
+        // Press Esc to cancel
+        s.handle_key_confirming(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
     }
 }
