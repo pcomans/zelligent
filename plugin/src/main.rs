@@ -1089,7 +1089,7 @@ mod tests {
         // For testing, we might need to mock PathBuf::exists or use a path that exists.
         // Let's use / as it usually exists.
         let stdout = b"p1234\nn/\n";
-        let _action = s.handle_lsof_result(Some(0), stdout);
+        let action = s.handle_lsof_result(Some(0), stdout);
 
         assert_eq!(s.initial_cwd, PathBuf::from("/"));
         assert_eq!(action, Action::FetchToplevel);
