@@ -20,6 +20,7 @@ pub enum Mode {
     SelectBranch,
     InputBranch,
     Confirming,
+    StraySession,
 }
 
 impl Default for Mode {
@@ -43,6 +44,7 @@ pub enum Action {
     Refresh,
     FetchToplevel,
     FetchWorktreesAndBranches,
+    KillSession,
 }
 
 #[derive(Default)]
@@ -221,6 +223,13 @@ impl State {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
             }
+            Action::KillSession => {
+                if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
+                    kill_sessions(&[session_name]);
+                } else {
+                    detach();
+                }
+            }
         }
     }
 
@@ -237,10 +246,18 @@ impl State {
         }
 
         if is_not_a_repo {
-            if !self.recovery_attempted {
+            let session_name = std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default();
+            let current_dir_name = self.initial_cwd.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+
+            if !self.recovery_attempted && !session_name.is_empty() && current_dir_name != session_name {
                 self.recovery_attempted = true;
-                return self.attempt_cwd_recovery();
+                self.initial_cwd = self.initial_cwd.join(&session_name);
+                return Action::FetchToplevel;
             }
+
+            self.mode = Mode::StraySession;
             let err = String::from_utf8_lossy(stderr);
             let cwd = self.initial_cwd.display();
             self.status_message = format!("{cwd} is not a git repo: {err}");
@@ -349,24 +366,6 @@ impl State {
         }
         self.mode = Mode::BrowseWorktrees;
         Action::Refresh
-    }
-
-    /// Attempt to recover the CWD by checking if a child directory matching the session name
-    /// is a valid git repository. This addresses the common issue where Zellij launches the
-    /// plugin in the parent directory of the actual repository.
-    fn attempt_cwd_recovery(&mut self) -> Action {
-        if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
-            let candidate = self.initial_cwd.join(&session_name);
-            // We just update the initial_cwd and trigger FetchToplevel again.
-            // If it fails again, handle_git_toplevel will finally error out because
-            // recovery_attempted is now true.
-            self.initial_cwd = candidate;
-            return Action::FetchToplevel;
-        }
-
-        self.status_message = "CWD recovery failed (no session name)".to_string();
-        self.status_is_error = true;
-        Action::None
     }
 
     /// Convert a branch name to the corresponding Zellij tab name.
@@ -510,6 +509,21 @@ impl State {
         }
         Action::None
     }
+
+    pub fn handle_key_stray_session(&mut self, key: &KeyWithModifier) -> Action {
+        if key.has_no_modifiers() {
+            match key.bare_key {
+                BareKey::Char('y') => {
+                    return Action::KillSession;
+                }
+                BareKey::Char('n') | BareKey::Esc | BareKey::Char('q') => {
+                    return Action::Close;
+                }
+                _ => {}
+            }
+        }
+        Action::None
+    }
 }
 
 impl ZellijPlugin for State {
@@ -585,6 +599,7 @@ impl ZellijPlugin for State {
                     Mode::SelectBranch => self.handle_key_select_branch(&key),
                     Mode::InputBranch => self.handle_key_input_branch(&key),
                     Mode::Confirming => self.handle_key_confirming(&key),
+                    Mode::StraySession => self.handle_key_stray_session(&key),
                 }
             }
             _ => return false,
@@ -626,6 +641,11 @@ impl ZellijPlugin for State {
                 if let Some(wt) = self.worktrees.get(self.selected_index) {
                     ui::render_confirm(&wt.branch);
                 }
+            }
+            Mode::StraySession => {
+                ui::render_header("stray session", cols);
+                let session_name = std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default();
+                ui::render_stray_session(&self.initial_cwd.display().to_string(), &session_name);
             }
         }
     }
@@ -1032,7 +1052,7 @@ mod tests {
         let action = s.handle_git_toplevel(Some(128), b"", b"not a git repo");
         assert!(s.status_is_error);
         assert!(s.status_message.contains("is not a git repo"));
-        assert_eq!(s.mode, Mode::Loading);
+        assert_eq!(s.mode, Mode::StraySession);
         assert_eq!(action, Action::None);
     }
 
@@ -1044,6 +1064,15 @@ mod tests {
         assert_eq!(action, Action::FetchToplevel);
         assert!(s.recovery_attempted);
         assert_eq!(s.initial_cwd, PathBuf::from("").join("myrepo"));
+    }
+
+    #[test]
+    fn git_toplevel_error_enters_stray_session_mode() {
+        std::env::set_var("ZELLIJ_SESSION_NAME", "myrepo");
+        let mut s = State::default();
+        s.recovery_attempted = true; // Recovery already tried
+        let _action = s.handle_git_toplevel(Some(0), b"error=not_a_repo", b"");
+        assert_eq!(s.mode, Mode::StraySession);
     }
 
     #[test]
