@@ -357,12 +357,12 @@ impl State {
     fn attempt_cwd_recovery(&mut self) -> Action {
         #[cfg(target_arch = "wasm32")]
         {
-            if let Ok((_tab_index, pane_id)) = get_focused_pane_info() {
-                if let Ok(pid) = get_pane_pid(pane_id) {
+            if let Ok((_tab_index, pane_id)) = zellij_tile::shim::get_focused_pane_info() {
+                if let Ok(pid) = zellij_tile::shim::get_pane_pid(pane_id) {
                     self.status_message = "Recovering CWD...".to_string();
                     run_command_with_env_variables_and_cwd(
                         &["lsof", "-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"],
-                        BTreeMap::new(),
+                        BTreeMap::<String, String>::new(),
                         PathBuf::from("/"),
                         Self::ctx(CMD_LSOF),
                     );
