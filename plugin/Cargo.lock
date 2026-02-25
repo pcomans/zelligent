@@ -3601,7 +3601,7 @@ dependencies = [
 
 [[package]]
 name = "zelligent-plugin"
-version = "0.1.4"
+version = "0.0.0-dev"
 dependencies = [
  "zellij-tile",
 ]

@@ -12,6 +12,7 @@ const CMD_LIST_WORKTREES: &str = "list_worktrees";
 const CMD_GIT_BRANCHES: &str = "git_branches";
 const CMD_SPAWN: &str = "spawn";
 const CMD_REMOVE: &str = "remove";
+const CMD_LSOF: &str = "lsof";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -65,6 +66,8 @@ pub struct State {
     /// Auto-selection of the active tab's worktree only happens before this
     /// so that subsequent refreshes do not override the user's cursor position.
     pub has_loaded: bool,
+    /// Set to `true` if we've already tried to recover the CWD using lsof.
+    pub recovery_attempted: bool,
 }
 
 register_plugin!(State);
@@ -225,14 +228,26 @@ impl State {
     // --- Pure state handlers (no zellij calls, fully testable) ---
 
     pub fn handle_git_toplevel(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Action {
+        let output = String::from_utf8_lossy(stdout);
+        let mut is_not_a_repo = false;
+
         if exit_code != Some(0) {
+            is_not_a_repo = true;
+        } else if output.trim() == "error=not_a_repo" {
+            is_not_a_repo = true;
+        }
+
+        if is_not_a_repo {
+            if !self.recovery_attempted {
+                self.recovery_attempted = true;
+                return self.attempt_cwd_recovery();
+            }
             let err = String::from_utf8_lossy(stderr);
             let cwd = self.initial_cwd.display();
             self.status_message = format!("{cwd} is not a git repo: {err}");
             self.status_is_error = true;
             return Action::None;
         }
-        let output = String::from_utf8_lossy(stdout);
         for line in output.lines() {
             if let Some(val) = line.strip_prefix("repo_root=") {
                 self.repo_root = val.to_string();
@@ -335,6 +350,46 @@ impl State {
         }
         self.mode = Mode::BrowseWorktrees;
         Action::Refresh
+    }
+
+    /// Query the OS for the definitive CWD of the focused pane.
+    /// This bypasses Zellij's potentially stale internal CWD detection on macOS.
+    fn attempt_cwd_recovery(&mut self) -> Action {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Ok((_tab_index, pane_id)) = get_focused_pane_info() {
+                if let Ok(pid) = get_pane_pid(pane_id) {
+                    self.status_message = "Recovering CWD...".to_string();
+                    run_command_with_env_variables_and_cwd(
+                        &["lsof", "-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"],
+                        BTreeMap::new(),
+                        PathBuf::from("/"),
+                        Self::ctx(CMD_LSOF),
+                    );
+                }
+            }
+        }
+        Action::None
+    }
+
+    pub fn handle_lsof_result(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> Action {
+        if exit_code == Some(0) {
+            let output = String::from_utf8_lossy(stdout);
+            // lsof -Fn returns lines like "p1234" and "n/path/to/cwd"
+            for line in output.lines() {
+                if let Some(path) = line.strip_prefix('n') {
+                    let new_cwd = PathBuf::from(path);
+                    if new_cwd.exists() {
+                        self.initial_cwd = new_cwd;
+                        return Action::FetchToplevel;
+                    }
+                }
+            }
+        }
+        // If recovery fails, we just stay in Loading/Error state
+        self.status_message = "CWD recovery failed".to_string();
+        self.status_is_error = true;
+        Action::None
     }
 
     /// Convert a branch name to the corresponding Zellij tab name.
@@ -531,6 +586,7 @@ impl ZellijPlugin for State {
                     }
                     Some(CMD_SPAWN) => self.handle_spawn_result(exit_code, &stderr, &context),
                     Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
+                    Some(CMD_LSOF) => self.handle_lsof_result(exit_code, &stdout),
                     _ => Action::None,
                 }
             }
@@ -996,11 +1052,20 @@ mod tests {
     #[test]
     fn git_toplevel_error() {
         let mut s = State::default();
+        s.recovery_attempted = true; // Skip recovery in this test
         let action = s.handle_git_toplevel(Some(128), b"", b"not a git repo");
         assert!(s.status_is_error);
         assert!(s.status_message.contains("is not a git repo"));
         assert_eq!(s.mode, Mode::Loading);
         assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn git_toplevel_error_triggers_recovery() {
+        let mut s = State::default();
+        let action = s.handle_git_toplevel(Some(0), b"error=not_a_repo", b"");
+        assert_eq!(action, Action::None); // Recovery is async via attempt_cwd_recovery
+        assert!(s.recovery_attempted);
     }
 
     #[test]
@@ -1010,6 +1075,24 @@ mod tests {
         assert!(s.status_is_error);
         assert!(s.status_message.contains("Failed to parse repo info"));
         assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn lsof_result_success_updates_cwd() {
+        let mut s = State::default();
+        s.initial_cwd = PathBuf::from("/old");
+        // Mock stdout of lsof -Fn
+        let stdout = b"p1234\nn/new/path\n";
+        let _action = s.handle_lsof_result(Some(0), stdout);
+        
+        // We use /tmp or another real path for the .exists() check in handle_lsof_result
+        // For testing, we might need to mock PathBuf::exists or use a path that exists.
+        // Let's use / as it usually exists.
+        let stdout = b"p1234\nn/\n";
+        let _action = s.handle_lsof_result(Some(0), stdout);
+
+        assert_eq!(s.initial_cwd, PathBuf::from("/"));
+        assert_eq!(action, Action::FetchToplevel);
     }
 
     #[test]

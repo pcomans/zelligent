@@ -200,20 +200,21 @@ PERMS
   exit 0
 fi
 
-# --- Everything below requires a git repo ---
+# --- Subcommand handlers ---
 
-# Require git repo — resolve to the main repo root even when run from a worktree.
-if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  echo "Error: not inside a git repository." >&2
-  exit 1
-fi
-
-REPO_ROOT="${GIT_COMMON_DIR%/.git}"
-REPO_NAME=$(basename "$REPO_ROOT")
-WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
+require_git_repo() {
+  if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    echo "Error: not inside a git repository." >&2
+    exit 1
+  fi
+  REPO_ROOT="${GIT_COMMON_DIR%/.git}"
+  REPO_NAME=$(basename "$REPO_ROOT")
+  WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
+}
 
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
+  require_git_repo
   # Check plugin is available
   if [ -n "$ZELLIGENT_PLUGIN_SRC" ] && [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
     echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
@@ -240,12 +241,19 @@ fi
 # --- Query subcommands (no zellij/lazygit needed) ---
 
 if [ "$1" = "show-repo" ]; then
+  if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    echo "error=not_a_repo"
+    exit 0
+  fi
+  REPO_ROOT="${GIT_COMMON_DIR%/.git}"
+  REPO_NAME=$(basename "$REPO_ROOT")
   echo "repo_root=$REPO_ROOT"
   echo "repo_name=$REPO_NAME"
   exit 0
 fi
 
 if [ "$1" = "list-worktrees" ]; then
+  require_git_repo
   SPAWN_PREFIX="$WORKTREES_DIR/"
   git -C "$REPO_ROOT" worktree list --porcelain | while IFS= read -r line; do
     case "$line" in
@@ -263,12 +271,14 @@ if [ "$1" = "list-worktrees" ]; then
 fi
 
 if [ "$1" = "list-branches" ]; then
+  require_git_repo
   git -C "$REPO_ROOT" branch --format='%(refname:short)'
   exit 0
 fi
 
 # Handle init subcommand
 if [ "$1" = "init" ]; then
+  require_git_repo
   mkdir -p "$REPO_ROOT/.zelligent"
   for script in setup teardown; do
     SCRIPT_PATH="$REPO_ROOT/.zelligent/$script.sh"
@@ -289,6 +299,7 @@ fi
 
 # Handle remove subcommand
 if [ "$1" = "remove" ]; then
+  require_git_repo
   if [ -z "$2" ]; then
     echo "Usage: zelligent remove <branch-name>"
     exit 1
@@ -319,6 +330,7 @@ fi
 
 # Handle spawn subcommand
 if [ "$1" = "spawn" ]; then
+  require_git_repo
   if [ -z "$2" ]; then
     echo "Usage: zelligent spawn <branch-name> [agent-command]"
     exit 1
