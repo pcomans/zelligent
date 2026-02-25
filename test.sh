@@ -448,8 +448,18 @@ check "show-repo name matches root basename" "$EXPECTED_NAME" "$ACTUAL_NAME"
 # show-repo from non-git dir
 NONGIT2=$(mktemp -d)
 out=$(cd "$NONGIT2" && "$SCRIPT" show-repo 2>&1); code=$?
-check "show-repo non-git dir exits non-zero" "1" "$code"
+check "show-repo non-git dir exits 0" "0" "$code"
+contains "show-repo non-git dir returns error=not_a_repo" "error=not_a_repo" "$out"
 rm -rf "$NONGIT2"
+
+# Subcommands that require git in non-git dir
+NONGIT3=$(mktemp -d)
+for cmd in spawn remove list-worktrees list-branches init; do
+  out=$(cd "$NONGIT3" && "$SCRIPT" "$cmd" 2>&1); code=$?
+  check "$cmd in non-git dir exits non-zero" "1" "$code"
+  contains "$cmd in non-git dir prints error" "not inside a git repository" "$out"
+done
+rm -rf "$NONGIT3"
 
 # list-worktrees (no managed worktrees exist for this test)
 out=$("$SCRIPT" list-worktrees 2>&1); code=$?
