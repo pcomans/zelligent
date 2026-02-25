@@ -12,7 +12,6 @@ const CMD_LIST_WORKTREES: &str = "list_worktrees";
 const CMD_GIT_BRANCHES: &str = "git_branches";
 const CMD_SPAWN: &str = "spawn";
 const CMD_REMOVE: &str = "remove";
-const CMD_LSOF: &str = "lsof";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -352,42 +351,20 @@ impl State {
         Action::Refresh
     }
 
-    /// Query the OS for the definitive CWD of the focused pane.
-    /// This bypasses Zellij's potentially stale internal CWD detection on macOS.
+    /// Attempt to recover the CWD by checking if a child directory matching the session name
+    /// is a valid git repository. This addresses the common issue where Zellij launches the
+    /// plugin in the parent directory of the actual repository.
     fn attempt_cwd_recovery(&mut self) -> Action {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Ok((_tab_index, pane_id)) = zellij_tile::shim::get_focused_pane_info() {
-                if let Ok(pid) = zellij_tile::shim::get_pane_pid(pane_id) {
-                    self.status_message = "Recovering CWD...".to_string();
-                    run_command_with_env_variables_and_cwd(
-                        &["lsof", "-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"],
-                        BTreeMap::<String, String>::new(),
-                        PathBuf::from("/"),
-                        Self::ctx(CMD_LSOF),
-                    );
-                }
-            }
+        if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
+            let candidate = self.initial_cwd.join(&session_name);
+            // We just update the initial_cwd and trigger FetchToplevel again.
+            // If it fails again, handle_git_toplevel will finally error out because
+            // recovery_attempted is now true.
+            self.initial_cwd = candidate;
+            return Action::FetchToplevel;
         }
-        Action::None
-    }
 
-    pub fn handle_lsof_result(&mut self, exit_code: Option<i32>, stdout: &[u8]) -> Action {
-        if exit_code == Some(0) {
-            let output = String::from_utf8_lossy(stdout);
-            // lsof -Fn returns lines like "p1234" and "n/path/to/cwd"
-            for line in output.lines() {
-                if let Some(path) = line.strip_prefix('n') {
-                    let new_cwd = PathBuf::from(path);
-                    if new_cwd.exists() {
-                        self.initial_cwd = new_cwd;
-                        return Action::FetchToplevel;
-                    }
-                }
-            }
-        }
-        // If recovery fails, we just stay in Loading/Error state
-        self.status_message = "CWD recovery failed".to_string();
+        self.status_message = "CWD recovery failed (no session name)".to_string();
         self.status_is_error = true;
         Action::None
     }
@@ -586,7 +563,6 @@ impl ZellijPlugin for State {
                     }
                     Some(CMD_SPAWN) => self.handle_spawn_result(exit_code, &stderr, &context),
                     Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
-                    Some(CMD_LSOF) => self.handle_lsof_result(exit_code, &stdout),
                     _ => Action::None,
                 }
             }
@@ -1062,10 +1038,12 @@ mod tests {
 
     #[test]
     fn git_toplevel_error_triggers_recovery() {
+        std::env::set_var("ZELLIJ_SESSION_NAME", "myrepo");
         let mut s = State::default();
         let action = s.handle_git_toplevel(Some(0), b"error=not_a_repo", b"");
-        assert_eq!(action, Action::None); // Recovery is async via attempt_cwd_recovery
+        assert_eq!(action, Action::FetchToplevel);
         assert!(s.recovery_attempted);
+        assert_eq!(s.initial_cwd, PathBuf::from("").join("myrepo"));
     }
 
     #[test]
@@ -1075,24 +1053,6 @@ mod tests {
         assert!(s.status_is_error);
         assert!(s.status_message.contains("Failed to parse repo info"));
         assert_eq!(action, Action::None);
-    }
-
-    #[test]
-    fn lsof_result_success_updates_cwd() {
-        let mut s = State::default();
-        s.initial_cwd = PathBuf::from("/old");
-        // Mock stdout of lsof -Fn
-        let stdout = b"p1234\nn/new/path\n";
-        let _action = s.handle_lsof_result(Some(0), stdout);
-        
-        // We use /tmp or another real path for the .exists() check in handle_lsof_result
-        // For testing, we might need to mock PathBuf::exists or use a path that exists.
-        // Let's use / as it usually exists.
-        let stdout = b"p1234\nn/\n";
-        let action = s.handle_lsof_result(Some(0), stdout);
-
-        assert_eq!(s.initial_cwd, PathBuf::from("/"));
-        assert_eq!(action, Action::FetchToplevel);
     }
 
     #[test]
