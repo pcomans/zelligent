@@ -28,7 +28,7 @@ pub fn render_header(repo_name: &str, cols: usize) {
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     let title = format!(" zelligent: {} ", repo_name);
     let pad = cols.saturating_sub(title.len());
-    let _ = writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad));
+    writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 ```
 
@@ -96,8 +96,8 @@ This tests the **full interaction loop** without needing Zellij running. The `re
 ## Implementation Steps
 
 1. Add `insta` to `plugin/Cargo.toml` as a dev-dependency
-2. Refactor `ui.rs`: add `w: &mut impl Write` to all 7 render functions, change `println!` → `writeln!`
-3. Add `render_to(&mut self, w: &mut impl Write, rows: usize, cols: usize)` method to `State`
+2. Refactor `ui.rs`: add `w: &mut impl Write` to all 7 render functions, change `println!()` → `writeln!(w, ...).unwrap()`
+3. Add `render_to(&mut self, w: &mut impl Write, rows: usize, cols: usize)` method to `State`. Note: the `Loading` branch in `render()` has bare `println!()` calls (not routed through `ui.rs`) — these must also become `writeln!(w, ...).unwrap()` in `render_to()`
 4. Update `render()` to call `self.render_to(&mut std::io::stdout(), rows, cols)`
 5. Write render snapshot tests for each mode/state combination
 6. Write interaction flow tests covering key user journeys
@@ -105,11 +105,18 @@ This tests the **full interaction loop** without needing Zellij running. The `re
 
 ## Verification
 
+Because `.cargo/config.toml` defaults to `wasm32-wasip1`, tests must target the native host explicitly (this matches what CI does):
+
 ```bash
 cd plugin
-cargo test                  # all tests pass (existing + new)
-cargo insta review          # review and accept new snapshots
-cargo insta test --review   # re-verify snapshots match
+HOST=$(rustc -vV | awk '/^host:/ {print $2}')
+cargo test --target "$HOST"              # all tests pass (existing + new)
+cargo insta test --target "$HOST" --review   # review and accept snapshots
 ```
 
 Snapshot files will live in `plugin/src/snapshots/` and are committed to git, so regressions in rendering are caught automatically in CI.
+
+## Notes
+
+- `insta` is a dev-dependency, so it is only compiled for the native host target (via `cargo test --target <host>`), never for wasm. The production `cargo build --target wasm32-wasip1` ignores dev-dependencies entirely.
+- Render functions use `.unwrap()` on write errors to match `println!()`'s existing panic-on-failure behavior.
