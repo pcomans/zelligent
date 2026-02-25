@@ -87,6 +87,18 @@ pub fn render_confirm(branch: &str) {
     println!("  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel");
 }
 
+pub fn render_stray_session(cwd: &str, expected: &str) {
+    println!();
+    println!("  {RED}{BOLD}Not a git repository.{RESET}");
+    println!("  Current: {DIM}{cwd}{RESET}");
+    println!("  Expected: {DIM}{expected}{RESET}");
+    println!();
+    println!("  {YELLOW}{BOLD}This session seems to be in the wrong directory.{RESET}");
+    println!("  {YELLOW}{BOLD}Would you like to kill this session?{RESET}");
+    println!();
+    println!("  {DIM}y{RESET} kill session   {DIM}n/q/Esc{RESET} close plugin");
+}
+
 pub fn render_footer(mode: &Mode, version: &str) {
     println!();
     match mode {
@@ -107,7 +119,7 @@ pub fn render_footer(mode: &Mode, version: &str) {
         Mode::InputBranch => {
             println!("  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back");
         }
-        Mode::Confirming => {}
+        Mode::Confirming | Mode::StraySession => {}
     }
     println!("  {DIM}{version}{RESET}");
 }
