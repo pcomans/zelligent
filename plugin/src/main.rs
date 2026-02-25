@@ -225,7 +225,14 @@ impl State {
             }
             Action::KillSession => {
                 if let Ok(session_name) = std::env::var("ZELLIJ_SESSION_NAME") {
-                    kill_sessions(&[session_name]);
+                    // Use a host command to perform a full deletion (kills + purges metadata).
+                    // This prevents Zellij from auto-recovering the session in the wrong CWD.
+                    run_command_with_env_variables_and_cwd(
+                        &["zellij", "delete-session", "--force", &session_name],
+                        BTreeMap::new(),
+                        PathBuf::from("/"),
+                        BTreeMap::new(),
+                    );
                 } else {
                     detach();
                 }
