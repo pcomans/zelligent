@@ -133,13 +133,13 @@ pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
 }
 
 impl State {
-    pub fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
+    fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("cmd_type".to_string(), cmd_type.to_string());
         m
     }
 
-    pub fn fire_git_toplevel(&self) {
+    fn fire_git_toplevel(&self) {
         run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "show-repo"],
             BTreeMap::new(),
@@ -148,7 +148,7 @@ impl State {
         );
     }
 
-    pub fn fire_list_worktrees(&self) {
+    fn fire_list_worktrees(&self) {
         run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "list-worktrees"],
             BTreeMap::new(),
@@ -157,7 +157,7 @@ impl State {
         );
     }
 
-    pub fn fire_git_branches(&self) {
+    fn fire_git_branches(&self) {
         run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "list-branches"],
             BTreeMap::new(),
@@ -166,7 +166,7 @@ impl State {
         );
     }
 
-    pub fn fire_spawn(&self, branch: &str) {
+    fn fire_spawn(&self, branch: &str) {
         let mut env = BTreeMap::new();
         if let Ok(val) = std::env::var("ZELLIJ") {
             env.insert("ZELLIJ".to_string(), val);
@@ -186,7 +186,7 @@ impl State {
         );
     }
 
-    pub fn fire_remove(&self, branch: &str) {
+    fn fire_remove(&self, branch: &str) {
         let mut env = BTreeMap::new();
         if let Ok(val) = std::env::var("ZELLIJ") {
             env.insert("ZELLIJ".to_string(), val);
@@ -203,7 +203,7 @@ impl State {
         );
     }
 
-    pub fn execute(&self, action: &Action) {
+    fn execute(&self, action: &Action) {
         match action {
             Action::None => {}
             Action::Close => close_self(),
