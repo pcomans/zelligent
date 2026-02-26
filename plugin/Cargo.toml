@@ -3,6 +3,10 @@ name = "zelligent-plugin"
 version = "0.0.0-dev"
 edition = "2021"
 
+[lib]
+name = "zelligent_plugin"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zelligent-plugin"
 path = "src/main.rs"
