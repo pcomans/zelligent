@@ -13,3 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 zellij-tile = "0.43"
+
+# Dev-deps are only used by `cargo test --target <host>`, never compiled for wasm.
+[dev-dependencies]
+insta = "1.46"
