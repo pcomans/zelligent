@@ -8,28 +8,30 @@ pub const RED: &str = "\x1b[31m";
 pub const CYAN: &str = "\x1b[36m";
 pub const YELLOW: &str = "\x1b[33m";
 
+use std::io::Write;
+
 use crate::{Mode, Worktree};
 
-pub fn render_header(repo_name: &str, cols: usize) {
+pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     let title = format!(" zelligent: {} ", repo_name);
     let pad = cols.saturating_sub(title.len());
-    println!("{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad));
+    writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 
-pub fn render_worktree_list(worktrees: &[Worktree], selected: usize, rows: usize) {
+pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], selected: usize, rows: usize) {
     if worktrees.is_empty() {
-        println!();
-        println!("  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}");
-        println!("  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}");
-        println!("  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}");
-        println!("  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}");
-        println!("  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}");
-        println!("  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}");
-        println!("  {CYAN}                             ██{RESET}");
-        println!("  {CYAN}                           ▀▀▀{RESET}");
-        println!();
-        println!("  {DIM}n{RESET}  pick an existing branch");
-        println!("  {DIM}i{RESET}  type a new branch name");
+        writeln!(w).unwrap();
+        writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
+        writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
+        writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
+        writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
+        writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
+        writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
+        writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
+        writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
+        writeln!(w).unwrap();
+        writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
+        writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
         return;
     }
 
@@ -40,25 +42,25 @@ pub fn render_worktree_list(worktrees: &[Worktree], selected: usize, rows: usize
         0
     };
 
-    println!();
+    writeln!(w).unwrap();
     for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
         let branch_display = &wt.branch;
-        println!("  {cursor} {branch_display} {RESET}");
+        writeln!(w, "  {cursor} {branch_display} {RESET}").unwrap();
     }
 }
 
-pub fn render_branch_list(branches: &[String], selected: usize, rows: usize) {
+pub fn render_branch_list(w: &mut impl Write, branches: &[String], selected: usize, rows: usize) {
     if branches.is_empty() {
-        println!();
-        println!("  {DIM}No branches found.{RESET}");
+        writeln!(w).unwrap();
+        writeln!(w, "  {DIM}No branches found.{RESET}").unwrap();
         return;
     }
 
     let title = format!("  {BOLD}Select a branch:{RESET}");
-    println!();
-    println!("{title}");
-    println!();
+    writeln!(w).unwrap();
+    writeln!(w, "{title}").unwrap();
+    writeln!(w).unwrap();
 
     let max_visible = rows.saturating_sub(7).max(1);
     let start = if selected >= max_visible {
@@ -69,54 +71,58 @@ pub fn render_branch_list(branches: &[String], selected: usize, rows: usize) {
 
     for (idx, branch) in branches.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
-        println!("  {cursor} {branch} {RESET}");
+        writeln!(w, "  {cursor} {branch} {RESET}").unwrap();
     }
 }
 
-pub fn render_input(input: &str) {
-    println!();
-    println!("  {BOLD}New branch name:{RESET}");
-    println!();
-    println!("  > {input}{INVERSE} {RESET}");
+pub fn render_input(w: &mut impl Write, input: &str) {
+    writeln!(w).unwrap();
+    writeln!(w, "  {BOLD}New branch name:{RESET}").unwrap();
+    writeln!(w).unwrap();
+    writeln!(w, "  > {input}{INVERSE} {RESET}").unwrap();
 }
 
-pub fn render_confirm(branch: &str) {
-    println!();
-    println!("  {YELLOW}{BOLD}Remove worktree for '{branch}'?{RESET}");
-    println!();
-    println!("  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel");
+pub fn render_confirm(w: &mut impl Write, branch: &str) {
+    writeln!(w).unwrap();
+    writeln!(w, "  {YELLOW}{BOLD}Remove worktree for '{branch}'?{RESET}").unwrap();
+    writeln!(w).unwrap();
+    writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
 
-pub fn render_footer(mode: &Mode, version: &str) {
-    println!();
+pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
+    writeln!(w).unwrap();
     match mode {
         Mode::Loading => {}
         Mode::BrowseWorktrees => {
-            println!(
+            writeln!(
+                w,
                 "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
                  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
                  {DIM}r{RESET} refresh  {DIM}q{RESET} quit"
-            );
+            )
+            .unwrap();
         }
         Mode::SelectBranch => {
-            println!(
+            writeln!(
+                w,
                 "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  \
                  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back"
-            );
+            )
+            .unwrap();
         }
         Mode::InputBranch => {
-            println!("  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back");
+            writeln!(w, "  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back").unwrap();
         }
         Mode::Confirming => {}
     }
-    println!("  {DIM}{version}{RESET}");
+    writeln!(w, "  {DIM}{version}{RESET}").unwrap();
 }
 
-pub fn render_status(message: &str, is_error: bool) {
+pub fn render_status(w: &mut impl Write, message: &str, is_error: bool) {
     if message.is_empty() {
         return;
     }
     let color = if is_error { RED } else { GREEN };
-    println!();
-    println!("  {color}{message}{RESET}");
+    writeln!(w).unwrap();
+    writeln!(w, "  {color}{message}{RESET}").unwrap();
 }
