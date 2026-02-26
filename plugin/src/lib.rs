@@ -26,6 +26,7 @@ pub enum Mode {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Worktree {
+    pub dir: String,
     pub branch: String,
 }
 
@@ -105,13 +106,27 @@ pub fn sanitize_branch_name(name: &str) -> String {
     result.trim_matches(|c| c == '-' || c == '.' || c == '/').to_string()
 }
 
-/// Parse `zelligent list-worktrees` output (one branch per line).
+/// Parse `zelligent list-worktrees` output.
+/// Format: `dir\tbranch` per line (tab-separated).
+/// Falls back to branch-only for backwards compatibility.
 pub fn parse_worktrees(output: &str) -> Vec<Worktree> {
     output
         .lines()
-        .map(|l| l.trim().to_string())
+        .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .map(|branch| Worktree { branch })
+        .map(|line| {
+            if let Some((dir, branch)) = line.split_once('\t') {
+                Worktree {
+                    dir: dir.trim().to_string(),
+                    branch: branch.trim().to_string(),
+                }
+            } else {
+                Worktree {
+                    dir: line.to_string(),
+                    branch: line.to_string(),
+                }
+            }
+        })
         .collect()
 }
 
@@ -622,9 +637,9 @@ mod tests {
         let mut s = State::default();
         s.mode = Mode::BrowseWorktrees;
         s.worktrees = vec![
-            Worktree { branch: "feat-a".into() },
-            Worktree { branch: "feat-b".into() },
-            Worktree { branch: "feat-c".into() },
+            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
+            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+            Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
         ];
         s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
         s
@@ -694,12 +709,23 @@ mod tests {
     // --- Parsing tests ---
 
     #[test]
-    fn parse_worktrees_basic() {
-        let output = "feature/cool\nfix-bug\n";
+    fn parse_worktrees_tab_separated() {
+        let output = "feature-cool\tfeature/cool\nfix-bug\tfix-bug\n";
         let wts = parse_worktrees(output);
         assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].dir, "feature-cool");
         assert_eq!(wts[0].branch, "feature/cool");
+        assert_eq!(wts[1].dir, "fix-bug");
         assert_eq!(wts[1].branch, "fix-bug");
+    }
+
+    #[test]
+    fn parse_worktrees_fallback_no_tab() {
+        let output = "feat-a\nfeat-b\n";
+        let wts = parse_worktrees(output);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].dir, "feat-a");
+        assert_eq!(wts[0].branch, "feat-a");
     }
 
     #[test]
@@ -710,11 +736,24 @@ mod tests {
 
     #[test]
     fn parse_worktrees_strips_whitespace() {
-        let output = "  feat-a \n\n  feat-b  \n";
+        let output = "  feat-a \t feat-a \n\n  feat-b \t feat-b  \n";
         let wts = parse_worktrees(output);
         assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].dir, "feat-a");
         assert_eq!(wts[0].branch, "feat-a");
+        assert_eq!(wts[1].dir, "feat-b");
         assert_eq!(wts[1].branch, "feat-b");
+    }
+
+    #[test]
+    fn parse_worktrees_mixed_dir_branch() {
+        let output = "autonomy\tplugin-snapshot-tests\ncompetition\tcompetition\n";
+        let wts = parse_worktrees(output);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].dir, "autonomy");
+        assert_eq!(wts[0].branch, "plugin-snapshot-tests");
+        assert_eq!(wts[1].dir, "competition");
+        assert_eq!(wts[1].branch, "competition");
     }
 
     #[test]
@@ -1138,7 +1177,7 @@ mod tests {
             make_tab("feat-b", true),
             make_tab("feat-c", false),
         ];
-        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\nfeat-c\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
         assert_eq!(s.selected_index, 1);
         assert!(s.has_loaded);
     }
@@ -1147,7 +1186,7 @@ mod tests {
     fn list_worktrees_auto_selects_active_tab_with_slash_branch() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feature-cool", true)];
-        s.handle_list_worktrees(Some(0), b"main\nfeature/cool\n", b"");
+        s.handle_list_worktrees(Some(0), b"main\tmain\nfeature-cool\tfeature/cool\n", b"");
         assert_eq!(s.selected_index, 1);
     }
 
@@ -1157,7 +1196,7 @@ mod tests {
         s.has_loaded = true;
         s.tabs = vec![make_tab("feat-a", true)];
         s.selected_index = 2;
-        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\nfeat-c\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
         assert_eq!(s.selected_index, 2);
     }
 
@@ -1165,7 +1204,7 @@ mod tests {
     fn list_worktrees_defers_auto_select_when_tabs_not_yet_available() {
         let mut s = State::default();
         s.selected_index = 0;
-        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
         assert!(!s.has_loaded);
         assert_eq!(s.selected_index, 0);
     }
@@ -1174,8 +1213,8 @@ mod tests {
     fn tab_update_triggers_auto_select_when_worktrees_already_loaded() {
         let mut s = State::default();
         s.worktrees = vec![
-            Worktree { branch: "feat-a".into() },
-            Worktree { branch: "feat-b".into() },
+            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
+            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
         ];
         let tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
         s.tabs = tabs;
@@ -1194,7 +1233,7 @@ mod tests {
         let mut s = State::default();
         s.selected_index = 5;
         s.tabs = vec![make_tab("unrelated", true)];
-        s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
         assert_eq!(s.selected_index, 0);
     }
 
@@ -1203,7 +1242,7 @@ mod tests {
         let mut s = State::default();
         s.has_loaded = true;
         s.selected_index = 5;
-        s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
         assert_eq!(s.selected_index, 0);
     }
 
@@ -1211,7 +1250,7 @@ mod tests {
     fn list_worktrees_ambiguous_tab_name_selects_first_match() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-cool", true)];
-        s.handle_list_worktrees(Some(0), b"feat/cool\nfeat-cool\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-cool\tfeat/cool\nfeat-cool\tfeat-cool\n", b"");
         assert_eq!(s.selected_index, 0);
     }
 
