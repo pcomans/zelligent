@@ -1,0 +1,15 @@
+---
+source: tests/render_snapshots.rs
+expression: picker
+---
+[1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
+
+  [1mSelect a branch:[0m
+
+  [7m main [0m
+   feat-a [0m
+   feat-b [0m
+   dev [0m
+
+  [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m create  [2mEsc[0m back
+  [2m0.0.0-dev+b879bd9[0m

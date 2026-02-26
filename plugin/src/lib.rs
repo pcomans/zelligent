@@ -1,0 +1,1273 @@
+pub mod ui;
+
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::PathBuf;
+use zellij_tile::prelude::*;
+
+pub const VERSION: &str = env!("ZELLIGENT_VERSION");
+
+// Command context keys used to route RunCommandResult
+pub const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
+pub const CMD_LIST_WORKTREES: &str = "list_worktrees";
+pub const CMD_GIT_BRANCHES: &str = "git_branches";
+pub const CMD_SPAWN: &str = "spawn";
+pub const CMD_REMOVE: &str = "remove";
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mode {
+    Loading,
+    BrowseWorktrees,
+    SelectBranch,
+    InputBranch,
+    Confirming,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Loading
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Worktree {
+    pub branch: String,
+}
+
+/// Actions returned by key/event handlers, executed by the plugin shell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    None,
+    Close,
+    Spawn(String),
+    Remove(String),
+    Refresh,
+    FetchToplevel,
+    FetchWorktreesAndBranches,
+}
+
+#[derive(Default)]
+pub struct State {
+    pub mode: Mode,
+    pub repo_root: String,
+    pub repo_name: String,
+    pub worktrees: Vec<Worktree>,
+    pub branches: Vec<String>,
+    pub filtered_branches: Vec<String>,
+    pub selected_index: usize,
+    pub input_buffer: String,
+    pub agent_cmd: String,
+    pub status_message: String,
+    pub status_is_error: bool,
+    pub zelligent_path: String,
+    pub initial_cwd: PathBuf,
+    pub tabs: Vec<TabInfo>,
+    /// Flipped to `true` after the first successful worktree list load.
+    /// Auto-selection of the active tab's worktree only happens before this
+    /// so that subsequent refreshes do not override the user's cursor position.
+    pub has_loaded: bool,
+}
+
+/// Sanitize a user-supplied string into a valid git branch name.
+/// Replaces characters and sequences forbidden in git refs, collapses
+/// consecutive hyphens and slashes, and strips leading/trailing hyphens,
+/// dots, and slashes.
+pub fn sanitize_branch_name(name: &str) -> String {
+    // Replace characters forbidden in git refs with hyphens
+    let s: String = name
+        .chars()
+        .map(|c| match c {
+            ' ' | '\t' | '~' | '^' | ':' | '?' | '*' | '[' | '\\' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+
+    // Replace forbidden multi-character sequences
+    let s = s.replace("@{", "-").replace("..", "-").replace("/.", "/-");
+
+    // Collapse consecutive hyphens and consecutive slashes
+    let mut result = String::new();
+    let mut prev = '\0';
+    for c in s.chars() {
+        if (c == '-' && prev == '-') || (c == '/' && prev == '/') {
+            continue;
+        }
+        result.push(c);
+        prev = c;
+    }
+
+    // Strip reserved .lock suffix
+    if result.ends_with(".lock") {
+        result.truncate(result.len() - 5);
+    }
+
+    result.trim_matches(|c| c == '-' || c == '.' || c == '/').to_string()
+}
+
+/// Parse `zelligent list-worktrees` output (one branch per line).
+pub fn parse_worktrees(output: &str) -> Vec<Worktree> {
+    output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .map(|branch| Worktree { branch })
+        .collect()
+}
+
+/// Parse `git branch --format=%(refname:short)` output into a list of branch names.
+pub fn parse_branches(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Wrapping navigation: move `current` by `delta` within `[0, len)`, wrapping around.
+pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    ((current as isize + delta).rem_euclid(len as isize)) as usize
+}
+
+impl State {
+    pub fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert("cmd_type".to_string(), cmd_type.to_string());
+        m
+    }
+
+    pub fn fire_git_toplevel(&self) {
+        run_command_with_env_variables_and_cwd(
+            &[&self.zelligent_path, "show-repo"],
+            BTreeMap::new(),
+            self.initial_cwd.clone(),
+            Self::ctx(CMD_GIT_TOPLEVEL),
+        );
+    }
+
+    pub fn fire_list_worktrees(&self) {
+        run_command_with_env_variables_and_cwd(
+            &[&self.zelligent_path, "list-worktrees"],
+            BTreeMap::new(),
+            PathBuf::from(&self.repo_root),
+            Self::ctx(CMD_LIST_WORKTREES),
+        );
+    }
+
+    pub fn fire_git_branches(&self) {
+        run_command_with_env_variables_and_cwd(
+            &[&self.zelligent_path, "list-branches"],
+            BTreeMap::new(),
+            PathBuf::from(&self.repo_root),
+            Self::ctx(CMD_GIT_BRANCHES),
+        );
+    }
+
+    pub fn fire_spawn(&self, branch: &str) {
+        let mut env = BTreeMap::new();
+        if let Ok(val) = std::env::var("ZELLIJ") {
+            env.insert("ZELLIJ".to_string(), val);
+        }
+        if let Ok(val) = std::env::var("ZELLIJ_SESSION_NAME") {
+            env.insert("ZELLIJ_SESSION_NAME".to_string(), val);
+        }
+
+        let mut ctx = Self::ctx(CMD_SPAWN);
+        ctx.insert("branch".to_string(), branch.to_string());
+
+        run_command_with_env_variables_and_cwd(
+            &[&self.zelligent_path, "spawn", branch, &self.agent_cmd],
+            env,
+            PathBuf::from(&self.repo_root),
+            ctx,
+        );
+    }
+
+    pub fn fire_remove(&self, branch: &str) {
+        let mut env = BTreeMap::new();
+        if let Ok(val) = std::env::var("ZELLIJ") {
+            env.insert("ZELLIJ".to_string(), val);
+        }
+
+        let mut ctx = Self::ctx(CMD_REMOVE);
+        ctx.insert("branch".to_string(), branch.to_string());
+
+        run_command_with_env_variables_and_cwd(
+            &[&self.zelligent_path, "remove", branch],
+            env,
+            PathBuf::from(&self.repo_root),
+            ctx,
+        );
+    }
+
+    pub fn execute(&self, action: &Action) {
+        match action {
+            Action::None => {}
+            Action::Close => close_self(),
+            Action::Spawn(branch) => self.fire_spawn(branch),
+            Action::Remove(branch) => self.fire_remove(branch),
+            Action::Refresh => {
+                self.fire_list_worktrees();
+                self.fire_git_branches();
+            }
+            Action::FetchToplevel => self.fire_git_toplevel(),
+            Action::FetchWorktreesAndBranches => {
+                self.fire_list_worktrees();
+                self.fire_git_branches();
+            }
+        }
+    }
+
+    // --- Pure state handlers (no zellij calls, fully testable) ---
+
+    pub fn handle_git_toplevel(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Action {
+        if exit_code != Some(0) {
+            let err = String::from_utf8_lossy(stderr);
+            let cwd = self.initial_cwd.display();
+            self.status_message = format!("{cwd} is not a git repo: {err}");
+            self.status_is_error = true;
+            return Action::None;
+        }
+        let output = String::from_utf8_lossy(stdout);
+        for line in output.lines() {
+            if let Some(val) = line.strip_prefix("repo_root=") {
+                self.repo_root = val.to_string();
+            } else if let Some(val) = line.strip_prefix("repo_name=") {
+                self.repo_name = val.to_string();
+            }
+        }
+        if self.repo_root.is_empty() || self.repo_name.is_empty() {
+            self.status_message = "Failed to parse repo info".to_string();
+            self.status_is_error = true;
+            return Action::None;
+        }
+        self.mode = Mode::BrowseWorktrees;
+        Action::FetchWorktreesAndBranches
+    }
+
+    pub fn handle_list_worktrees(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+        if exit_code != Some(0) {
+            let err = String::from_utf8_lossy(stderr);
+            self.status_message = format!("Failed to list worktrees: {err}");
+            self.status_is_error = true;
+            return;
+        }
+        let output = String::from_utf8_lossy(stdout);
+        self.worktrees = parse_worktrees(&output);
+        if !self.has_loaded && self.tabs.iter().any(|t| t.active) {
+            // On the very first load where tab state is known, jump to the
+            // worktree for the active tab so the cursor starts in a meaningful
+            // position. If tabs haven't arrived yet we leave has_loaded = false
+            // so the TabUpdate handler can retry once they do.
+            self.has_loaded = true;
+            if let Some(idx) = self.find_worktree_for_active_tab() {
+                self.selected_index = idx;
+                return;
+            }
+        }
+        // On refresh (or when no tab match was found), preserve the user's
+        // cursor position and only clamp if it went out of range.
+        if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
+            self.selected_index = self.worktrees.len() - 1;
+        }
+    }
+
+    /// Return the index of the worktree whose tab name matches the active tab, if any.
+    /// Returns the first match; see `tab_name_for_branch` for the ambiguity caveat.
+    pub fn find_worktree_for_active_tab(&self) -> Option<usize> {
+        let active_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str())?;
+        self.worktrees
+            .iter()
+            .position(|wt| Self::tab_name_for_branch(&wt.branch) == active_name)
+    }
+
+    pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
+        if exit_code != Some(0) {
+            let err = String::from_utf8_lossy(stderr);
+            self.status_message = format!("Failed to list branches: {err}");
+            self.status_is_error = true;
+            return;
+        }
+        let output = String::from_utf8_lossy(stdout);
+        self.branches = parse_branches(&output);
+    }
+
+    pub fn handle_spawn_result(&mut self, exit_code: Option<i32>, stderr: &[u8], context: &BTreeMap<String, String>) -> Action {
+        let branch = context.get("branch").cloned().unwrap_or_default();
+        if exit_code == Some(0) {
+            self.status_message = format!("Spawned '{branch}'");
+            self.status_is_error = false;
+        } else {
+            let err = String::from_utf8_lossy(stderr).trim().to_string();
+            self.status_message = format!("Error: {err}");
+            self.status_is_error = true;
+        }
+        Action::Refresh
+    }
+
+    pub fn handle_remove_result(&mut self, exit_code: Option<i32>, stderr: &[u8], context: &BTreeMap<String, String>) -> Action {
+        let branch = context.get("branch").cloned().unwrap_or_default();
+        if exit_code == Some(0) {
+            self.status_message = format!("Removed '{branch}'");
+            self.status_is_error = false;
+            // Close the worktree's tab if it exists. We use go_to_tab_name
+            // instead of close_tab_with_index because the latter expects an
+            // internal tab index, but TabInfo only exposes position (which
+            // diverges from index when tabs are closed).
+            #[cfg(target_arch = "wasm32")]
+            if self.has_tab_for_branch(&branch) {
+                let tab_name = Self::tab_name_for_branch(&branch);
+                let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
+                go_to_tab_name(&tab_name);
+                close_focused_tab();
+                if let Some(name) = return_tab {
+                    go_to_tab_name(&name);
+                }
+            }
+        } else {
+            let err = String::from_utf8_lossy(stderr).trim().to_string();
+            self.status_message = format!("Remove failed: {err}");
+            self.status_is_error = true;
+        }
+        self.mode = Mode::BrowseWorktrees;
+        Action::Refresh
+    }
+
+    /// Convert a branch name to the corresponding Zellij tab name.
+    /// Tab names use the branch with `/` replaced by `-` (matching zelligent.sh).
+    ///
+    /// Note: this mapping is not injective — `feat/cool` and `feat-cool` both
+    /// produce `feat-cool`. In that case `find_worktree_for_active_tab` will
+    /// match the first worktree in the list, which may not be the intended one.
+    pub fn tab_name_for_branch(branch: &str) -> String {
+        branch.replace('/', "-")
+    }
+
+    /// Check whether a tab with the given branch's name exists.
+    pub fn has_tab_for_branch(&self, branch: &str) -> bool {
+        let tab_name = Self::tab_name_for_branch(branch);
+        self.tabs.iter().any(|t| t.name == tab_name)
+    }
+
+    pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
+        if key.has_no_modifiers() {
+            match key.bare_key {
+                BareKey::Char('j') | BareKey::Down => {
+                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), 1);
+                }
+                BareKey::Char('k') | BareKey::Up => {
+                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), -1);
+                }
+                BareKey::Enter => {
+                    if let Some(wt) = self.worktrees.get(self.selected_index) {
+                        let branch = wt.branch.clone();
+                        self.status_message = format!("Spawning '{branch}'...");
+                        self.status_is_error = false;
+                        return Action::Spawn(branch);
+                    }
+                }
+                BareKey::Char('n') => {
+                    self.filtered_branches = self.branches.clone();
+                    self.mode = Mode::SelectBranch;
+                    self.selected_index = 0;
+                }
+                BareKey::Char('i') => {
+                    self.mode = Mode::InputBranch;
+                    self.input_buffer.clear();
+                }
+                BareKey::Char('d') => {
+                    if !self.worktrees.is_empty() {
+                        self.mode = Mode::Confirming;
+                    }
+                }
+                BareKey::Char('r') => {
+                    self.status_message = "Refreshed".to_string();
+                    self.status_is_error = false;
+                    return Action::Refresh;
+                }
+                BareKey::Char('q') | BareKey::Esc => {
+                    return Action::Close;
+                }
+                _ => {}
+            }
+        }
+        Action::None
+    }
+
+    pub fn handle_key_select_branch(&mut self, key: &KeyWithModifier) -> Action {
+        if key.has_no_modifiers() {
+            match key.bare_key {
+                BareKey::Char('j') | BareKey::Down => {
+                    self.selected_index = wrap_navigate(self.selected_index, self.filtered_branches.len(), 1);
+                }
+                BareKey::Char('k') | BareKey::Up => {
+                    self.selected_index = wrap_navigate(self.selected_index, self.filtered_branches.len(), -1);
+                }
+                BareKey::Enter => {
+                    if let Some(branch) = self.filtered_branches.get(self.selected_index).cloned() {
+                        self.status_message = format!("Spawning '{branch}'...");
+                        self.status_is_error = false;
+                        self.mode = Mode::BrowseWorktrees;
+                        return Action::Spawn(branch);
+                    }
+                }
+                BareKey::Esc => {
+                    self.mode = Mode::BrowseWorktrees;
+                    self.selected_index = 0;
+                }
+                _ => {}
+            }
+        }
+        Action::None
+    }
+
+    pub fn handle_key_input_branch(&mut self, key: &KeyWithModifier) -> Action {
+        let no_mod = key.has_no_modifiers();
+        let shift_only = key.key_modifiers.len() == 1
+            && key.key_modifiers.contains(&KeyModifier::Shift);
+
+        match key.bare_key {
+            BareKey::Enter if no_mod => {
+                let branch = sanitize_branch_name(self.input_buffer.trim());
+                if !branch.is_empty() {
+                    self.status_message = format!("Spawning '{branch}'...");
+                    self.status_is_error = false;
+                    self.mode = Mode::BrowseWorktrees;
+                    return Action::Spawn(branch);
+                } else {
+                    self.status_message = "Invalid branch name".to_string();
+                    self.status_is_error = true;
+                }
+            }
+            BareKey::Esc if no_mod => {
+                self.mode = Mode::BrowseWorktrees;
+                self.selected_index = 0;
+                self.input_buffer.clear();
+            }
+            BareKey::Backspace if no_mod => {
+                self.input_buffer.pop();
+            }
+            BareKey::Char(c) if no_mod || shift_only => {
+                self.input_buffer.push(c);
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    pub fn handle_key_confirming(&mut self, key: &KeyWithModifier) -> Action {
+        if key.has_no_modifiers() {
+            match key.bare_key {
+                BareKey::Char('y') => {
+                    if let Some(wt) = self.worktrees.get(self.selected_index) {
+                        let branch = wt.branch.clone();
+                        self.status_message = format!("Removing '{branch}'...");
+                        self.status_is_error = false;
+                        return Action::Remove(branch);
+                    }
+                }
+                BareKey::Char('n') | BareKey::Esc => {
+                    self.mode = Mode::BrowseWorktrees;
+                }
+                _ => {}
+            }
+        }
+        Action::None
+    }
+
+    pub fn render_to(&self, w: &mut impl Write, rows: usize, cols: usize) {
+        match self.mode {
+            Mode::Loading => {
+                ui::render_header(w, "loading...", cols);
+                writeln!(w).unwrap();
+                if self.status_is_error {
+                    ui::render_status(w, &self.status_message, self.status_is_error);
+                } else {
+                    writeln!(w, "  Waiting for permissions...").unwrap();
+                }
+            }
+            Mode::BrowseWorktrees => {
+                ui::render_header(w, &self.repo_name, cols);
+                ui::render_worktree_list(w, &self.worktrees, self.selected_index, rows);
+                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_footer(w, &self.mode, VERSION);
+            }
+            Mode::SelectBranch => {
+                ui::render_header(w, &self.repo_name, cols);
+                ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
+                ui::render_footer(w, &self.mode, VERSION);
+            }
+            Mode::InputBranch => {
+                ui::render_header(w, &self.repo_name, cols);
+                ui::render_input(w, &self.input_buffer);
+                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_footer(w, &self.mode, VERSION);
+            }
+            Mode::Confirming => {
+                ui::render_header(w, &self.repo_name, cols);
+                if let Some(wt) = self.worktrees.get(self.selected_index) {
+                    ui::render_confirm(w, &wt.branch);
+                }
+            }
+        }
+    }
+}
+
+impl ZellijPlugin for State {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.agent_cmd = configuration
+            .get("agent_cmd")
+            .cloned()
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()));
+
+        self.zelligent_path = configuration
+            .get("zelligent_path")
+            .cloned()
+            .unwrap_or_else(|| "zelligent".to_string());
+
+        self.initial_cwd = get_plugin_ids().initial_cwd;
+
+        request_permission(&[
+            PermissionType::RunCommands,
+            PermissionType::ChangeApplicationState,
+            PermissionType::ReadApplicationState,
+        ]);
+
+        subscribe(&[
+            EventType::Key,
+            EventType::RunCommandResult,
+            EventType::PermissionRequestResult,
+            EventType::TabUpdate,
+        ]);
+    }
+
+    fn update(&mut self, event: Event) -> bool {
+        let action = match event {
+            Event::PermissionRequestResult(PermissionStatus::Granted) => {
+                Action::FetchToplevel
+            }
+            Event::PermissionRequestResult(PermissionStatus::Denied) => {
+                self.status_message = "Permissions denied. Plugin cannot run commands.".to_string();
+                self.status_is_error = true;
+                Action::None
+            }
+            Event::RunCommandResult(exit_code, stdout, stderr, context) => {
+                match context.get("cmd_type").map(|s| s.as_str()) {
+                    Some(CMD_GIT_TOPLEVEL) => self.handle_git_toplevel(exit_code, &stdout, &stderr),
+                    Some(CMD_LIST_WORKTREES) => {
+                        self.handle_list_worktrees(exit_code, &stdout, &stderr);
+                        Action::None
+                    }
+                    Some(CMD_GIT_BRANCHES) => {
+                        self.handle_git_branches(exit_code, &stdout, &stderr);
+                        Action::None
+                    }
+                    Some(CMD_SPAWN) => self.handle_spawn_result(exit_code, &stderr, &context),
+                    Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
+                    _ => Action::None,
+                }
+            }
+            Event::TabUpdate(tab_info) => {
+                self.tabs = tab_info;
+                // If worktrees loaded before tabs arrived, do the initial
+                // auto-select now that we have tab state.
+                if !self.has_loaded && !self.worktrees.is_empty() {
+                    self.has_loaded = true;
+                    if let Some(idx) = self.find_worktree_for_active_tab() {
+                        self.selected_index = idx;
+                    }
+                }
+                Action::None
+            }
+            Event::Key(key) => {
+                match self.mode {
+                    Mode::Loading => Action::None,
+                    Mode::BrowseWorktrees => self.handle_key_browse(&key),
+                    Mode::SelectBranch => self.handle_key_select_branch(&key),
+                    Mode::InputBranch => self.handle_key_input_branch(&key),
+                    Mode::Confirming => self.handle_key_confirming(&key),
+                }
+            }
+            _ => return false,
+        };
+        self.execute(&action);
+        true
+    }
+
+    fn render(&mut self, rows: usize, cols: usize) {
+        self.render_to(&mut std::io::stdout(), rows, cols);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn key(bare: BareKey) -> KeyWithModifier {
+        KeyWithModifier { bare_key: bare, key_modifiers: BTreeSet::new() }
+    }
+
+    fn key_shift(bare: BareKey) -> KeyWithModifier {
+        let mut mods = BTreeSet::new();
+        mods.insert(KeyModifier::Shift);
+        KeyWithModifier { bare_key: bare, key_modifiers: mods }
+    }
+
+    fn state_with_worktrees() -> State {
+        let mut s = State::default();
+        s.mode = Mode::BrowseWorktrees;
+        s.worktrees = vec![
+            Worktree { branch: "feat-a".into() },
+            Worktree { branch: "feat-b".into() },
+            Worktree { branch: "feat-c".into() },
+        ];
+        s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
+        s
+    }
+
+    // --- sanitize_branch_name tests ---
+
+    #[test]
+    fn sanitize_spaces_become_hyphens() {
+        assert_eq!(sanitize_branch_name("claude alerts"), "claude-alerts");
+        assert_eq!(sanitize_branch_name("my new feature"), "my-new-feature");
+    }
+
+    #[test]
+    fn sanitize_collapses_consecutive_hyphens() {
+        assert_eq!(sanitize_branch_name("foo  bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("a ~ b"), "a-b");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_trailing() {
+        assert_eq!(sanitize_branch_name(" leading"), "leading");
+        assert_eq!(sanitize_branch_name("trailing "), "trailing");
+        assert_eq!(sanitize_branch_name(".dotted."), "dotted");
+    }
+
+    #[test]
+    fn sanitize_invalid_chars() {
+        assert_eq!(sanitize_branch_name("feat~1"), "feat-1");
+        assert_eq!(sanitize_branch_name("foo:bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("a?b*c"), "a-b-c");
+    }
+
+    #[test]
+    fn sanitize_valid_name_unchanged() {
+        assert_eq!(sanitize_branch_name("feat/new-thing"), "feat/new-thing");
+        assert_eq!(sanitize_branch_name("fix-bug_123"), "fix-bug_123");
+    }
+
+    #[test]
+    fn sanitize_empty_returns_empty() {
+        assert_eq!(sanitize_branch_name(""), "");
+        assert_eq!(sanitize_branch_name("   "), "");
+    }
+
+    #[test]
+    fn sanitize_git_ref_sequences() {
+        assert_eq!(sanitize_branch_name("foo..bar"), "foo-bar");
+        assert_eq!(sanitize_branch_name("foo@{1}"), "foo-1}");
+        assert_eq!(sanitize_branch_name("foo//bar"), "foo/bar");
+        assert_eq!(sanitize_branch_name("foo/.bar"), "foo/-bar");
+        assert_eq!(sanitize_branch_name("foo.lock"), "foo");
+        assert_eq!(sanitize_branch_name("/leading"), "leading");
+        assert_eq!(sanitize_branch_name("trailing/"), "trailing");
+    }
+
+    // --- InputBranch integration tests ---
+
+    #[test]
+    fn input_branch_enter_sanitizes_and_spawns() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "claude alerts".into(), ..Default::default() };
+        let action = s.handle_key_input_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("claude-alerts".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    // --- Parsing tests ---
+
+    #[test]
+    fn parse_worktrees_basic() {
+        let output = "feature/cool\nfix-bug\n";
+        let wts = parse_worktrees(output);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].branch, "feature/cool");
+        assert_eq!(wts[1].branch, "fix-bug");
+    }
+
+    #[test]
+    fn parse_worktrees_empty_output() {
+        let wts = parse_worktrees("");
+        assert!(wts.is_empty());
+    }
+
+    #[test]
+    fn parse_worktrees_strips_whitespace() {
+        let output = "  feat-a \n\n  feat-b  \n";
+        let wts = parse_worktrees(output);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].branch, "feat-a");
+        assert_eq!(wts[1].branch, "feat-b");
+    }
+
+    #[test]
+    fn parse_branches_basic() {
+        let output = "main\nfeature/cool\nfix-bug\n";
+        let branches = parse_branches(output);
+        assert_eq!(branches, vec!["main", "feature/cool", "fix-bug"]);
+    }
+
+    #[test]
+    fn parse_branches_strips_whitespace_and_empty() {
+        let output = "  main \n\n  dev  \n";
+        let branches = parse_branches(output);
+        assert_eq!(branches, vec!["main", "dev"]);
+    }
+
+    // --- BrowseWorktrees key handler tests ---
+
+    #[test]
+    fn browse_j_moves_down() {
+        let mut s = state_with_worktrees();
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 1);
+        s.handle_key_browse(&key(BareKey::Down));
+        assert_eq!(s.selected_index, 2);
+    }
+
+    #[test]
+    fn browse_j_wraps_around() {
+        let mut s = state_with_worktrees();
+        s.selected_index = 2;
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn browse_k_moves_up() {
+        let mut s = state_with_worktrees();
+        s.selected_index = 2;
+        s.handle_key_browse(&key(BareKey::Char('k')));
+        assert_eq!(s.selected_index, 1);
+        s.handle_key_browse(&key(BareKey::Up));
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn browse_k_wraps_around() {
+        let mut s = state_with_worktrees();
+        s.selected_index = 0;
+        s.handle_key_browse(&key(BareKey::Char('k')));
+        assert_eq!(s.selected_index, 2);
+    }
+
+    #[test]
+    fn browse_jk_noop_on_empty() {
+        let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 0);
+        s.handle_key_browse(&key(BareKey::Char('k')));
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn browse_enter_spawns_selected() {
+        let mut s = state_with_worktrees();
+        s.selected_index = 1;
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("feat-b".into()));
+        assert_eq!(s.status_message, "Spawning 'feat-b'...");
+    }
+
+    #[test]
+    fn browse_enter_noop_on_empty() {
+        let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn browse_n_switches_to_select_branch() {
+        let mut s = state_with_worktrees();
+        s.selected_index = 2;
+        s.handle_key_browse(&key(BareKey::Char('n')));
+        assert_eq!(s.mode, Mode::SelectBranch);
+        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.filtered_branches, s.branches);
+    }
+
+    #[test]
+    fn browse_i_switches_to_input_branch() {
+        let mut s = state_with_worktrees();
+        s.input_buffer = "leftover".into();
+        s.handle_key_browse(&key(BareKey::Char('i')));
+        assert_eq!(s.mode, Mode::InputBranch);
+        assert!(s.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn browse_d_switches_to_confirming() {
+        let mut s = state_with_worktrees();
+        s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(s.mode, Mode::Confirming);
+    }
+
+    #[test]
+    fn browse_d_noop_on_empty() {
+        let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn browse_r_returns_refresh() {
+        let mut s = state_with_worktrees();
+        let action = s.handle_key_browse(&key(BareKey::Char('r')));
+        assert_eq!(action, Action::Refresh);
+        assert_eq!(s.status_message, "Refreshed");
+    }
+
+    #[test]
+    fn browse_q_returns_close() {
+        let mut s = state_with_worktrees();
+        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::Close);
+    }
+
+    #[test]
+    fn browse_esc_returns_close() {
+        let mut s = state_with_worktrees();
+        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::Close);
+    }
+
+    // --- SelectBranch key handler tests ---
+
+    #[test]
+    fn select_branch_jk_navigates() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+        s.selected_index = 0;
+
+        s.handle_key_select_branch(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 1);
+        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn select_branch_wraps() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = vec!["a".into(), "b".into()];
+        s.selected_index = 1;
+
+        s.handle_key_select_branch(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 0);
+
+        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn select_branch_enter_spawns() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = vec!["dev".into(), "main".into()];
+        s.selected_index = 0;
+
+        let action = s.handle_key_select_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("dev".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn select_branch_esc_goes_back() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.selected_index = 2;
+        s.handle_key_select_branch(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(s.selected_index, 0);
+    }
+
+    // --- InputBranch key handler tests ---
+
+    #[test]
+    fn input_branch_typing() {
+        let mut s = State { mode: Mode::InputBranch, ..Default::default() };
+        s.handle_key_input_branch(&key(BareKey::Char('f')));
+        s.handle_key_input_branch(&key(BareKey::Char('o')));
+        s.handle_key_input_branch(&key(BareKey::Char('o')));
+        assert_eq!(s.input_buffer, "foo");
+    }
+
+    #[test]
+    fn input_branch_shift_chars() {
+        let mut s = State { mode: Mode::InputBranch, ..Default::default() };
+        s.handle_key_input_branch(&key_shift(BareKey::Char('F')));
+        assert_eq!(s.input_buffer, "F");
+    }
+
+    #[test]
+    fn input_branch_backspace() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "ab".into(), ..Default::default() };
+        s.handle_key_input_branch(&key(BareKey::Backspace));
+        assert_eq!(s.input_buffer, "a");
+    }
+
+    #[test]
+    fn input_branch_enter_spawns() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "feat/new".into(), ..Default::default() };
+        let action = s.handle_key_input_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("feat/new".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn input_branch_enter_noop_on_empty() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "  ".into(), ..Default::default() };
+        let action = s.handle_key_input_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.mode, Mode::InputBranch);
+        assert!(s.status_is_error);
+        assert_eq!(s.status_message, "Invalid branch name");
+    }
+
+    #[test]
+    fn input_branch_esc_goes_back() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "wip".into(), ..Default::default() };
+        s.handle_key_input_branch(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    // --- Confirming key handler tests ---
+
+    #[test]
+    fn confirm_y_removes() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.selected_index = 1;
+        let action = s.handle_key_confirming(&key(BareKey::Char('y')));
+        assert_eq!(action, Action::Remove("feat-b".into()));
+        assert_eq!(s.status_message, "Removing 'feat-b'...");
+    }
+
+    #[test]
+    fn confirm_n_cancels() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.handle_key_confirming(&key(BareKey::Char('n')));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn confirm_esc_cancels() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.handle_key_confirming(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    // --- Command result handler tests ---
+
+    #[test]
+    fn git_toplevel_sets_repo() {
+        let mut s = State::default();
+        let action = s.handle_git_toplevel(Some(0), b"repo_root=/home/user/myrepo\nrepo_name=myrepo\n", b"");
+        assert_eq!(s.repo_root, "/home/user/myrepo");
+        assert_eq!(s.repo_name, "myrepo");
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(action, Action::FetchWorktreesAndBranches);
+    }
+
+    #[test]
+    fn git_toplevel_parses_by_key() {
+        let mut s = State::default();
+        let action = s.handle_git_toplevel(Some(0), b"repo_name=myrepo\nrepo_root=/home/user/myrepo\n", b"");
+        assert_eq!(s.repo_root, "/home/user/myrepo");
+        assert_eq!(s.repo_name, "myrepo");
+        assert_eq!(action, Action::FetchWorktreesAndBranches);
+    }
+
+    #[test]
+    fn git_toplevel_error() {
+        let mut s = State::default();
+        let action = s.handle_git_toplevel(Some(128), b"", b"not a git repo");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("is not a git repo"));
+        assert_eq!(s.mode, Mode::Loading);
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn git_toplevel_missing_fields() {
+        let mut s = State::default();
+        let action = s.handle_git_toplevel(Some(0), b"repo_root=/foo\n", b"");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Failed to parse repo info"));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn spawn_result_success() {
+        let mut s = state_with_worktrees();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("branch".into(), "feat-a".into());
+        let action = s.handle_spawn_result(Some(0), b"", &ctx);
+        assert_eq!(s.status_message, "Spawned 'feat-a'");
+        assert!(!s.status_is_error);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn spawn_result_error() {
+        let mut s = state_with_worktrees();
+        let mut ctx = BTreeMap::new();
+        ctx.insert("branch".into(), "bad".into());
+        let action = s.handle_spawn_result(Some(1), b"something broke", &ctx);
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("something broke"));
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn remove_result_success() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        let mut ctx = BTreeMap::new();
+        ctx.insert("branch".into(), "feat-a".into());
+        let action = s.handle_remove_result(Some(0), b"", &ctx);
+        assert_eq!(s.status_message, "Removed 'feat-a'");
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn remove_result_error() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        let mut ctx = BTreeMap::new();
+        ctx.insert("branch".into(), "feat-a".into());
+        let action = s.handle_remove_result(Some(1), b"uncommitted changes", &ctx);
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("uncommitted changes"));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    fn make_tab(name: &str, active: bool) -> TabInfo {
+        TabInfo {
+            position: 0,
+            name: name.to_string(),
+            active,
+            panes_to_hide: 0,
+            is_fullscreen_active: false,
+            is_sync_panes_active: false,
+            are_floating_panes_visible: false,
+            other_focused_clients: vec![],
+            active_swap_layout_name: None,
+            is_swap_layout_dirty: false,
+            viewport_rows: 0,
+            viewport_columns: 0,
+            display_area_rows: 0,
+            display_area_columns: 0,
+            selectable_tiled_panes_count: 0,
+            selectable_floating_panes_count: 0,
+        }
+    }
+
+    #[test]
+    fn tab_name_for_branch_replaces_slashes() {
+        assert_eq!(State::tab_name_for_branch("feature/cool"), "feature-cool");
+        assert_eq!(State::tab_name_for_branch("a/b/c"), "a-b-c");
+        assert_eq!(State::tab_name_for_branch("fix-bug"), "fix-bug");
+    }
+
+    #[test]
+    fn has_tab_for_branch_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feature-cool", false), make_tab("fix-bug", false)];
+        assert!(s.has_tab_for_branch("feature/cool"));
+        assert!(s.has_tab_for_branch("fix-bug"));
+    }
+
+    #[test]
+    fn has_tab_for_branch_not_found() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("main", false)];
+        assert!(!s.has_tab_for_branch("nonexistent"));
+    }
+
+    #[test]
+    fn has_tab_for_branch_empty_tabs() {
+        let s = State::default();
+        assert!(!s.has_tab_for_branch("anything"));
+    }
+
+    #[test]
+    fn list_worktrees_auto_selects_active_tab_on_initial_load() {
+        let mut s = State::default();
+        s.tabs = vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", true),
+            make_tab("feat-c", false),
+        ];
+        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\nfeat-c\n", b"");
+        assert_eq!(s.selected_index, 1);
+        assert!(s.has_loaded);
+    }
+
+    #[test]
+    fn list_worktrees_auto_selects_active_tab_with_slash_branch() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feature-cool", true)];
+        s.handle_list_worktrees(Some(0), b"main\nfeature/cool\n", b"");
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn list_worktrees_does_not_auto_select_on_refresh() {
+        let mut s = State::default();
+        s.has_loaded = true;
+        s.tabs = vec![make_tab("feat-a", true)];
+        s.selected_index = 2;
+        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\nfeat-c\n", b"");
+        assert_eq!(s.selected_index, 2);
+    }
+
+    #[test]
+    fn list_worktrees_defers_auto_select_when_tabs_not_yet_available() {
+        let mut s = State::default();
+        s.selected_index = 0;
+        s.handle_list_worktrees(Some(0), b"feat-a\nfeat-b\n", b"");
+        assert!(!s.has_loaded);
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn tab_update_triggers_auto_select_when_worktrees_already_loaded() {
+        let mut s = State::default();
+        s.worktrees = vec![
+            Worktree { branch: "feat-a".into() },
+            Worktree { branch: "feat-b".into() },
+        ];
+        let tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
+        s.tabs = tabs;
+        if !s.has_loaded && !s.worktrees.is_empty() {
+            s.has_loaded = true;
+            if let Some(idx) = s.find_worktree_for_active_tab() {
+                s.selected_index = idx;
+            }
+        }
+        assert!(s.has_loaded);
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn list_worktrees_falls_back_to_clamp_when_no_tab_match() {
+        let mut s = State::default();
+        s.selected_index = 5;
+        s.tabs = vec![make_tab("unrelated", true)];
+        s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn list_worktrees_clamps_on_refresh_when_out_of_range() {
+        let mut s = State::default();
+        s.has_loaded = true;
+        s.selected_index = 5;
+        s.handle_list_worktrees(Some(0), b"feat-a\n", b"");
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn list_worktrees_ambiguous_tab_name_selects_first_match() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-cool", true)];
+        s.handle_list_worktrees(Some(0), b"feat/cool\nfeat-cool\n", b"");
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_found() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-c", true)];
+        assert_eq!(s.find_worktree_for_active_tab(), Some(2));
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_no_match() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("unrelated", true)];
+        assert_eq!(s.find_worktree_for_active_tab(), None);
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_no_active_tab() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", false)];
+        assert_eq!(s.find_worktree_for_active_tab(), None);
+    }
+
+    #[test]
+    fn find_worktree_for_active_tab_empty_tabs() {
+        let s = state_with_worktrees();
+        assert_eq!(s.find_worktree_for_active_tab(), None);
+    }
+
+    #[test]
+    fn list_worktrees_error_sets_status() {
+        let mut s = State::default();
+        s.handle_list_worktrees(Some(1), b"", b"fatal: not a git repository");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Failed to list worktrees"));
+        assert!(s.status_message.contains("fatal: not a git repository"));
+    }
+
+    #[test]
+    fn list_worktrees_error_preserves_existing_worktrees() {
+        let mut s = state_with_worktrees();
+        let original_len = s.worktrees.len();
+        s.handle_list_worktrees(Some(1), b"", b"error");
+        assert_eq!(s.worktrees.len(), original_len);
+    }
+
+    #[test]
+    fn git_branches_error_sets_status() {
+        let mut s = State::default();
+        s.handle_git_branches(Some(128), b"", b"fatal: bad default revision");
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Failed to list branches"));
+    }
+
+    #[test]
+    fn git_branches_error_preserves_existing_branches() {
+        let mut s = state_with_worktrees();
+        let original_len = s.branches.len();
+        s.handle_git_branches(Some(1), b"", b"error");
+        assert_eq!(s.branches.len(), original_len);
+    }
+
+    #[test]
+    fn input_branch_esc_clears_buffer() {
+        let mut s = State { mode: Mode::InputBranch, input_buffer: "wip".into(), ..Default::default() };
+        s.handle_key_input_branch(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert!(s.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn wrap_navigate_basic() {
+        assert_eq!(wrap_navigate(0, 3, 1), 1);
+        assert_eq!(wrap_navigate(2, 3, 1), 0);
+        assert_eq!(wrap_navigate(0, 3, -1), 2);
+        assert_eq!(wrap_navigate(0, 0, 1), 0);
+    }
+}
