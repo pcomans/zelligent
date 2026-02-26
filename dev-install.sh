@@ -31,11 +31,12 @@ if ! grep -q "version = \"$VERSION\"" Cargo.toml; then
 fi
 bash build.sh
 mv Cargo.toml.bak Cargo.toml
+cd ..
 
 # Also install plugin to share dir for `zelligent doctor` compatibility
 SHARE_DIR="$HOME/.local/share/zelligent"
 mkdir -p "$SHARE_DIR"
-cp "target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
+cp "plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
 echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
 
 # Install bundled Claude skill for `zelligent doctor`
