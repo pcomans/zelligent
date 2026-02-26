@@ -307,6 +307,13 @@ if [ "$1" = "remove" ]; then
     echo "Error: no worktree found for branch '$BRANCH_NAME'." >&2
     exit 1
   fi
+  case "$WORKTREE_PATH" in
+    "$WORKTREES_DIR"/*) ;;
+    *)
+      echo "Error: worktree '$WORKTREE_PATH' is not managed by zelligent." >&2
+      exit 1
+      ;;
+  esac
   if [ -f "$REPO_ROOT/.zelligent/teardown.sh" ]; then
     echo "⚙️  Running .zelligent/teardown.sh..."
     if ! bash "$REPO_ROOT/.zelligent/teardown.sh" "$REPO_ROOT" "$WORKTREE_PATH"; then

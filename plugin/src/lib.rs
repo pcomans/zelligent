@@ -741,6 +741,8 @@ mod tests {
         assert_eq!(wts.len(), 2);
         assert_eq!(wts[0].dir, "feat-a");
         assert_eq!(wts[0].branch, "feat-a");
+        assert_eq!(wts[1].dir, "feat-b");
+        assert_eq!(wts[1].branch, "feat-b");
     }
 
     #[test]
@@ -1327,6 +1329,4 @@ mod tests {
         assert_eq!(wrap_navigate(0, 3, -1), 2);
         assert_eq!(wrap_navigate(0, 0, 1), 0);
     }
-
-
 }
