@@ -18,9 +18,9 @@ pub fn state_with_worktrees() -> State {
     let mut s = State::default();
     s.mode = Mode::BrowseWorktrees;
     s.worktrees = vec![
-        Worktree { branch: "feat-a".into() },
-        Worktree { branch: "feat-b".into() },
-        Worktree { branch: "feat-c".into() },
+        Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
+        Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+        Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
     ];
     s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
     s

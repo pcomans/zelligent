@@ -45,8 +45,11 @@ pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], selected
     writeln!(w).unwrap();
     for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
-        let branch_display = &wt.branch;
-        writeln!(w, "  {cursor} {branch_display} {RESET}").unwrap();
+        if wt.dir != wt.branch {
+            writeln!(w, "  {cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
+        } else {
+            writeln!(w, "  {cursor} {dir} {RESET}", dir = wt.dir).unwrap();
+        }
     }
 }
 
