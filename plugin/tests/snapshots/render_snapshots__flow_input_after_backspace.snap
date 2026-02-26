@@ -1,0 +1,12 @@
+---
+source: tests/render_snapshots.rs
+expression: after_bs
+---
+[1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
+
+  [1mNew branch name:[0m
+
+  > fi[7m [0m
+
+  [2mEnter[0m create  [2mEsc[0m back
+  [2m0.0.0-dev+b879bd9[0m

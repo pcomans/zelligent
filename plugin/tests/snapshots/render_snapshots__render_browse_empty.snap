@@ -1,0 +1,20 @@
+---
+source: tests/render_snapshots.rs
+expression: "render_to_string(&s, 20, 80)"
+---
+[1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
+
+  [36m  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄[0m
+  [36m █▀▀▀▀▀██▀       ██ ██                      █▄[0m
+  [36m      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄[0m
+  [36m    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██[0m
+  [36m  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██[0m
+  [36m ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██[0m
+  [36m                             ██[0m
+  [36m                           ▀▀▀[0m
+
+  [2mn[0m  pick an existing branch
+  [2mi[0m  type a new branch name
+
+  [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m open  [2mn[0m branch  [2mi[0m new  [2md[0m remove  [2mr[0m refresh  [2mq[0m quit
+  [2m0.0.0-dev+b879bd9[0m
