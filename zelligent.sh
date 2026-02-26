@@ -251,10 +251,14 @@ if [ "$1" = "list-worktrees" ]; then
     case "$line" in
       "worktree "*)
         current_path="${line#worktree }"
+        current_dir=""
+        if [[ "$current_path" == "$SPAWN_PREFIX"* ]]; then
+          current_dir="${current_path#$SPAWN_PREFIX}"
+        fi
         ;;
       "branch "*)
-        if [[ "$current_path" == "$SPAWN_PREFIX"* ]]; then
-          echo "${line#branch refs/heads/}"
+        if [ -n "$current_dir" ]; then
+          printf '%s\t%s\n' "$current_dir" "${line#branch refs/heads/}"
         fi
         ;;
     esac
@@ -295,9 +299,12 @@ if [ "$1" = "remove" ]; then
   fi
   BRANCH_NAME=$2
   SESSION_NAME="${BRANCH_NAME//\//-}"
-  WORKTREE_PATH="$WORKTREES_DIR/$BRANCH_NAME"
-  if [ ! -d "$WORKTREE_PATH" ]; then
-    echo "Error: worktree '$WORKTREE_PATH' does not exist." >&2
+  WORKTREE_PATH=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v branch="branch refs/heads/$BRANCH_NAME" '
+    /^worktree / { path = substr($0, 10) }
+    $0 == branch { print path; exit }
+  ')
+  if [ -z "$WORKTREE_PATH" ] || [ ! -d "$WORKTREE_PATH" ]; then
+    echo "Error: no worktree found for branch '$BRANCH_NAME'." >&2
     exit 1
   fi
   if [ -f "$REPO_ROOT/.zelligent/teardown.sh" ]; then

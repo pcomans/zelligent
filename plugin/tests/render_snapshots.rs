@@ -107,13 +107,28 @@ fn render_worktree_list_scrolling() {
     let s = State {
         mode: Mode::BrowseWorktrees,
         worktrees: (0..20)
-            .map(|i| Worktree { branch: format!("branch-{i}") })
+            .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
             .collect(),
         selected_index: 15,
         ..Default::default()
     };
     // Small viewport forces scrolling
     insta::assert_snapshot!(render_to_string(&s, 10, 80));
+}
+
+#[test]
+fn render_browse_mixed_dir_branch_names() {
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        worktrees: vec![
+            Worktree { dir: "autonomy".into(), branch: "plugin-snapshot-tests".into() },
+            Worktree { dir: "competition".into(), branch: "competition".into() },
+            Worktree { dir: "ding".into(), branch: "feat/ding-dong".into() },
+        ],
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
 // --- Interaction flow tests ---
