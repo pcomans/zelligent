@@ -484,6 +484,18 @@ out=$("$SCRIPT" remove "no-such-branch-$$" 2>&1); code=$?
 check "remove nonexistent branch exits non-zero" "1" "$code"
 contains "remove nonexistent branch: prints error" "no worktree found" "$out"
 
+# remove refuses to act on non-zelligent-managed worktree (safety check)
+TEST_WT_UNMANAGED_BRANCH="test-unmanaged-$$"
+TEST_WT_UNMANAGED_DIR=$(mktemp -d)
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_UNMANAGED_BRANCH" "$TEST_WT_UNMANAGED_DIR" HEAD &>/dev/null
+out=$("$SCRIPT" remove "$TEST_WT_UNMANAGED_BRANCH" 2>&1); code=$?
+check "remove unmanaged worktree exits non-zero" "1" "$code"
+contains "remove unmanaged worktree: prints error" "not managed by zelligent" "$out"
+check "remove unmanaged worktree: dir still exists" "true" \
+  "$([ -d "$TEST_WT_UNMANAGED_DIR" ] && echo true || echo false)"
+git -C "$REPO_ROOT" worktree remove --force "$TEST_WT_UNMANAGED_DIR" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D "$TEST_WT_UNMANAGED_BRANCH" &>/dev/null || true
+
 # list-branches
 out=$("$SCRIPT" list-branches 2>&1); code=$?
 check "list-branches exits 0" "0" "$code"
