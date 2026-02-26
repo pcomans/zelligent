@@ -14,19 +14,14 @@ pub const CMD_GIT_BRANCHES: &str = "git_branches";
 pub const CMD_SPAWN: &str = "spawn";
 pub const CMD_REMOVE: &str = "remove";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum Mode {
+    #[default]
     Loading,
     BrowseWorktrees,
     SelectBranch,
     InputBranch,
     Confirming,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Loading
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -41,6 +36,11 @@ pub enum Action {
     Close,
     Spawn(String),
     Remove(String),
+    /// Close a tab by name, optionally returning to another tab, then refresh.
+    CloseTabAndRefresh {
+        tab_name: String,
+        return_to: Option<String>,
+    },
     Refresh,
     FetchToplevel,
     FetchWorktreesAndBranches,
@@ -209,6 +209,15 @@ impl State {
             Action::Close => close_self(),
             Action::Spawn(branch) => self.fire_spawn(branch),
             Action::Remove(branch) => self.fire_remove(branch),
+            Action::CloseTabAndRefresh { tab_name, return_to } => {
+                go_to_tab_name(tab_name);
+                close_focused_tab();
+                if let Some(name) = return_to {
+                    go_to_tab_name(name);
+                }
+                self.fire_list_worktrees();
+                self.fire_git_branches();
+            }
             Action::Refresh => {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
@@ -310,29 +319,21 @@ impl State {
 
     pub fn handle_remove_result(&mut self, exit_code: Option<i32>, stderr: &[u8], context: &BTreeMap<String, String>) -> Action {
         let branch = context.get("branch").cloned().unwrap_or_default();
+        self.mode = Mode::BrowseWorktrees;
         if exit_code == Some(0) {
             self.status_message = format!("Removed '{branch}'");
             self.status_is_error = false;
-            // Close the worktree's tab if it exists. We use go_to_tab_name
-            // instead of close_tab_with_index because the latter expects an
-            // internal tab index, but TabInfo only exposes position (which
-            // diverges from index when tabs are closed).
-            #[cfg(target_arch = "wasm32")]
+            // Close the worktree's tab if it exists, then refresh.
             if self.has_tab_for_branch(&branch) {
                 let tab_name = Self::tab_name_for_branch(&branch);
-                let return_tab = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
-                go_to_tab_name(&tab_name);
-                close_focused_tab();
-                if let Some(name) = return_tab {
-                    go_to_tab_name(&name);
-                }
+                let return_to = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
+                return Action::CloseTabAndRefresh { tab_name, return_to };
             }
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
             self.status_message = format!("Remove failed: {err}");
             self.status_is_error = true;
         }
-        self.mode = Mode::BrowseWorktrees;
         Action::Refresh
     }
 
@@ -1046,6 +1047,25 @@ mod tests {
         assert_eq!(s.status_message, "Removed 'feat-a'");
         assert_eq!(s.mode, Mode::BrowseWorktrees);
         assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn remove_result_success_with_tab_returns_close_tab() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        let mut ctx = BTreeMap::new();
+        ctx.insert("branch".into(), "feat-a".into());
+        let action = s.handle_remove_result(Some(0), b"", &ctx);
+        assert_eq!(s.status_message, "Removed 'feat-a'");
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(
+            action,
+            Action::CloseTabAndRefresh {
+                tab_name: "feat-a".into(),
+                return_to: Some("zelligent".into()),
+            }
+        );
     }
 
     #[test]

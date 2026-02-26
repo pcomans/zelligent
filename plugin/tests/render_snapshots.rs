@@ -1,28 +1,8 @@
-use std::collections::BTreeSet;
+mod common;
+
+use common::{key, render_to_string, state_with_worktrees};
 use zelligent_plugin::{Mode, State, Worktree};
 use zellij_tile::prelude::*;
-
-fn key(bare: BareKey) -> KeyWithModifier {
-    KeyWithModifier { bare_key: bare, key_modifiers: BTreeSet::new() }
-}
-
-fn render_to_string(state: &State, rows: usize, cols: usize) -> String {
-    let mut buf = Vec::new();
-    state.render_to(&mut buf, rows, cols);
-    String::from_utf8(buf).unwrap()
-}
-
-fn state_with_worktrees() -> State {
-    let mut s = State::default();
-    s.mode = Mode::BrowseWorktrees;
-    s.worktrees = vec![
-        Worktree { branch: "feat-a".into() },
-        Worktree { branch: "feat-b".into() },
-        Worktree { branch: "feat-c".into() },
-    ];
-    s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
-    s
-}
 
 fn state_with_branches() -> State {
     let mut s = state_with_worktrees();
