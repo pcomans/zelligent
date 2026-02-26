@@ -455,6 +455,35 @@ rm -rf "$NONGIT2"
 out=$("$SCRIPT" list-worktrees 2>&1); code=$?
 check "list-worktrees exits 0" "0" "$code"
 
+# list-worktrees with mismatched dir/branch name
+# Create a worktree where the directory name differs from the branch
+TEST_WT_BRANCH="test-mismatched-branch-$$"
+TEST_WT_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/different-dirname-$$"
+mkdir -p "$HOME/.zelligent/worktrees/$REPO_NAME"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_BRANCH" "$TEST_WT_DIR" HEAD &>/dev/null
+
+out=$("$SCRIPT" list-worktrees 2>&1); code=$?
+check "list-worktrees mismatched exits 0" "0" "$code"
+contains "list-worktrees mismatched: outputs dir" "different-dirname-$$" "$out"
+contains "list-worktrees mismatched: outputs branch" "$TEST_WT_BRANCH" "$out"
+# Verify tab-separated format: dir<TAB>branch
+contains "list-worktrees mismatched: tab-separated format" "$(printf 'different-dirname-%s\t%s' $$ "$TEST_WT_BRANCH")" "$out"
+
+# remove with mismatched dir/branch name — should resolve path from git metadata
+out=$("$SCRIPT" remove "$TEST_WT_BRANCH" 2>&1); code=$?
+check "remove mismatched exits 0" "0" "$code"
+contains "remove mismatched: prints success" "Removed" "$out"
+check "remove mismatched: worktree dir deleted" "false" \
+  "$([ -d "$TEST_WT_DIR" ] && echo true || echo false)"
+
+# Cleanup branch
+git -C "$REPO_ROOT" branch -D "$TEST_WT_BRANCH" &>/dev/null || true
+
+# remove with nonexistent branch — should fail gracefully
+out=$("$SCRIPT" remove "no-such-branch-$$" 2>&1); code=$?
+check "remove nonexistent branch exits non-zero" "1" "$code"
+contains "remove nonexistent branch: prints error" "no worktree found" "$out"
+
 # list-branches
 out=$("$SCRIPT" list-branches 2>&1); code=$?
 check "list-branches exits 0" "0" "$code"
