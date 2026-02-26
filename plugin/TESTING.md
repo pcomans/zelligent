@@ -88,4 +88,4 @@ The unit tests in `lib.rs` have their own copies of `key()` and `state_with_work
 
 - **`Action` enum** — handlers are pure functions that return actions. Side effects (Zellij host calls) happen in `execute()`. This makes handlers fully testable on native.
 - **`render_to(&self, w: &mut impl Write, ...)`** — production calls `render()` which passes `stdout`; tests pass `Vec<u8>`.
-- **`host_run_plugin_command` stub** — `main.rs` provides a no-op `#[cfg(not(wasm32))]` stub for a WASM host import that zellij-tile references. Without it, native linking fails.
+- **`host_run_plugin_command` stub** — `main.rs` provides a no-op `#[cfg(not(target_arch = "wasm32"))]` stub for a WASM host import that zellij-tile references. Without it, native linking fails.
