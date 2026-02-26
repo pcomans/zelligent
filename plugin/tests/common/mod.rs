@@ -9,7 +9,9 @@ pub fn key(bare: BareKey) -> KeyWithModifier {
 pub fn render_to_string(state: &State, rows: usize, cols: usize) -> String {
     let mut buf = Vec::new();
     state.render_to(&mut buf, rows, cols);
-    String::from_utf8(buf).unwrap()
+    let output = String::from_utf8(buf).unwrap();
+    // Replace the build-specific version string so snapshots don't change on every commit.
+    output.replace(zelligent_plugin::VERSION, "VERSION")
 }
 
 pub fn state_with_worktrees() -> State {

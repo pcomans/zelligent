@@ -14,6 +14,6 @@ path = "src/main.rs"
 [dependencies]
 zellij-tile = "0.43"
 
-# Dev-deps are only used by `cargo test --target <host>`, never compiled for wasm.
+# Dev-deps are only needed for host-side tests/snapshots and are not used in the wasm release build.
 [dev-dependencies]
 insta = "1.46"
