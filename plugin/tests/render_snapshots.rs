@@ -131,6 +131,18 @@ fn render_browse_mixed_dir_branch_names() {
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
+#[test]
+fn render_not_git_repo() {
+    let s = State {
+        mode: Mode::NotGitRepo,
+        status_message: "/tmp/foo is not a git repo: fatal: not a git repository".into(),
+        status_is_error: true,
+        initial_cwd: std::path::PathBuf::from("/tmp/foo"),
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
 // --- Interaction flow tests ---
 
 #[test]

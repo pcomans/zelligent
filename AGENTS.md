@@ -8,6 +8,36 @@ Run the test suite before and after changes:
 bash test.sh
 ```
 
+### Plugin tests and builds
+
+The plugin's `.cargo/config.toml` defaults to `wasm32-wasip1`. Use the PATH workaround for Homebrew Rust:
+
+```bash
+PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH"
+```
+
+Run plugin unit tests (must specify host target):
+
+```bash
+cd plugin && cargo test --target "$(rustc -vV | awk '/^host:/ {print $2}')"
+```
+
+Build and install locally (CLI + WASM plugin):
+
+```bash
+PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+```
+
+### Render snapshot tests
+
+The plugin uses [insta](https://insta.rs) for render snapshot tests in `plugin/tests/render_snapshots.rs`. When adding a new UI mode or changing render output, add or update snapshot tests. To create/update snapshots:
+
+```bash
+cd plugin && INSTA_UPDATE=always cargo test --target "$(rustc -vV | awk '/^host:/ {print $2}')"
+```
+
+Review the generated `.snap` files in `plugin/tests/snapshots/` before committing.
+
 The suite has two levels:
 
 ### Unit tests (always run)
