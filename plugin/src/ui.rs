@@ -85,6 +85,16 @@ pub fn render_input(w: &mut impl Write, input: &str) {
     writeln!(w, "  > {input}{INVERSE} {RESET}").unwrap();
 }
 
+pub fn render_not_git_repo(w: &mut impl Write, cwd: &str) {
+    writeln!(w).unwrap();
+    writeln!(w, "  {BOLD}{RED}Not a git repository.{RESET}").unwrap();
+    writeln!(w, "  {DIM}Current directory: {cwd}{RESET}").unwrap();
+    writeln!(w).unwrap();
+    writeln!(w, "  {DIM}d{RESET}  save layout to disk").unwrap();
+    writeln!(w, "  {DIM}x{RESET}  nuke session & start fresh").unwrap();
+    writeln!(w, "  {DIM}q{RESET}  close plugin").unwrap();
+}
+
 pub fn render_confirm(w: &mut impl Write, branch: &str) {
     writeln!(w).unwrap();
     writeln!(w, "  {YELLOW}{BOLD}Remove worktree for '{branch}'?{RESET}").unwrap();
@@ -116,7 +126,7 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
         Mode::InputBranch => {
             writeln!(w, "  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back").unwrap();
         }
-        Mode::Confirming => {}
+        Mode::NotGitRepo | Mode::Confirming => {}
     }
     writeln!(w, "  {DIM}{version}{RESET}").unwrap();
 }
