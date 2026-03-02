@@ -1385,9 +1385,21 @@ mod tests {
 
     #[test]
     fn not_git_repo_x_returns_nuke_session() {
+        std::env::set_var("ZELLIJ_SESSION_NAME", "test-session");
         let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
         assert_eq!(action, Action::NukeSession);
+        std::env::remove_var("ZELLIJ_SESSION_NAME");
+    }
+
+    #[test]
+    fn not_git_repo_x_without_session_shows_error() {
+        std::env::remove_var("ZELLIJ_SESSION_NAME");
+        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
+        assert_eq!(action, Action::None);
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Cannot determine session name"));
     }
 
     #[test]
