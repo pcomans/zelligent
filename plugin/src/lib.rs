@@ -18,6 +18,7 @@ pub const CMD_REMOVE: &str = "remove";
 pub enum Mode {
     #[default]
     Loading,
+    NotGitRepo,
     BrowseWorktrees,
     SelectBranch,
     InputBranch,
@@ -45,6 +46,8 @@ pub enum Action {
     Refresh,
     FetchToplevel,
     FetchWorktreesAndBranches,
+    DumpLayout,
+    NukeSession,
 }
 
 #[derive(Default)]
@@ -62,6 +65,7 @@ pub struct State {
     pub status_is_error: bool,
     pub zelligent_path: String,
     pub initial_cwd: PathBuf,
+    pub session_name: Option<String>,
     pub tabs: Vec<TabInfo>,
     /// Flipped to `true` after the first successful worktree list load.
     /// Auto-selection of the active tab's worktree only happens before this
@@ -242,6 +246,16 @@ impl State {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
             }
+            Action::DumpLayout => {
+                dump_session_layout();
+            }
+            Action::NukeSession => {
+                // The handler already verified session_name is Some.
+                // kill_sessions terminates our process, so nothing after it runs.
+                if let Some(name) = &self.session_name {
+                    kill_sessions(&[name.as_str()]);
+                }
+            }
         }
     }
 
@@ -253,6 +267,7 @@ impl State {
             let cwd = self.initial_cwd.display();
             self.status_message = format!("{cwd} is not a git repo: {err}");
             self.status_is_error = true;
+            self.mode = Mode::NotGitRepo;
             return Action::None;
         }
         let output = String::from_utf8_lossy(stdout);
@@ -494,6 +509,29 @@ impl State {
         Action::None
     }
 
+    pub fn handle_key_not_git_repo(&mut self, key: &KeyWithModifier) -> Action {
+        if key.has_no_modifiers() {
+            match key.bare_key {
+                BareKey::Char('d') => {
+                    self.status_message = "Layout dumped".to_string();
+                    self.status_is_error = false;
+                    return Action::DumpLayout;
+                }
+                BareKey::Char('x') => {
+                    if self.session_name.is_some() {
+                        return Action::NukeSession;
+                    } else {
+                        self.status_message = "Cannot determine session name".to_string();
+                        self.status_is_error = true;
+                    }
+                }
+                BareKey::Char('q') | BareKey::Esc => return Action::Close,
+                _ => {}
+            }
+        }
+        Action::None
+    }
+
     pub fn render_to(&self, w: &mut impl Write, rows: usize, cols: usize) {
         match self.mode {
             Mode::Loading => {
@@ -504,6 +542,12 @@ impl State {
                 } else {
                     writeln!(w, "  Waiting for permissions...").unwrap();
                 }
+            }
+            Mode::NotGitRepo => {
+                ui::render_header(w, "error", cols);
+                ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
+                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_footer(w, &self.mode, VERSION);
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
@@ -545,6 +589,7 @@ impl ZellijPlugin for State {
             .unwrap_or_else(|| "zelligent".to_string());
 
         self.initial_cwd = get_plugin_ids().initial_cwd;
+        self.session_name = std::env::var("ZELLIJ_SESSION_NAME").ok();
 
         request_permission(&[
             PermissionType::RunCommands,
@@ -601,6 +646,7 @@ impl ZellijPlugin for State {
             Event::Key(key) => {
                 match self.mode {
                     Mode::Loading => Action::None,
+                    Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
                     Mode::BrowseWorktrees => self.handle_key_browse(&key),
                     Mode::SelectBranch => self.handle_key_select_branch(&key),
                     Mode::InputBranch => self.handle_key_input_branch(&key),
@@ -1036,12 +1082,12 @@ mod tests {
     }
 
     #[test]
-    fn git_toplevel_error() {
+    fn git_toplevel_error_enters_not_git_repo_mode() {
         let mut s = State::default();
         let action = s.handle_git_toplevel(Some(128), b"", b"not a git repo");
         assert!(s.status_is_error);
         assert!(s.status_message.contains("is not a git repo"));
-        assert_eq!(s.mode, Mode::Loading);
+        assert_eq!(s.mode, Mode::NotGitRepo);
         assert_eq!(action, Action::None);
     }
 
@@ -1328,5 +1374,48 @@ mod tests {
         assert_eq!(wrap_navigate(2, 3, 1), 0);
         assert_eq!(wrap_navigate(0, 3, -1), 2);
         assert_eq!(wrap_navigate(0, 0, 1), 0);
+    }
+
+    // --- NotGitRepo key handler tests ---
+
+    #[test]
+    fn not_git_repo_d_returns_dump_layout() {
+        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let action = s.handle_key_not_git_repo(&key(BareKey::Char('d')));
+        assert_eq!(action, Action::DumpLayout);
+    }
+
+    #[test]
+    fn not_git_repo_x_returns_nuke_session() {
+        let mut s = State {
+            mode: Mode::NotGitRepo,
+            session_name: Some("test-session".into()),
+            ..Default::default()
+        };
+        let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
+        assert_eq!(action, Action::NukeSession);
+    }
+
+    #[test]
+    fn not_git_repo_x_without_session_shows_error() {
+        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
+        assert_eq!(action, Action::None);
+        assert!(s.status_is_error);
+        assert!(s.status_message.contains("Cannot determine session name"));
+    }
+
+    #[test]
+    fn not_git_repo_q_returns_close() {
+        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let action = s.handle_key_not_git_repo(&key(BareKey::Char('q')));
+        assert_eq!(action, Action::Close);
+    }
+
+    #[test]
+    fn not_git_repo_esc_returns_close() {
+        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let action = s.handle_key_not_git_repo(&key(BareKey::Esc));
+        assert_eq!(action, Action::Close);
     }
 }
