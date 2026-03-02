@@ -8,6 +8,26 @@ Run the test suite before and after changes:
 bash test.sh
 ```
 
+### Plugin tests and builds
+
+The plugin's `.cargo/config.toml` defaults to `wasm32-wasip1`. Use the PATH workaround for Homebrew Rust:
+
+```bash
+PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH"
+```
+
+Run plugin unit tests (must specify host target):
+
+```bash
+cd plugin && cargo test --target "$(rustc -vV | awk '/^host:/ {print $2}')"
+```
+
+Build and install locally (CLI + WASM plugin):
+
+```bash
+PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+```
+
 The suite has two levels:
 
 ### Unit tests (always run)
