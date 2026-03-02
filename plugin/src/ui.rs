@@ -10,6 +10,8 @@ pub const YELLOW: &str = "\x1b[33m";
 
 use std::io::Write;
 
+use std::collections::BTreeSet;
+
 use crate::{Mode, Worktree};
 
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
@@ -18,7 +20,7 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 
-pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], selected: usize, rows: usize) {
+pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], selected: usize, rows: usize, attention_branches: &BTreeSet<String>) {
     if worktrees.is_empty() {
         writeln!(w).unwrap();
         writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
@@ -45,10 +47,11 @@ pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], selected
     writeln!(w).unwrap();
     for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
+        let alert = if attention_branches.contains(&wt.branch) { format!(" {YELLOW}!{RESET}") } else { String::new() };
         if wt.dir != wt.branch {
-            writeln!(w, "  {cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
+            writeln!(w, "  {cursor} {dir} {RESET}{alert}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
         } else {
-            writeln!(w, "  {cursor} {dir} {RESET}", dir = wt.dir).unwrap();
+            writeln!(w, "  {cursor} {dir} {RESET}{alert}", dir = wt.dir).unwrap();
         }
     }
 }

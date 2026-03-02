@@ -1,6 +1,6 @@
 pub mod ui;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -13,6 +13,7 @@ pub const CMD_LIST_WORKTREES: &str = "list_worktrees";
 pub const CMD_GIT_BRANCHES: &str = "git_branches";
 pub const CMD_SPAWN: &str = "spawn";
 pub const CMD_REMOVE: &str = "remove";
+pub const CMD_NOTIFICATION: &str = "notification";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Mode {
@@ -70,6 +71,15 @@ pub struct State {
     /// Auto-selection of the active tab's worktree only happens before this
     /// so that subsequent refreshes do not override the user's cursor position.
     pub has_loaded: bool,
+    /// Branches with pending attention alerts (agent needs input, task complete, etc.)
+    pub attention_branches: BTreeSet<String>,
+    /// Whether macOS notifications are enabled (opt-out via ZELLIGENT_NOTIFICATIONS=false)
+    pub notifications_enabled: bool,
+    /// Timestamp of last notification, for debouncing (one per 30s)
+    pub last_notification: Option<std::time::Instant>,
+    /// Counter for testing: how many notifications have been fired
+    #[cfg(test)]
+    pub notification_count: usize,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -531,6 +541,52 @@ impl State {
         Action::None
     }
 
+    pub fn handle_pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        match pipe_message.name.as_str() {
+            "attention" => {
+                if let Some(branch) = pipe_message.payload {
+                    self.attention_branches.insert(branch.clone());
+                    let now = std::time::Instant::now();
+                    let should_notify = self.last_notification
+                        .map(|t| now.duration_since(t).as_secs() >= 30)
+                        .unwrap_or(true);
+                    if should_notify {
+                        self.last_notification = Some(now);
+                        self.fire_notification(&branch);
+                    }
+                    return true;
+                }
+            }
+            "clear" => {
+                if let Some(branch) = pipe_message.payload {
+                    self.attention_branches.remove(&branch);
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn fire_notification(&mut self, branch: &str) {
+        #[cfg(test)]
+        {
+            self.notification_count += 1;
+            let _ = branch;
+            return;
+        }
+        #[cfg(not(test))]
+        if self.notifications_enabled {
+            let script = format!(
+                "display notification \"Agent needs attention\" with title \"zelligent: {}\"",
+                branch.replace('"', "\\\"")
+            );
+            let mut context = BTreeMap::new();
+            context.insert("cmd_type".into(), CMD_NOTIFICATION.into());
+            run_command(&["osascript", "-e", &script], context);
+        }
+    }
+
     pub fn render_to(&self, w: &mut impl Write, rows: usize, cols: usize) {
         match self.mode {
             Mode::Loading => {
@@ -550,7 +606,7 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_worktree_list(w, &self.worktrees, self.selected_index, rows);
+                ui::render_worktree_list(w, &self.worktrees, self.selected_index, rows, &self.attention_branches);
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION);
             }
@@ -586,6 +642,11 @@ impl ZellijPlugin for State {
             .get("zelligent_path")
             .cloned()
             .unwrap_or_else(|| "zelligent".to_string());
+
+        self.notifications_enabled = !matches!(
+            std::env::var("ZELLIGENT_NOTIFICATIONS").as_deref(),
+            Ok("false") | Ok("0")
+        );
 
         self.initial_cwd = get_plugin_ids().initial_cwd;
 
@@ -626,6 +687,7 @@ impl ZellijPlugin for State {
                     }
                     Some(CMD_SPAWN) => self.handle_spawn_result(exit_code, &stderr, &context),
                     Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
+                    Some(CMD_NOTIFICATION) => Action::None, // fire-and-forget
                     _ => Action::None,
                 }
             }
@@ -638,6 +700,13 @@ impl ZellijPlugin for State {
                     if let Some(idx) = self.find_worktree_for_active_tab() {
                         self.selected_index = idx;
                     }
+                }
+                // Auto-clear attention for the active tab's branch
+                if let Some(active_tab) = self.tabs.iter().find(|t| t.active) {
+                    let active_name = active_tab.name.clone();
+                    self.attention_branches.retain(|branch| {
+                        Self::tab_name_for_branch(branch) != active_name
+                    });
                 }
                 Action::None
             }
@@ -655,6 +724,10 @@ impl ZellijPlugin for State {
         };
         self.execute(&action);
         true
+    }
+
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        self.handle_pipe(pipe_message)
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
@@ -1402,5 +1475,107 @@ mod tests {
         let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
         let action = s.handle_key_not_git_repo(&key(BareKey::Esc));
         assert_eq!(action, Action::Close);
+    }
+
+    // --- Pipe handler tests ---
+
+    fn pipe_msg(name: &str, payload: Option<&str>) -> PipeMessage {
+        PipeMessage {
+            source: PipeSource::Cli("test".into()),
+            name: name.into(),
+            payload: payload.map(|s| s.into()),
+            args: BTreeMap::new(),
+            is_private: false,
+        }
+    }
+
+    #[test]
+    fn pipe_attention_adds_branch() {
+        let mut s = State::default();
+        let result = s.handle_pipe(pipe_msg("attention", Some("feature/auth")));
+        assert!(result);
+        assert!(s.attention_branches.contains("feature/auth"));
+        assert_eq!(s.notification_count, 1);
+    }
+
+    #[test]
+    fn pipe_attention_no_payload_returns_false() {
+        let mut s = State::default();
+        let result = s.handle_pipe(pipe_msg("attention", None));
+        assert!(!result);
+        assert!(s.attention_branches.is_empty());
+    }
+
+    #[test]
+    fn pipe_clear_removes_branch() {
+        let mut s = State::default();
+        s.attention_branches.insert("feature/auth".into());
+        let result = s.handle_pipe(pipe_msg("clear", Some("feature/auth")));
+        assert!(result);
+        assert!(!s.attention_branches.contains("feature/auth"));
+    }
+
+    #[test]
+    fn pipe_clear_no_payload_returns_false() {
+        let mut s = State::default();
+        s.attention_branches.insert("feature/auth".into());
+        let result = s.handle_pipe(pipe_msg("clear", None));
+        assert!(!result);
+        assert!(s.attention_branches.contains("feature/auth"));
+    }
+
+    #[test]
+    fn pipe_unknown_name_returns_false() {
+        let mut s = State::default();
+        let result = s.handle_pipe(pipe_msg("unknown", Some("data")));
+        assert!(!result);
+        assert!(s.attention_branches.is_empty());
+    }
+
+    #[test]
+    fn pipe_attention_debounces_notifications() {
+        let mut s = State::default();
+        s.handle_pipe(pipe_msg("attention", Some("branch-a")));
+        assert_eq!(s.notification_count, 1);
+        // Second call within 30s should not fire notification (last_notification is recent)
+        s.handle_pipe(pipe_msg("attention", Some("branch-b")));
+        assert_eq!(s.notification_count, 1);
+        // Both branches should be in the set though
+        assert!(s.attention_branches.contains("branch-a"));
+        assert!(s.attention_branches.contains("branch-b"));
+    }
+
+    #[test]
+    fn tab_update_auto_clears_attention() {
+        let mut s = state_with_worktrees();
+        s.has_loaded = true;
+        s.attention_branches.insert("feat-a".into());
+        s.attention_branches.insert("feat-b".into());
+        // Simulate TabUpdate with feat-a active
+        s.tabs = vec![make_tab("feat-a", true), make_tab("feat-b", false)];
+        // Run the same logic as the TabUpdate handler
+        if let Some(active_tab) = s.tabs.iter().find(|t| t.active) {
+            let active_name = active_tab.name.clone();
+            s.attention_branches.retain(|branch| {
+                State::tab_name_for_branch(branch) != active_name
+            });
+        }
+        assert!(!s.attention_branches.contains("feat-a"));
+        assert!(s.attention_branches.contains("feat-b"));
+    }
+
+    #[test]
+    fn tab_update_auto_clears_slash_branch() {
+        let mut s = state_with_worktrees();
+        s.has_loaded = true;
+        s.attention_branches.insert("feature/auth".into());
+        s.tabs = vec![make_tab("feature-auth", true)];
+        if let Some(active_tab) = s.tabs.iter().find(|t| t.active) {
+            let active_name = active_tab.name.clone();
+            s.attention_branches.retain(|branch| {
+                State::tab_name_for_branch(branch) != active_name
+            });
+        }
+        assert!(!s.attention_branches.contains("feature/auth"));
     }
 }

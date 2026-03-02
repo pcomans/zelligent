@@ -143,6 +143,22 @@ fn render_not_git_repo() {
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
+#[test]
+fn render_browse_with_attention() {
+    let mut s = state_with_worktrees();
+    s.attention_branches.insert("feat-b".into());
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_browse_with_attention_cleared() {
+    let mut s = state_with_worktrees();
+    s.attention_branches.insert("feat-a".into());
+    // Simulate auto-clear: remove the branch from attention
+    s.attention_branches.remove("feat-a");
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
 // --- Interaction flow tests ---
 
 #[test]

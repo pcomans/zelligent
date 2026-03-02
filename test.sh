@@ -145,6 +145,51 @@ contains "multi-word cmd: contains model flag"   'claude-sonnet-4-6' "$out_multi
 
 rm -rf "$MOCK_BIN_LAYOUT"
 
+# ── Hook injection ──────────────────────────────────────────────────────────
+echo "Hook injection:"
+
+# The layout test already created and cleaned up test-layout-branch.
+# Run a fresh spawn and check that .claude/settings.json was created.
+MOCK_BIN_HOOKS=$(mktemp -d)
+cat > "$MOCK_BIN_HOOKS/zellij" <<'MOCK'
+#!/bin/bash
+echo "zellij $*"
+MOCK
+cat > "$MOCK_BIN_HOOKS/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_BIN_HOOKS/zellij" "$MOCK_BIN_HOOKS/lazygit"
+
+HOOK_BRANCH="test-hooks-$$"
+HOOK_WT="$HOME/.zelligent/worktrees/$REPO_NAME/$HOOK_BRANCH"
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_HOOKS:$PATH" \
+  "$SCRIPT" spawn "$HOOK_BRANCH" claude 2>&1)
+
+check "hook: .claude/settings.json created" "true" \
+  "$([ -f "$HOOK_WT/.claude/settings.json" ] && echo true || echo false)"
+HOOK_CONTENT=$(cat "$HOOK_WT/.claude/settings.json" 2>/dev/null)
+contains "hook: contains Notification" '"Notification"' "$HOOK_CONTENT"
+contains "hook: contains zellij pipe" 'zellij pipe --name attention' "$HOOK_CONTENT"
+
+# Run again with existing settings.json without Notification — should merge hooks in
+echo '{"custom": true}' > "$HOOK_WT/.claude/settings.json"
+out2=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_HOOKS:$PATH" \
+  "$SCRIPT" spawn "$HOOK_BRANCH" claude 2>&1)
+HOOK_CONTENT2=$(cat "$HOOK_WT/.claude/settings.json" 2>/dev/null)
+contains "hook: existing key preserved after merge" '"custom"' "$HOOK_CONTENT2"
+contains "hook: Notification merged in" '"Notification"' "$HOOK_CONTENT2"
+
+# Run yet again — should be a no-op since Notification already exists
+BEFORE_CONTENT="$HOOK_CONTENT2"
+out3=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_HOOKS:$PATH" \
+  "$SCRIPT" spawn "$HOOK_BRANCH" claude 2>&1)
+HOOK_CONTENT3=$(cat "$HOOK_WT/.claude/settings.json" 2>/dev/null)
+check "hook: idempotent — file unchanged" "$BEFORE_CONTENT" "$HOOK_CONTENT3"
+
+git -C "$REPO_ROOT" worktree remove --force "$HOOK_WT" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D "$HOOK_BRANCH" &>/dev/null || true
+rm -rf "$MOCK_BIN_HOOKS"
+
 # ── Quoted agent command ─────────────────────────────────────────────────────
 echo "Quoted agent command:"
 

@@ -388,6 +388,35 @@ else
 
 fi
 
+# Inject Claude Code attention hooks into per-worktree .claude/settings.json
+CLAUDE_DIR="$WORKTREE_PATH/.claude"
+CLAUDE_SETTINGS="$CLAUDE_DIR/settings.json"
+ATTENTION_HOOK='zellij pipe --name attention --payload "$(git rev-parse --abbrev-ref HEAD)"'
+if grep -q '"Notification"' "$CLAUDE_SETTINGS" 2>/dev/null; then
+  : # Notification hooks already present — nothing to do
+elif [ -f "$CLAUDE_SETTINGS" ]; then
+  # File exists but has no Notification hooks — merge them in
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: d = json.load(f)
+d.setdefault('hooks', {})['Notification'] = [{'hooks': [sys.argv[2]]}]
+with open(sys.argv[1], 'w') as f: json.dump(d, f, indent=2); f.write('\n')
+" "$CLAUDE_SETTINGS" "$ATTENTION_HOOK"
+else
+  mkdir -p "$CLAUDE_DIR"
+  cat > "$CLAUDE_SETTINGS" <<HOOKS
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": ["$ATTENTION_HOOK"]
+      }
+    ]
+  }
+}
+HOOKS
+fi
+
 # Use repo-level layout if present, otherwise use built-in default
 if [ -f "$REPO_ROOT/.zelligent/layout.kdl" ]; then
   LAYOUT_TEMPLATE="$REPO_ROOT/.zelligent/layout.kdl"
