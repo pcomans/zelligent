@@ -234,6 +234,54 @@ check "no args creates session" "0" "$code"
 contains "no args: prints session message" "session" "$out"
 rm -rf "$MOCK_NOARGS_BIN"
 
+# ── Stale socket timeout ──────────────────────────────────────────────────────
+echo "Stale socket timeout:"
+
+# Mock zellij that hangs forever (simulates stale socket)
+MOCK_HANG_BIN=$(mktemp -d)
+cat > "$MOCK_HANG_BIN/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "list-sessions" ]; then sleep 60; fi
+echo "zellij $*"
+MOCK
+cat > "$MOCK_HANG_BIN/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+cat > "$MOCK_HANG_BIN/zelligent" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_HANG_BIN/zellij" "$MOCK_HANG_BIN/lazygit" "$MOCK_HANG_BIN/zelligent"
+
+# No args outside Zellij with hanging zellij: should time out and create new session
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="" TMPDIR="/tmp/fake-zellij-$$" \
+  PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+check "stale socket: exits 0 (falls through to create)" "0" "$code"
+contains "stale socket: prints timeout warning" "timed out" "$out"
+contains "stale socket: creates session anyway" "Creating Zellij session" "$out"
+
+# Spawn outside Zellij with hanging zellij: should time out and create new session
+out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" TMPDIR="/tmp/fake-zellij-$$" \
+  PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1); code=$?
+cleanup_stale() {
+  git -C "$REPO_ROOT" worktree remove --force \
+    "$HOME/.zelligent/worktrees/$REPO_NAME/some-branch" &>/dev/null || true
+  git -C "$REPO_ROOT" branch -D some-branch &>/dev/null || true
+}
+cleanup_stale
+check "stale socket spawn: exits 0" "0" "$code"
+contains "stale socket spawn: prints timeout warning" "timed out" "$out"
+contains "stale socket spawn: creates new session" "Creating Zellij session" "$out"
+
+# When TMPDIR has a zellij socket dir, the warning includes cleanup command
+FAKE_TMPDIR=$(mktemp -d)
+mkdir -p "$FAKE_TMPDIR/zellij-fake"
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="" TMPDIR="$FAKE_TMPDIR" \
+  PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+contains "stale socket: shows cleanup command" "rm -rf" "$out"
+rm -rf "$FAKE_TMPDIR"
+
+rm -rf "$MOCK_HANG_BIN"
+
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
 
