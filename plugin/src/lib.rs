@@ -249,9 +249,10 @@ impl State {
                 dump_session_layout();
             }
             Action::NukeSession => {
+                // The handler already verified ZELLIJ_SESSION_NAME is set.
+                // kill_sessions terminates our process, so nothing after it runs.
                 if let Ok(name) = std::env::var("ZELLIJ_SESSION_NAME") {
                     kill_sessions(&[&name]);
-                    delete_dead_session(&name);
                 }
             }
         }
@@ -511,11 +512,18 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('d') => {
-                    self.status_message = "Layout dumped to ~/.config/zellij/".to_string();
+                    self.status_message = "Layout dumped".to_string();
                     self.status_is_error = false;
                     return Action::DumpLayout;
                 }
-                BareKey::Char('x') => return Action::NukeSession,
+                BareKey::Char('x') => {
+                    if std::env::var("ZELLIJ_SESSION_NAME").is_ok() {
+                        return Action::NukeSession;
+                    } else {
+                        self.status_message = "Cannot determine session name".to_string();
+                        self.status_is_error = true;
+                    }
+                }
                 BareKey::Char('q') | BareKey::Esc => return Action::Close,
                 _ => {}
             }
