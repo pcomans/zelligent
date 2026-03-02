@@ -28,6 +28,16 @@ Build and install locally (CLI + WASM plugin):
 PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
 ```
 
+### Render snapshot tests
+
+The plugin uses [insta](https://insta.rs) for render snapshot tests in `plugin/tests/render_snapshots.rs`. When adding a new UI mode or changing render output, add or update snapshot tests. To create/update snapshots:
+
+```bash
+cd plugin && INSTA_UPDATE=always cargo test --target "$(rustc -vV | awk '/^host:/ {print $2}')"
+```
+
+Review the generated `.snap` files in `plugin/tests/snapshots/` before committing.
+
 The suite has two levels:
 
 ### Unit tests (always run)
