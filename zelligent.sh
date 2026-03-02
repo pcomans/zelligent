@@ -6,6 +6,25 @@ set -e
 
 ZELLIJ_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/zellij"
 
+# Wrapper with 3s timeout to avoid hanging on stale Zellij sockets
+zellij_list_sessions() {
+  local output
+  if output=$(perl -e 'alarm 3; exec @ARGV' -- zellij list-sessions --no-formatting --short 2>/dev/null); then
+    printf '%s\n' "$output"
+  else
+    # Find the socket directory Zellij uses
+    local socket_dir
+    for d in "$TMPDIR"/zellij-*/; do
+      [ -d "$d" ] && socket_dir="$d" && break
+    done
+    echo "Warning: 'zellij list-sessions' timed out — likely stale session sockets." >&2
+    if [ -n "$socket_dir" ]; then
+      echo "Clean up with:  rm -rf ${socket_dir}*" >&2
+    fi
+    return 1
+  fi
+}
+
 # --- Commands that do not require a git repo ---
 
 usage() {
@@ -228,7 +247,7 @@ if [ -z "$1" ]; then
     exit 0
   fi
 
-  if zellij list-sessions --no-formatting --short 2>/dev/null | grep -qxF "$REPO_NAME"; then
+  if zellij_list_sessions | grep -qxF "$REPO_NAME"; then
     echo "Attaching to session '$REPO_NAME'..."
     exec zellij attach "$REPO_NAME"
   else
@@ -448,7 +467,7 @@ fi
 if [ -n "$ZELLIJ" ]; then
   echo "🪟 Opening tab '$SESSION_NAME'..."
   zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
-elif zellij list-sessions --no-formatting --short 2>/dev/null | grep -qxF "$REPO_NAME"; then
+elif zellij_list_sessions | grep -qxF "$REPO_NAME"; then
   echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
   ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
   zellij attach "$REPO_NAME"

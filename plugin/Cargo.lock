@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "zelligent-plugin"
-version = "0.0.0-dev"
+version = "0.1.12"
 dependencies = [
  "insta",
  "zellij-tile",
