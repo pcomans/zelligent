@@ -65,6 +65,7 @@ pub struct State {
     pub status_is_error: bool,
     pub zelligent_path: String,
     pub initial_cwd: PathBuf,
+    pub session_name: Option<String>,
     pub tabs: Vec<TabInfo>,
     /// Flipped to `true` after the first successful worktree list load.
     /// Auto-selection of the active tab's worktree only happens before this
@@ -249,10 +250,10 @@ impl State {
                 dump_session_layout();
             }
             Action::NukeSession => {
-                // The handler already verified ZELLIJ_SESSION_NAME is set.
+                // The handler already verified session_name is Some.
                 // kill_sessions terminates our process, so nothing after it runs.
-                if let Ok(name) = std::env::var("ZELLIJ_SESSION_NAME") {
-                    kill_sessions(&[&name]);
+                if let Some(name) = &self.session_name {
+                    kill_sessions(&[name.as_str()]);
                 }
             }
         }
@@ -517,7 +518,7 @@ impl State {
                     return Action::DumpLayout;
                 }
                 BareKey::Char('x') => {
-                    if std::env::var("ZELLIJ_SESSION_NAME").is_ok() {
+                    if self.session_name.is_some() {
                         return Action::NukeSession;
                     } else {
                         self.status_message = "Cannot determine session name".to_string();
@@ -588,6 +589,7 @@ impl ZellijPlugin for State {
             .unwrap_or_else(|| "zelligent".to_string());
 
         self.initial_cwd = get_plugin_ids().initial_cwd;
+        self.session_name = std::env::var("ZELLIJ_SESSION_NAME").ok();
 
         request_permission(&[
             PermissionType::RunCommands,
@@ -1385,16 +1387,17 @@ mod tests {
 
     #[test]
     fn not_git_repo_x_returns_nuke_session() {
-        std::env::set_var("ZELLIJ_SESSION_NAME", "test-session");
-        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let mut s = State {
+            mode: Mode::NotGitRepo,
+            session_name: Some("test-session".into()),
+            ..Default::default()
+        };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
         assert_eq!(action, Action::NukeSession);
-        std::env::remove_var("ZELLIJ_SESSION_NAME");
     }
 
     #[test]
     fn not_git_repo_x_without_session_shows_error() {
-        std::env::remove_var("ZELLIJ_SESSION_NAME");
         let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
         assert_eq!(action, Action::None);
