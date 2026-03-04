@@ -13,12 +13,12 @@ use std::io::Write;
 
 use crate::{AgentStatus, Mode, Worktree};
 
-fn status_indicator(status: &AgentStatus) -> &'static str {
+fn status_indicator(status: &AgentStatus) -> String {
     match status {
-        AgentStatus::Idle => "  ",
-        AgentStatus::Working => "\x1b[32m● \x1b[0m",
-        AgentStatus::NeedsInput => "\x1b[33m● \x1b[0m",
-        AgentStatus::Done => "\x1b[32m✓ \x1b[0m",
+        AgentStatus::Idle => "  ".to_string(),
+        AgentStatus::Working => format!("{GREEN}● {RESET}"),
+        AgentStatus::NeedsInput => format!("{YELLOW}● {RESET}"),
+        AgentStatus::Done => format!("{GREEN}✓ {RESET}"),
     }
 }
 

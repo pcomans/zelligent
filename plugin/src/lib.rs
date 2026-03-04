@@ -269,6 +269,7 @@ impl State {
                 }
             }
             Action::Notify { tab_name, status } => {
+                // macOS-only: osascript and afplay. On Linux, use notify-send/paplay.
                 let body = match status {
                     AgentStatus::NeedsInput => format!("{tab_name} needs input"),
                     AgentStatus::Done => format!("{tab_name} finished"),
