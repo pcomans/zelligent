@@ -111,7 +111,7 @@ if [ "$1" = "doctor" ]; then
   mkdir -p "$(dirname "$CONFIG")"
   touch "$CONFIG"
 
-  if grep -qF 'zelligent-plugin.wasm' "$CONFIG"; then
+  if grep -v '^\s*//' "$CONFIG" | grep -qF 'zelligent-plugin.wasm'; then
     echo "  keybinding: ok ($CONFIG)"
   else
     cat >> "$CONFIG" <<KDL
@@ -132,7 +132,7 @@ KDL
   fi
 
   if [ "$(uname)" = "Darwin" ]; then
-    if grep -qF 'copy_command' "$CONFIG"; then
+    if grep -v '^\s*//' "$CONFIG" | grep -qF 'copy_command'; then
       echo "  copy_command: ok"
     else
       echo 'copy_command "pbcopy"' >> "$CONFIG"
@@ -141,7 +141,7 @@ KDL
   fi
 
   # 5. Serialization interval (keeps session snapshots fresh for resurrection)
-  if grep -qF 'serialization_interval' "$CONFIG"; then
+  if grep -v '^\s*//' "$CONFIG" | grep -qF 'serialization_interval'; then
     echo "  serialization_interval: ok"
   else
     echo 'serialization_interval 5' >> "$CONFIG"
