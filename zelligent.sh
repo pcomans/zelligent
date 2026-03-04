@@ -165,6 +165,7 @@ KDL
     ChangeApplicationState
     ReadApplicationState
     RunCommands
+    ReadCliPipes
 }
 PERMS
     echo "  permissions: granted for $PLUGIN_PATH"
@@ -208,6 +209,63 @@ PERMS
     else
       cp "$SKILL_SOURCE" "$SKILL_DEST"
       echo "  claude skill: synced ($SKILL_DEST)"
+    fi
+  fi
+
+  # 7. Claude Code hooks for agent status notifications
+  CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+  if [ -f "$CLAUDE_SETTINGS" ] && grep -qF 'zelligent-status' "$CLAUDE_SETTINGS"; then
+    echo "  claude hooks: ok"
+  else
+    # Build the hooks JSON to merge into settings
+    HOOKS_JSON='{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=Stop,tab=$ZELLIGENT_TAB_NAME\" || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=Start,tab=$ZELLIGENT_TAB_NAME\" || true"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=PermissionRequest,tab=$ZELLIGENT_TAB_NAME\" || true"
+          }
+        ]
+      }
+    ]
+  }
+}'
+    if command -v jq &>/dev/null; then
+      if [ -f "$CLAUDE_SETTINGS" ]; then
+        # Merge hooks into existing settings
+        MERGED=$(jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" <(echo "$HOOKS_JSON"))
+        echo "$MERGED" > "$CLAUDE_SETTINGS"
+      else
+        mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+        echo "$HOOKS_JSON" | jq '.' > "$CLAUDE_SETTINGS"
+      fi
+      echo "  claude hooks: added to $CLAUDE_SETTINGS"
+    else
+      echo "  claude hooks: jq not found, skipping. Install jq and re-run."
+      ERRORS=1
     fi
   fi
 
@@ -426,11 +484,11 @@ trap 'rm -f "$LAYOUT"' EXIT
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"bash \\\"\$1\\\" \\\"\$2\\\" \\\"\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
+            args \"-c\" \"export ZELLIGENT_TAB_NAME='$SESSION_NAME'; bash \\\"\$1\\\" \\\"\$2\\\" \\\"\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
         }"
 else
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"exec $AGENT_CMD_KDL\"
+            args \"-c\" \"export ZELLIGENT_TAB_NAME='$SESSION_NAME'; exec $AGENT_CMD_KDL\"
         }"
 fi
 
