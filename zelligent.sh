@@ -12,14 +12,17 @@ zellij_list_sessions() {
   if output=$(perl -e 'alarm 3; exec @ARGV' -- zellij list-sessions --no-formatting --short 2>/dev/null); then
     printf '%s\n' "$output"
   else
-    # Find the socket directory Zellij uses
-    local socket_dir
-    for d in "$TMPDIR"/zellij-*/; do
-      [ -d "$d" ] && socket_dir="$d" && break
-    done
-    echo "Warning: 'zellij list-sessions' timed out — likely stale session sockets." >&2
-    if [ -n "$socket_dir" ]; then
-      echo "Clean up with:  rm -rf ${socket_dir}*" >&2
+    local status=$?
+    # 142 = SIGALRM (128 + 14) — the timeout fired
+    if [ "$status" -eq 142 ]; then
+      local socket_dir
+      for d in "$TMPDIR"/zellij-*/; do
+        [ -d "$d" ] && socket_dir="$d" && break
+      done
+      echo "Warning: 'zellij list-sessions' timed out — likely stale session sockets." >&2
+      if [ -n "$socket_dir" ]; then
+        echo "Clean up with:  rm -rf ${socket_dir}" >&2
+      fi
     fi
     return 1
   fi
