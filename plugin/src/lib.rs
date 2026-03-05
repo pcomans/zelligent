@@ -567,10 +567,7 @@ impl State {
             return Action::None;
         }
         self.agent_statuses.insert(tab_name.clone(), status.clone());
-        // Suppress notification if the tab is currently active (user is looking at it)
-        if self.tabs.iter().any(|t| t.name == tab_name && t.active) {
-            return Action::None;
-        }
+        // TODO: consider suppressing notifications when the tab is active
         match status {
             AgentStatus::NeedsInput | AgentStatus::Done => {
                 Action::Notify { tab_name, status }
@@ -1564,12 +1561,11 @@ mod tests {
     }
 
     #[test]
-    fn pipe_active_tab_suppresses_notification() {
+    fn pipe_active_tab_still_notifies() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", true)];
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
-        assert_eq!(action, Action::None);
-        // Status is still updated even if notification is suppressed
+        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::Done });
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
     }
 

@@ -39,16 +39,16 @@ mkdir -p "$SHARE_DIR"
 cp "plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
 echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
 
-# Install bundled Claude skill for `zelligent doctor`
-SKILL_SRC=".claude/skills/zelligent-spawn-claude/SKILL.md"
-SKILL_DST_DIR="$SHARE_DIR/skills/zelligent-spawn-claude"
-if [ ! -f "$SKILL_SRC" ]; then
-  echo "Error: Missing bundled skill at $SKILL_SRC" >&2
+# Install Claude Code plugin (marketplace directory) for `zelligent doctor`
+PLUGIN_SRC="claude-plugin"
+PLUGIN_DST="$SHARE_DIR/claude-plugin"
+if [ ! -d "$PLUGIN_SRC" ]; then
+  echo "Error: Missing bundled plugin at $PLUGIN_SRC" >&2
   exit 1
 fi
-mkdir -p "$SKILL_DST_DIR"
-cp "$SKILL_SRC" "$SKILL_DST_DIR/SKILL.md"
-echo "Installed Claude skill to $SKILL_DST_DIR/SKILL.md"
+rm -rf "$PLUGIN_DST"
+cp -R "$PLUGIN_SRC" "$PLUGIN_DST"
+echo "Installed Claude plugin to $PLUGIN_DST"
 
 # Optionally build and install a patched Zellij from local source
 if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then

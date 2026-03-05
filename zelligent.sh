@@ -171,123 +171,43 @@ PERMS
     echo "  permissions: granted for $PLUGIN_PATH"
   fi
 
-  # 6. Sync bundled Claude skill (if available)
-  SKILL_SOURCE=""
-  SKILL_MODE=""
-  if [ -n "$ZELLIGENT_SKILL_SRC" ]; then
-    if [ ! -f "$ZELLIGENT_SKILL_SRC" ]; then
-      echo "  claude skill: source not found ($ZELLIGENT_SKILL_SRC)"
-      ERRORS=1
-    else
-      SKILL_SOURCE="$ZELLIGENT_SKILL_SRC"
-      SKILL_MODE="custom"
-    fi
+  # 6. Install Claude Code plugin (skill + hooks)
+  if ! command -v claude &>/dev/null; then
+    echo "  claude plugin: claude CLI not found (skipped)"
   else
-    HOMEBREW_SKILL="$ZELLIGENT_PREFIX/share/zelligent/skills/zelligent-spawn-claude/SKILL.md"
-    DEV_SKILL="$HOME/.local/share/zelligent/skills/zelligent-spawn-claude/SKILL.md"
-    SOURCE_SKILL="$SCRIPT_DIR/.claude/skills/zelligent-spawn-claude/SKILL.md"
-    if [ -f "$HOMEBREW_SKILL" ]; then
-      SKILL_SOURCE="$HOMEBREW_SKILL"
-      SKILL_MODE="homebrew"
-    elif [ -f "$DEV_SKILL" ]; then
-      SKILL_SOURCE="$DEV_SKILL"
-      SKILL_MODE="dev"
-    elif [ -f "$SOURCE_SKILL" ]; then
-      SKILL_SOURCE="$SOURCE_SKILL"
-      SKILL_MODE="source"
-    fi
-  fi
-
-  SKILL_DEST="$HOME/.claude/skills/zelligent-spawn-claude/SKILL.md"
-  if [ -z "$SKILL_SOURCE" ]; then
-    echo "  claude skill: not bundled (skipped)"
-  else
-    mkdir -p "$(dirname "$SKILL_DEST")"
-    if [ "$SKILL_MODE" = "homebrew" ]; then
-      ln -sfn "$SKILL_SOURCE" "$SKILL_DEST"
-      echo "  claude skill: linked ($SKILL_DEST -> $SKILL_SOURCE)"
-    else
-      cp "$SKILL_SOURCE" "$SKILL_DEST"
-      echo "  claude skill: synced ($SKILL_DEST)"
-    fi
-  fi
-
-  # 7. Claude Code hooks for agent status notifications
-  CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-  if [ -f "$CLAUDE_SETTINGS" ] && grep -qF 'zelligent-status' "$CLAUDE_SETTINGS"; then
-    echo "  claude hooks: ok"
-  else
-    # Build the hooks JSON to merge into settings
-    HOOKS_JSON='{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=Stop,tab=$ZELLIGENT_TAB_NAME\" || true"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=Start,tab=$ZELLIGENT_TAB_NAME\" || true"
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "matcher": "permission_prompt",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=PermissionRequest,tab=$ZELLIGENT_TAB_NAME\" || true"
-          }
-        ]
-      }
-    ]
-  }
-}'
-    if command -v jq &>/dev/null; then
-      if [ -f "$CLAUDE_SETTINGS" ]; then
-        # Merge hooks into existing settings, preserving any existing hook arrays
-        if MERGED=$(jq -s '
-          def merge_hooks(key):
-            (.[0].hooks[key] // []) as $existing
-            | (.[1].hooks[key] // []) as $added
-            | if ($existing | length) == 0 and ($added | length) == 0
-              then {}
-              else { (key): ($existing + $added) }
-              end;
-
-          (.[0] * .[1])
-          | .hooks = (
-              (.hooks // {})
-              + merge_hooks("Stop")
-              + merge_hooks("UserPromptSubmit")
-              + merge_hooks("Notification")
-            )
-        ' "$CLAUDE_SETTINGS" <(echo "$HOOKS_JSON")); then
-          echo "$MERGED" > "$CLAUDE_SETTINGS"
-        else
-          echo "  claude hooks: failed to parse or merge $CLAUDE_SETTINGS; please fix the JSON and re-run." >&2
-          ERRORS=1
-        fi
+    PLUGIN_MARKETPLACE=""
+    if [ -n "$ZELLIGENT_PLUGIN_DIR" ]; then
+      if [ -d "$ZELLIGENT_PLUGIN_DIR" ]; then
+        PLUGIN_MARKETPLACE="$ZELLIGENT_PLUGIN_DIR"
       else
-        mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
-        echo "$HOOKS_JSON" | jq '.' > "$CLAUDE_SETTINGS"
-      fi
-      if [ "${ERRORS:-0}" -eq 0 ]; then
-        echo "  claude hooks: added to $CLAUDE_SETTINGS"
+        echo "  claude plugin: ZELLIGENT_PLUGIN_DIR not found ($ZELLIGENT_PLUGIN_DIR)"
+        ERRORS=1
       fi
     else
-      echo "  claude hooks: jq not found, skipping. Install jq and re-run."
-      ERRORS=1
+      HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/claude-plugin"
+      DEV_PLUGIN_DIR="$HOME/.local/share/zelligent/claude-plugin"
+      SOURCE_PLUGIN="$SCRIPT_DIR/claude-plugin"
+      if [ -d "$HOMEBREW_PLUGIN" ]; then
+        PLUGIN_MARKETPLACE="$HOMEBREW_PLUGIN"
+      elif [ -d "$DEV_PLUGIN_DIR" ]; then
+        PLUGIN_MARKETPLACE="$DEV_PLUGIN_DIR"
+      elif [ -d "$SOURCE_PLUGIN" ]; then
+        PLUGIN_MARKETPLACE="$SOURCE_PLUGIN"
+      fi
+    fi
+
+    if [ -z "$PLUGIN_MARKETPLACE" ]; then
+      echo "  claude plugin: not bundled (skipped)"
+    elif claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
+      echo "  claude plugin: ok"
+    else
+      claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
+      if claude plugin install zelligent@zelligent 2>/dev/null; then
+        echo "  claude plugin: installed"
+      else
+        echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
+        ERRORS=1
+      fi
     fi
   fi
 
