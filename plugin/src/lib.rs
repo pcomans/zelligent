@@ -43,6 +43,7 @@ pub enum Action {
         tab_name: String,
         return_to: Option<String>,
     },
+    SwitchToTab(String),
     Refresh,
     FetchToplevel,
     FetchWorktreesAndBranches,
@@ -237,6 +238,10 @@ impl State {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
             }
+            Action::SwitchToTab(tab_name) => {
+                go_to_tab_name(tab_name);
+                close_self();
+            }
             Action::Refresh => {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
@@ -395,6 +400,10 @@ impl State {
                 BareKey::Enter => {
                     if let Some(wt) = self.worktrees.get(self.selected_index) {
                         let branch = wt.branch.clone();
+                        if self.has_tab_for_branch(&branch) {
+                            let tab_name = Self::tab_name_for_branch(&branch);
+                            return Action::SwitchToTab(tab_name);
+                        }
                         self.status_message = format!("Spawning '{branch}'...");
                         self.status_is_error = false;
                         return Action::Spawn(branch);
@@ -869,6 +878,15 @@ mod tests {
         let action = s.handle_key_browse(&key(BareKey::Enter));
         assert_eq!(action, Action::Spawn("feat-b".into()));
         assert_eq!(s.status_message, "Spawning 'feat-b'...");
+    }
+
+    #[test]
+    fn browse_enter_switches_to_existing_tab() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
+        s.selected_index = 0; // feat-a has a tab open
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::SwitchToTab("feat-a".into()));
     }
 
     #[test]
