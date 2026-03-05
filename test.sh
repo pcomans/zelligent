@@ -306,6 +306,77 @@ check "non-git dir exits non-zero" "1" "$code"
 contains "non-git dir prints error" "not inside a git repository" "$out"
 rm -rf "$NONGIT"
 
+# ── Nuke subcommand ───────────────────────────────────────────────────────────
+echo "Nuke subcommand:"
+
+# nuke inside zellij: exits non-zero
+out=$(ZELLIJ=1 "$SCRIPT" nuke 2>&1); code=$?
+check "nuke inside zellij exits non-zero" "1" "$code"
+contains "nuke inside zellij prints error" "cannot nuke from inside" "$out"
+
+# nuke with no session: exits 0 (idempotent)
+MOCK_NUKE=$(mktemp -d)
+cat > "$MOCK_NUKE/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "delete-session" ]; then exit 1; fi
+if [ "$1" = "--version" ]; then echo "zellij 0.43.1"; exit 0; fi
+MOCK
+# Mock ps/kill so nuke tests never touch real processes
+cat > "$MOCK_NUKE/ps" <<'MOCK'
+#!/bin/bash
+echo ""
+MOCK
+cat > "$MOCK_NUKE/kill" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+cat > "$MOCK_NUKE/sleep" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+chmod +x "$MOCK_NUKE/zellij" "$MOCK_NUKE/ps" "$MOCK_NUKE/kill" "$MOCK_NUKE/sleep"
+FAKE_HOME=$(mktemp -d)
+out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME" XDG_CACHE_HOME="$FAKE_HOME/.cache" TMPDIR="$FAKE_HOME/tmp" PATH="$MOCK_NUKE:$PATH" "$SCRIPT" nuke 2>&1); code=$?
+check "nuke no session exits 0" "0" "$code"
+contains "nuke no session prints success" "start fresh" "$out"
+rm -rf "$MOCK_NUKE" "$FAKE_HOME"
+
+# nuke with existing session: exits 0
+MOCK_NUKE2=$(mktemp -d)
+cat > "$MOCK_NUKE2/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "delete-session" ]; then exit 0; fi
+if [ "$1" = "--version" ]; then echo "zellij 0.43.1"; exit 0; fi
+MOCK
+cat > "$MOCK_NUKE2/ps" <<'MOCK'
+#!/bin/bash
+echo ""
+MOCK
+cat > "$MOCK_NUKE2/kill" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+cat > "$MOCK_NUKE2/sleep" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+chmod +x "$MOCK_NUKE2/zellij" "$MOCK_NUKE2/ps" "$MOCK_NUKE2/kill" "$MOCK_NUKE2/sleep"
+FAKE_HOME2=$(mktemp -d)
+out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME2" XDG_CACHE_HOME="$FAKE_HOME2/.cache" TMPDIR="$FAKE_HOME2/tmp" PATH="$MOCK_NUKE2:$PATH" "$SCRIPT" nuke 2>&1); code=$?
+check "nuke existing session exits 0" "0" "$code"
+contains "nuke existing session prints success" "start fresh" "$out"
+rm -rf "$MOCK_NUKE2" "$FAKE_HOME2"
+
+# nuke from non-git dir: exits non-zero
+NONGIT_NUKE=$(mktemp -d)
+out=$(cd "$NONGIT_NUKE" && "$SCRIPT" nuke 2>&1); code=$?
+check "nuke non-git dir exits non-zero" "1" "$code"
+rm -rf "$NONGIT_NUKE"
+
+# --help lists nuke
+out=$("$SCRIPT" --help 2>&1)
+contains "--help lists nuke" "nuke" "$out"
+
 # ── Doctor subcommand ────────────────────────────────────────────────────────
 echo "Doctor subcommand:"
 
