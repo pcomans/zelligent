@@ -306,6 +306,50 @@ check "non-git dir exits non-zero" "1" "$code"
 contains "non-git dir prints error" "not inside a git repository" "$out"
 rm -rf "$NONGIT"
 
+# ── Nuke subcommand ───────────────────────────────────────────────────────────
+echo "Nuke subcommand:"
+
+# nuke inside zellij: exits non-zero
+out=$(ZELLIJ=1 "$SCRIPT" nuke 2>&1); code=$?
+check "nuke inside zellij exits non-zero" "1" "$code"
+contains "nuke inside zellij prints error" "cannot nuke from inside" "$out"
+
+# nuke with no session: exits 0 (idempotent)
+MOCK_NUKE=$(mktemp -d)
+cat > "$MOCK_NUKE/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "delete-session" ]; then exit 1; fi
+if [ "$1" = "--version" ]; then echo "zellij 0.43.1"; exit 0; fi
+MOCK
+chmod +x "$MOCK_NUKE/zellij"
+out=$(cd "$REPO_ROOT" && ZELLIJ="" PATH="$MOCK_NUKE:$PATH" "$SCRIPT" nuke 2>&1); code=$?
+check "nuke no session exits 0" "0" "$code"
+contains "nuke no session prints success" "start fresh" "$out"
+rm -rf "$MOCK_NUKE"
+
+# nuke with existing session: exits 0
+MOCK_NUKE2=$(mktemp -d)
+cat > "$MOCK_NUKE2/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "delete-session" ]; then exit 0; fi
+if [ "$1" = "--version" ]; then echo "zellij 0.43.1"; exit 0; fi
+MOCK
+chmod +x "$MOCK_NUKE2/zellij"
+out=$(cd "$REPO_ROOT" && ZELLIJ="" PATH="$MOCK_NUKE2:$PATH" "$SCRIPT" nuke 2>&1); code=$?
+check "nuke existing session exits 0" "0" "$code"
+contains "nuke existing session prints success" "start fresh" "$out"
+rm -rf "$MOCK_NUKE2"
+
+# nuke from non-git dir: exits non-zero
+NONGIT_NUKE=$(mktemp -d)
+out=$(cd "$NONGIT_NUKE" && "$SCRIPT" nuke 2>&1); code=$?
+check "nuke non-git dir exits non-zero" "1" "$code"
+rm -rf "$NONGIT_NUKE"
+
+# --help lists nuke
+out=$("$SCRIPT" --help 2>&1)
+contains "--help lists nuke" "nuke" "$out"
+
 # ── Doctor subcommand ────────────────────────────────────────────────────────
 echo "Doctor subcommand:"
 
