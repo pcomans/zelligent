@@ -279,7 +279,12 @@ impl State {
                     &[
                         "osascript",
                         "-e",
-                        &format!("display notification \"{body}\" with title \"zelligent\""),
+                        "on run argv",
+                        "-e",
+                        "display notification (item 1 of argv) with title \"zelligent\"",
+                        "-e",
+                        "end run",
+                        &body,
                     ],
                     BTreeMap::new(),
                 );
@@ -557,6 +562,10 @@ impl State {
             Some("Stop") => AgentStatus::Done,
             _ => return Action::None,
         };
+        // Ignore status updates for unknown tabs
+        if !self.tabs.iter().any(|t| t.name == tab_name) {
+            return Action::None;
+        }
         self.agent_statuses.insert(tab_name.clone(), status.clone());
         // Suppress notification if the tab is currently active (user is looking at it)
         if self.tabs.iter().any(|t| t.name == tab_name && t.active) {
@@ -1521,6 +1530,7 @@ mod tests {
     #[test]
     fn pipe_start_sets_working_no_notify() {
         let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Start")]));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
@@ -1529,6 +1539,7 @@ mod tests {
     #[test]
     fn pipe_user_prompt_submit_sets_working() {
         let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "UserPromptSubmit")]));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
@@ -1537,6 +1548,7 @@ mod tests {
     #[test]
     fn pipe_permission_request_sets_needs_input_and_notifies() {
         let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "PermissionRequest")]));
         assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::NeedsInput });
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::NeedsInput));
@@ -1545,6 +1557,7 @@ mod tests {
     #[test]
     fn pipe_stop_sets_done_and_notifies() {
         let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
         assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::Done });
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
@@ -1571,9 +1584,19 @@ mod tests {
     #[test]
     fn pipe_status_overwrite() {
         let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
         s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Start")]));
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
         s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
+    }
+
+    #[test]
+    fn pipe_unknown_tab_ignored() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-b", false)];
+        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "unknown-tab"), ("event", "Stop")]));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("unknown-tab"), None);
     }
 }

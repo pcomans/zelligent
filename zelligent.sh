@@ -255,14 +255,36 @@ PERMS
 }'
     if command -v jq &>/dev/null; then
       if [ -f "$CLAUDE_SETTINGS" ]; then
-        # Merge hooks into existing settings
-        MERGED=$(jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" <(echo "$HOOKS_JSON"))
-        echo "$MERGED" > "$CLAUDE_SETTINGS"
+        # Merge hooks into existing settings, preserving any existing hook arrays
+        if MERGED=$(jq -s '
+          def merge_hooks(key):
+            (.[0].hooks[key] // []) as $existing
+            | (.[1].hooks[key] // []) as $added
+            | if ($existing | length) == 0 and ($added | length) == 0
+              then {}
+              else { (key): ($existing + $added) }
+              end;
+
+          (.[0] * .[1])
+          | .hooks = (
+              (.hooks // {})
+              + merge_hooks("Stop")
+              + merge_hooks("UserPromptSubmit")
+              + merge_hooks("Notification")
+            )
+        ' "$CLAUDE_SETTINGS" <(echo "$HOOKS_JSON")); then
+          echo "$MERGED" > "$CLAUDE_SETTINGS"
+        else
+          echo "  claude hooks: failed to parse or merge $CLAUDE_SETTINGS; please fix the JSON and re-run." >&2
+          ERRORS=1
+        fi
       else
         mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
         echo "$HOOKS_JSON" | jq '.' > "$CLAUDE_SETTINGS"
       fi
-      echo "  claude hooks: added to $CLAUDE_SETTINGS"
+      if [ "${ERRORS:-0}" -eq 0 ]; then
+        echo "  claude hooks: added to $CLAUDE_SETTINGS"
+      fi
     else
       echo "  claude hooks: jq not found, skipping. Install jq and re-run."
       ERRORS=1
@@ -379,6 +401,7 @@ if [ "$1" = "remove" ]; then
   fi
   BRANCH_NAME=$2
   SESSION_NAME="${BRANCH_NAME//\//-}"
+  SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
   WORKTREE_PATH=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v branch="branch refs/heads/$BRANCH_NAME" '
     /^worktree / { path = substr($0, 10) }
     $0 == branch { print path; exit }
@@ -432,6 +455,8 @@ if ! command -v zellij &>/dev/null; then
 fi
 
 SESSION_NAME="${BRANCH_NAME//\//-}"
+# Strip any characters outside the safe set for session/tab names
+SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
 
 # Escape backslashes and double quotes for KDL string embedding
 AGENT_CMD_KDL="${AGENT_CMD//\\/\\\\}"
