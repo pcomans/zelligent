@@ -43,6 +43,7 @@ pub enum Action {
         tab_name: String,
         return_to: Option<String>,
     },
+    SwitchToTab(String),
     Refresh,
     FetchToplevel,
     FetchWorktreesAndBranches,
@@ -237,6 +238,10 @@ impl State {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
             }
+            Action::SwitchToTab(tab_name) => {
+                go_to_tab_name(tab_name);
+                close_self();
+            }
             Action::Refresh => {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
@@ -383,6 +388,17 @@ impl State {
         self.tabs.iter().any(|t| t.name == tab_name)
     }
 
+    /// Switch to an existing tab for the branch, or spawn a new one.
+    fn spawn_or_switch(&mut self, branch: String) -> Action {
+        if self.has_tab_for_branch(&branch) {
+            let tab_name = Self::tab_name_for_branch(&branch);
+            return Action::SwitchToTab(tab_name);
+        }
+        self.status_message = format!("Spawning '{branch}'...");
+        self.status_is_error = false;
+        Action::Spawn(branch)
+    }
+
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
             match key.bare_key {
@@ -394,10 +410,7 @@ impl State {
                 }
                 BareKey::Enter => {
                     if let Some(wt) = self.worktrees.get(self.selected_index) {
-                        let branch = wt.branch.clone();
-                        self.status_message = format!("Spawning '{branch}'...");
-                        self.status_is_error = false;
-                        return Action::Spawn(branch);
+                        return self.spawn_or_switch(wt.branch.clone());
                     }
                 }
                 BareKey::Char('n') => {
@@ -439,10 +452,8 @@ impl State {
                 }
                 BareKey::Enter => {
                     if let Some(branch) = self.filtered_branches.get(self.selected_index).cloned() {
-                        self.status_message = format!("Spawning '{branch}'...");
-                        self.status_is_error = false;
                         self.mode = Mode::BrowseWorktrees;
-                        return Action::Spawn(branch);
+                        return self.spawn_or_switch(branch);
                     }
                 }
                 BareKey::Esc => {
@@ -464,10 +475,8 @@ impl State {
             BareKey::Enter if no_mod => {
                 let branch = sanitize_branch_name(self.input_buffer.trim());
                 if !branch.is_empty() {
-                    self.status_message = format!("Spawning '{branch}'...");
-                    self.status_is_error = false;
                     self.mode = Mode::BrowseWorktrees;
-                    return Action::Spawn(branch);
+                    return self.spawn_or_switch(branch);
                 } else {
                     self.status_message = "Invalid branch name".to_string();
                     self.status_is_error = true;
@@ -872,6 +881,15 @@ mod tests {
     }
 
     #[test]
+    fn browse_enter_switches_to_existing_tab() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
+        s.selected_index = 0; // feat-a has a tab open
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::SwitchToTab("feat-a".into()));
+    }
+
+    #[test]
     fn browse_enter_noop_on_empty() {
         let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
         let action = s.handle_key_browse(&key(BareKey::Enter));
@@ -973,6 +991,19 @@ mod tests {
     }
 
     #[test]
+    fn select_branch_enter_switches_to_existing_tab() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = vec!["feat/cool".into(), "main".into()];
+        s.tabs = vec![make_tab("feat-cool", false)];
+        s.selected_index = 0;
+
+        let action = s.handle_key_select_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::SwitchToTab("feat-cool".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
     fn select_branch_esc_goes_back() {
         let mut s = state_with_worktrees();
         s.mode = Mode::SelectBranch;
@@ -1012,6 +1043,19 @@ mod tests {
         let mut s = State { mode: Mode::InputBranch, input_buffer: "feat/new".into(), ..Default::default() };
         let action = s.handle_key_input_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::Spawn("feat/new".into()));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn input_branch_enter_switches_to_existing_tab() {
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "feat/new".into(),
+            tabs: vec![make_tab("feat-new", false)],
+            ..Default::default()
+        };
+        let action = s.handle_key_input_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::SwitchToTab("feat-new".into()));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
     }
 
