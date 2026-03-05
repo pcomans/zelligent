@@ -4,9 +4,9 @@ expression: "render_to_string(&s, 20, 80)"
 ---
 [1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
 
-  [7m feat-a [0m
-   feat-b [0m
-   feat-c [0m
+    [7m feat-a [0m
+     feat-b [0m
+     feat-c [0m
 
   [31mFailed to spawn worktree[0m
 

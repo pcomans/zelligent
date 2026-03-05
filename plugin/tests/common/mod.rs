@@ -1,6 +1,43 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use zelligent_plugin::{Mode, State, Worktree};
 use zellij_tile::prelude::*;
+
+#[allow(dead_code)]
+pub fn make_pipe_msg(name: &str, args: &[(&str, &str)]) -> PipeMessage {
+    let mut map = BTreeMap::new();
+    for (k, v) in args {
+        map.insert(k.to_string(), v.to_string());
+    }
+    PipeMessage {
+        source: PipeSource::Cli("test".into()),
+        name: name.to_string(),
+        payload: None,
+        args: map,
+        is_private: false,
+    }
+}
+
+#[allow(dead_code)]
+pub fn make_tab_info(name: &str, active: bool) -> TabInfo {
+    TabInfo {
+        position: 0,
+        name: name.to_string(),
+        active,
+        panes_to_hide: 0,
+        is_fullscreen_active: false,
+        is_sync_panes_active: false,
+        are_floating_panes_visible: false,
+        other_focused_clients: vec![],
+        active_swap_layout_name: None,
+        is_swap_layout_dirty: false,
+        viewport_rows: 0,
+        viewport_columns: 0,
+        display_area_rows: 0,
+        display_area_columns: 0,
+        selectable_tiled_panes_count: 0,
+        selectable_floating_panes_count: 0,
+    }
+}
 
 pub fn key(bare: BareKey) -> KeyWithModifier {
     KeyWithModifier { bare_key: bare, key_modifiers: BTreeSet::new() }

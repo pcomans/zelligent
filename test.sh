@@ -395,21 +395,12 @@ MOCK_DR_HOME=$(mktemp -d)
 FAKE_WASM_DIR=$(mktemp -d)
 FAKE_WASM="$FAKE_WASM_DIR/zelligent-plugin.wasm"
 echo "fake-wasm-content" > "$FAKE_WASM"
-FAKE_SKILL_DIR=$(mktemp -d)
-FAKE_SKILL="$FAKE_SKILL_DIR/SKILL.md"
-cat > "$FAKE_SKILL" <<'SKILL'
----
-name: zelligent-spawn-claude
-description: Test skill
-allowed-tools: Bash
----
-SKILL
 cat > "$MOCK_DR_BIN/zellij" <<'MOCK'
 #!/bin/bash
 MOCK
 chmod +x "$MOCK_DR_BIN/zellij"
 
-out=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" ZELLIGENT_SKILL_SRC="$FAKE_SKILL" \
+out=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code=$?
 check "doctor exits 0" "0" "$code"
 check "doctor creates config.kdl" "true" \
@@ -429,59 +420,21 @@ check "doctor creates permissions.kdl" "true" \
 PERM_CONTENT=$(cat "$PERM_FILE")
 contains "doctor permissions use bare path" "$FAKE_WASM" "$PERM_CONTENT"
 not_contains "doctor permissions omit file: prefix" "file:$FAKE_WASM" "$PERM_CONTENT"
-contains "doctor syncs claude skill" "claude skill: synced" "$out"
-check "doctor installs claude skill" "true" \
-  "$([ -f "$MOCK_DR_HOME/.claude/skills/zelligent-spawn-claude/SKILL.md" ] && echo true || echo false)"
-SKILL_CONTENT=$(cat "$MOCK_DR_HOME/.claude/skills/zelligent-spawn-claude/SKILL.md")
-contains "doctor writes bundled claude skill content" "name: zelligent-spawn-claude" "$SKILL_CONTENT"
+contains "doctor without claude CLI skips plugin" "claude plugin: claude CLI not found" "$out"
 
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
-out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" ZELLIGENT_SKILL_SRC="$FAKE_SKILL" \
+out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
 contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
-contains "doctor idempotent: claude skill synced" "claude skill: synced" "$out2"
+contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
 
-rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR" "$FAKE_SKILL_DIR"
+rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
-# doctor links skill from Homebrew share path when bundled there
-MOCK_PREFIX=$(mktemp -d)
-MOCK_DR_HOME_HB=$(mktemp -d)
-MOCK_HB_BIN="$MOCK_PREFIX/bin"
-MOCK_HB_SHARE_SKILL_DIR="$MOCK_PREFIX/share/zelligent/skills/zelligent-spawn-claude"
-FAKE_WASM_DIR_HB=$(mktemp -d)
-FAKE_WASM_HB="$FAKE_WASM_DIR_HB/zelligent-plugin.wasm"
-mkdir -p "$MOCK_HB_BIN" "$MOCK_HB_SHARE_SKILL_DIR"
-echo "fake-wasm-homebrew" > "$FAKE_WASM_HB"
-cat > "$MOCK_HB_BIN/zellij" <<'MOCK'
-#!/bin/bash
-MOCK
-cat > "$MOCK_HB_BIN/zelligent" <<'MOCK'
-#!/bin/bash
-MOCK
-chmod +x "$MOCK_HB_BIN/zellij" "$MOCK_HB_BIN/zelligent"
-cat > "$MOCK_HB_SHARE_SKILL_DIR/SKILL.md" <<'SKILL'
----
-name: zelligent-spawn-claude
-description: Homebrew bundled skill
-allowed-tools: Bash
----
-SKILL
-
-out=$(HOME="$MOCK_DR_HOME_HB" PATH="$MOCK_HB_BIN:$PATH" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_HB" \
-  "$SCRIPT" doctor 2>&1); code=$?
-check "doctor homebrew-skill mode exits 0" "0" "$code"
-contains "doctor homebrew-skill mode links skill" "claude skill: linked" "$out"
-HB_SKILL_DEST="$MOCK_DR_HOME_HB/.claude/skills/zelligent-spawn-claude/SKILL.md"
-check "doctor homebrew-skill creates symlink" "true" \
-  "$([ -L "$HB_SKILL_DEST" ] && echo true || echo false)"
-check "doctor homebrew-skill symlink target" "$MOCK_HB_SHARE_SKILL_DIR/SKILL.md" "$(readlink "$HB_SKILL_DEST")"
-
-rm -rf "$MOCK_PREFIX" "$MOCK_DR_HOME_HB" "$FAKE_WASM_DIR_HB"
 
 # doctor with existing keybinds block in config: appends without corrupting
 MOCK_DR_BIN2=$(mktemp -d)
