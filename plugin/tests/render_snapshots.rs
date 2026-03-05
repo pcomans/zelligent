@@ -1,7 +1,7 @@
 mod common;
 
 use common::{key, render_to_string, state_with_worktrees};
-use zelligent_plugin::{Mode, State, Worktree};
+use zelligent_plugin::{AgentStatus, Mode, State, Worktree};
 use zellij_tile::prelude::*;
 
 fn state_with_branches() -> State {
@@ -140,6 +140,29 @@ fn render_not_git_repo() {
         initial_cwd: std::path::PathBuf::from("/tmp/foo"),
         ..Default::default()
     };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_browse_with_agent_statuses() {
+    let mut s = state_with_worktrees();
+    s.agent_statuses.insert("feat-a".into(), AgentStatus::Working);
+    s.agent_statuses.insert("feat-b".into(), AgentStatus::NeedsInput);
+    // feat-c stays Idle (no entry)
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_browse_with_done_status() {
+    let mut s = state_with_worktrees();
+    s.agent_statuses.insert("feat-b".into(), AgentStatus::Done);
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_browse_all_idle() {
+    let s = state_with_worktrees();
+    // No agent_statuses set — all should show as idle (2-space prefix)
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 

@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=Stop,tab=$ZELLIGENT_TAB_NAME\" || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=Start,tab=$ZELLIGENT_TAB_NAME\" || true"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && zellij pipe --name zelligent-status --args \"event=PermissionRequest,tab=$ZELLIGENT_TAB_NAME\" || true"
+          }
+        ]
+      }
+    ]
+  }
+}

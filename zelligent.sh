@@ -159,56 +159,70 @@ KDL
   touch "$PERM_FILE"
 
   if grep -qF "$PLUGIN_PATH" "$PERM_FILE"; then
-    echo "  permissions: ok"
+    # Ensure ReadCliPipes is present (added in agent-status-notifications)
+    if ! grep -qF "ReadCliPipes" "$PERM_FILE"; then
+      # Append ReadCliPipes inside the existing plugin permissions block
+      sed -i.bak "/$PLUGIN_PATH/,/}/ s/}/    ReadCliPipes\\
+}/" "$PERM_FILE" && rm -f "$PERM_FILE.bak"
+      echo "  permissions: added ReadCliPipes to $PERM_FILE"
+    else
+      echo "  permissions: ok"
+    fi
   else
     cat >> "$PERM_FILE" <<PERMS
 "$PLUGIN_PATH" {
     ChangeApplicationState
     ReadApplicationState
     RunCommands
+    ReadCliPipes
 }
 PERMS
     echo "  permissions: granted for $PLUGIN_PATH"
   fi
 
-  # 6. Sync bundled Claude skill (if available)
-  SKILL_SOURCE=""
-  SKILL_MODE=""
-  if [ -n "$ZELLIGENT_SKILL_SRC" ]; then
-    if [ ! -f "$ZELLIGENT_SKILL_SRC" ]; then
-      echo "  claude skill: source not found ($ZELLIGENT_SKILL_SRC)"
-      ERRORS=1
-    else
-      SKILL_SOURCE="$ZELLIGENT_SKILL_SRC"
-      SKILL_MODE="custom"
-    fi
+  # 7. Install Claude Code plugin (skill + hooks)
+  if ! command -v claude &>/dev/null; then
+    echo "  claude plugin: claude CLI not found (skipped)"
   else
-    HOMEBREW_SKILL="$ZELLIGENT_PREFIX/share/zelligent/skills/zelligent-spawn-claude/SKILL.md"
-    DEV_SKILL="$HOME/.local/share/zelligent/skills/zelligent-spawn-claude/SKILL.md"
-    SOURCE_SKILL="$SCRIPT_DIR/.claude/skills/zelligent-spawn-claude/SKILL.md"
-    if [ -f "$HOMEBREW_SKILL" ]; then
-      SKILL_SOURCE="$HOMEBREW_SKILL"
-      SKILL_MODE="homebrew"
-    elif [ -f "$DEV_SKILL" ]; then
-      SKILL_SOURCE="$DEV_SKILL"
-      SKILL_MODE="dev"
-    elif [ -f "$SOURCE_SKILL" ]; then
-      SKILL_SOURCE="$SOURCE_SKILL"
-      SKILL_MODE="source"
+    PLUGIN_MARKETPLACE=""
+    if [ -n "$ZELLIGENT_PLUGIN_DIR" ]; then
+      if [ -d "$ZELLIGENT_PLUGIN_DIR" ]; then
+        PLUGIN_MARKETPLACE="$ZELLIGENT_PLUGIN_DIR"
+      else
+        echo "  claude plugin: ZELLIGENT_PLUGIN_DIR not found ($ZELLIGENT_PLUGIN_DIR)"
+        ERRORS=1
+      fi
+    else
+      HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/claude-plugin"
+      DEV_PLUGIN_DIR="$HOME/.local/share/zelligent/claude-plugin"
+      SOURCE_PLUGIN="$SCRIPT_DIR/claude-plugin"
+      if [ -d "$HOMEBREW_PLUGIN" ]; then
+        PLUGIN_MARKETPLACE="$HOMEBREW_PLUGIN"
+      elif [ -d "$DEV_PLUGIN_DIR" ]; then
+        PLUGIN_MARKETPLACE="$DEV_PLUGIN_DIR"
+      elif [ -d "$SOURCE_PLUGIN" ]; then
+        PLUGIN_MARKETPLACE="$SOURCE_PLUGIN"
+      fi
     fi
-  fi
 
-  SKILL_DEST="$HOME/.claude/skills/zelligent-spawn-claude/SKILL.md"
-  if [ -z "$SKILL_SOURCE" ]; then
-    echo "  claude skill: not bundled (skipped)"
-  else
-    mkdir -p "$(dirname "$SKILL_DEST")"
-    if [ "$SKILL_MODE" = "homebrew" ]; then
-      ln -sfn "$SKILL_SOURCE" "$SKILL_DEST"
-      echo "  claude skill: linked ($SKILL_DEST -> $SKILL_SOURCE)"
+    if [ -z "$PLUGIN_MARKETPLACE" ]; then
+      echo "  claude plugin: not bundled (skipped)"
     else
-      cp "$SKILL_SOURCE" "$SKILL_DEST"
-      echo "  claude skill: synced ($SKILL_DEST)"
+      claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
+      if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
+        if claude plugin update zelligent@zelligent 2>/dev/null; then
+          echo "  claude plugin: updated"
+        else
+          echo "  claude plugin: ok (update check failed)"
+        fi
+      else
+        if claude plugin install zelligent@zelligent 2>/dev/null; then
+          echo "  claude plugin: installed"
+        else
+          echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
+          ERRORS=1
+        fi
+      fi
     fi
   fi
 
@@ -372,6 +386,7 @@ if [ "$1" = "remove" ]; then
   fi
   BRANCH_NAME=$2
   SESSION_NAME="${BRANCH_NAME//\//-}"
+  SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
   WORKTREE_PATH=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v branch="branch refs/heads/$BRANCH_NAME" '
     /^worktree / { path = substr($0, 10) }
     $0 == branch { print path; exit }
@@ -425,6 +440,8 @@ if ! command -v zellij &>/dev/null; then
 fi
 
 SESSION_NAME="${BRANCH_NAME//\//-}"
+# Strip any characters outside the safe set for session/tab names
+SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
 
 # Escape backslashes and double quotes for KDL string embedding
 AGENT_CMD_KDL="${AGENT_CMD//\\/\\\\}"
@@ -477,11 +494,11 @@ trap 'rm -f "$LAYOUT"' EXIT
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"bash \\\"\$1\\\" \\\"\$2\\\" \\\"\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
+            args \"-c\" \"export ZELLIGENT_TAB_NAME='$SESSION_NAME'; bash \\\"\$1\\\" \\\"\$2\\\" \\\"\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
         }"
 else
   AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"exec $AGENT_CMD_KDL\"
+            args \"-c\" \"export ZELLIGENT_TAB_NAME='$SESSION_NAME'; exec $AGENT_CMD_KDL\"
         }"
 fi
 

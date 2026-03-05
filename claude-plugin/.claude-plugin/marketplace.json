@@ -1,0 +1,13 @@
+{
+  "name": "zelligent",
+  "owner": {
+    "name": "zelligent"
+  },
+  "plugins": [
+    {
+      "name": "zelligent",
+      "source": "./plugins/zelligent",
+      "description": "Zelligent agent status notifications and spawn skill for Claude Code"
+    }
+  ]
+}
