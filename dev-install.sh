@@ -57,9 +57,11 @@ if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then
     exit 1
   fi
   # Uninstall Homebrew Zellij to avoid PATH conflicts
-  if brew list zellij &>/dev/null; then
-    echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
-    brew uninstall zellij
+  if command -v brew >/dev/null 2>&1; then
+    if brew list zellij &>/dev/null; then
+      echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
+      brew uninstall zellij
+    fi
   fi
   echo "Building Zellij from $ZELLIGENT_ZELLIJ_SRC..."
   cargo build --release --manifest-path "$ZELLIGENT_ZELLIJ_SRC/Cargo.toml"

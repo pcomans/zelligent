@@ -248,12 +248,19 @@ if [ "$1" = "nuke" ]; then
   # and keep re-serializing the session layout to the cache directory.
   zellij_version=$(zellij --version 2>/dev/null | awk '{print $2}')
   if [ -n "$zellij_version" ]; then
-    socket_path="$TMPDIR/zellij-$(id -u)/$zellij_version/$REPO_NAME"
+    socket_path="${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME"
     # Force-kill server processes for this session's socket.
     # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
-    pkill -9 -f "zellij --server $socket_path" 2>/dev/null || true
+    # Use grep -F instead of pkill -f to avoid regex metacharacter issues.
+    server_pids=$(ps -eo pid=,args= | grep -F "zellij --server $socket_path" | grep -v grep | awk '{print $1}' || true)
+    if [ -n "$server_pids" ]; then
+      kill -9 $server_pids 2>/dev/null || true
+    fi
     # Kill client processes attached to this session
-    pkill -9 -f "zellij attach $REPO_NAME" 2>/dev/null || true
+    client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_NAME" | grep -v grep | awk '{print $1}' || true)
+    if [ -n "$client_pids" ]; then
+      kill -9 $client_pids 2>/dev/null || true
+    fi
   fi
   # Wait for processes to exit and finish any final serialization
   sleep 1
@@ -265,14 +272,14 @@ if [ "$1" = "nuke" ]; then
   if [ -n "$zellij_version" ]; then
     for cache_base in \
       "$HOME/Library/Caches/org.Zellij-Contributors.Zellij" \
-      "$HOME/.cache/zellij"; do
+      "${XDG_CACHE_HOME:-$HOME/.cache}/zellij"; do
       cache_dir="$cache_base/$zellij_version/session_info/$REPO_NAME"
       rm -rf "$cache_dir" 2>/dev/null || true
     done
   fi
   # Clean up stale socket if still present
   if [ -n "$zellij_version" ]; then
-    rm -f "$TMPDIR/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
+    rm -f "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
   fi
   echo "Deleted session '$REPO_NAME'. Next 'zelligent' will start fresh."
   exit 0
