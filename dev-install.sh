@@ -50,6 +50,23 @@ mkdir -p "$SKILL_DST_DIR"
 cp "$SKILL_SRC" "$SKILL_DST_DIR/SKILL.md"
 echo "Installed Claude skill to $SKILL_DST_DIR/SKILL.md"
 
+# Optionally build and install a patched Zellij from local source
+if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then
+  if [ ! -d "$ZELLIGENT_ZELLIJ_SRC" ]; then
+    echo "Error: ZELLIGENT_ZELLIJ_SRC=$ZELLIGENT_ZELLIJ_SRC does not exist" >&2
+    exit 1
+  fi
+  # Uninstall Homebrew Zellij to avoid PATH conflicts
+  if brew list zellij &>/dev/null; then
+    echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
+    brew uninstall zellij
+  fi
+  echo "Building Zellij from $ZELLIGENT_ZELLIJ_SRC..."
+  cargo build --release --manifest-path "$ZELLIGENT_ZELLIJ_SRC/Cargo.toml"
+  cp "$ZELLIGENT_ZELLIJ_SRC/target/release/zellij" "$INSTALL_DIR/zellij"
+  echo "Installed patched Zellij to $INSTALL_DIR/zellij"
+fi
+
 # Update Zellij config to point at the dev plugin path
 CONFIG="$HOME/.config/zellij/config.kdl"
 if [ -f "$CONFIG" ]; then

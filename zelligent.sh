@@ -35,6 +35,7 @@ usage() {
   echo "       zelligent spawn <branch> [agent-cmd]   Create worktree and open agent tab"
   echo "       zelligent remove <branch>              Remove a worktree"
   echo "       zelligent init                         Create .zelligent/ hook stubs"
+  echo "       zelligent nuke                         Delete session (start fresh)"
   echo "       zelligent doctor                       Check and fix zelligent setup"
   echo "       zelligent --version                    Print version"
   echo "       zelligent --help                       Show this help"
@@ -233,6 +234,49 @@ fi
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME=$(basename "$REPO_ROOT")
 WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
+
+# Handle nuke subcommand — delete the repo's Zellij session so it won't resurrect
+if [ "$1" = "nuke" ]; then
+  if [ -n "$ZELLIJ" ]; then
+    echo "Error: cannot nuke from inside a Zellij session. Detach first." >&2
+    exit 1
+  fi
+  # Kill the session if it's currently active
+  zellij delete-session --force "$REPO_NAME" 2>/dev/null || true
+  # Also kill any lingering server/client processes for this session.
+  # delete-session --force removes the socket but stale server processes can survive
+  # and keep re-serializing the session layout to the cache directory.
+  zellij_version=$(zellij --version 2>/dev/null | awk '{print $2}')
+  if [ -n "$zellij_version" ]; then
+    socket_path="$TMPDIR/zellij-$(id -u)/$zellij_version/$REPO_NAME"
+    # Force-kill server processes for this session's socket.
+    # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
+    pkill -9 -f "zellij --server $socket_path" 2>/dev/null || true
+    # Kill client processes attached to this session
+    pkill -9 -f "zellij attach $REPO_NAME" 2>/dev/null || true
+  fi
+  # Wait for processes to exit and finish any final serialization
+  sleep 1
+  # Remove the resurrection cache so the session won't come back on next attach.
+  # Zellij discovers resurrectable sessions by scanning the session_info cache dir.
+  # Paths:
+  #   macOS: ~/Library/Caches/org.Zellij-Contributors.Zellij/VERSION/session_info/SESSION/
+  #   Linux: ~/.cache/zellij/VERSION/session_info/SESSION/
+  if [ -n "$zellij_version" ]; then
+    for cache_base in \
+      "$HOME/Library/Caches/org.Zellij-Contributors.Zellij" \
+      "$HOME/.cache/zellij"; do
+      cache_dir="$cache_base/$zellij_version/session_info/$REPO_NAME"
+      rm -rf "$cache_dir" 2>/dev/null || true
+    done
+  fi
+  # Clean up stale socket if still present
+  if [ -n "$zellij_version" ]; then
+    rm -f "$TMPDIR/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
+  fi
+  echo "Deleted session '$REPO_NAME'. Next 'zelligent' will start fresh."
+  exit 0
+fi
 
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
