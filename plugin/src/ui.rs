@@ -13,6 +13,16 @@ use std::io::Write;
 
 use crate::{AgentStatus, Mode, Worktree};
 
+/// Sanitize a branch name to match the shell's tab/session name logic:
+/// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
+pub fn sanitize_tab_name(branch: &str) -> String {
+    branch
+        .replace('/', "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
 fn status_indicator(status: &AgentStatus) -> String {
     match status {
         AgentStatus::Idle => "  ".to_string(),
@@ -55,7 +65,7 @@ pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_st
     writeln!(w).unwrap();
     for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
-        let tab_name = wt.branch.replace('/', "-");
+        let tab_name = sanitize_tab_name(&wt.branch);
         let indicator = status_indicator(
             agent_statuses.get(&tab_name).unwrap_or(&AgentStatus::Idle),
         );

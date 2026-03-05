@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentStatus {
     #[default]
     Idle,
@@ -395,6 +395,7 @@ impl State {
             // Close the worktree's tab if it exists, then refresh.
             if self.has_tab_for_branch(&branch) {
                 let tab_name = Self::tab_name_for_branch(&branch);
+                self.agent_statuses.remove(&tab_name);
                 let return_to = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
                 return Action::CloseTabAndRefresh { tab_name, return_to };
             }
@@ -407,13 +408,14 @@ impl State {
     }
 
     /// Convert a branch name to the corresponding Zellij tab name.
-    /// Tab names use the branch with `/` replaced by `-` (matching zelligent.sh).
+    /// Tab names use the branch with `/` replaced by `-` and non-`[A-Za-z0-9_-]`
+    /// chars stripped (matching zelligent.sh).
     ///
     /// Note: this mapping is not injective — `feat/cool` and `feat-cool` both
     /// produce `feat-cool`. In that case `find_worktree_for_active_tab` will
     /// match the first worktree in the list, which may not be the intended one.
     pub fn tab_name_for_branch(branch: &str) -> String {
-        branch.replace('/', "-")
+        ui::sanitize_tab_name(branch)
     }
 
     /// Check whether a tab with the given branch's name exists.
@@ -566,7 +568,7 @@ impl State {
         if !self.tabs.iter().any(|t| t.name == tab_name) {
             return Action::None;
         }
-        self.agent_statuses.insert(tab_name.clone(), status.clone());
+        self.agent_statuses.insert(tab_name.clone(), status);
         // TODO: consider suppressing notifications when the tab is active
         match status {
             AgentStatus::NeedsInput | AgentStatus::Done => {
@@ -1262,10 +1264,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_name_for_branch_replaces_slashes() {
+    fn tab_name_for_branch_sanitizes() {
         assert_eq!(State::tab_name_for_branch("feature/cool"), "feature-cool");
         assert_eq!(State::tab_name_for_branch("a/b/c"), "a-b-c");
         assert_eq!(State::tab_name_for_branch("fix-bug"), "fix-bug");
+        // Dots and other special chars are stripped (matching zelligent.sh)
+        assert_eq!(State::tab_name_for_branch("release/1.2.3"), "release-123");
+        assert_eq!(State::tab_name_for_branch("feat.something"), "featsomething");
     }
 
     #[test]

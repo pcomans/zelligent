@@ -1,7 +1,5 @@
 mod common;
 
-use std::collections::BTreeMap;
-
 use common::{key, render_to_string, state_with_worktrees};
 use zelligent_plugin::{AgentStatus, Mode, State, Worktree};
 use zellij_tile::prelude::*;

@@ -58,7 +58,11 @@ enum AgentStatus {
 
 ### Notification Suppression
 
-Notifications are suppressed when the agent's tab is currently active (the user is already looking at it). Status is still updated in the map — only the OS notification is skipped.
+Active-tab notification suppression is **not yet implemented**. Currently, OS notifications are emitted regardless of which tab is active. The status map is always updated. A future enhancement could skip the OS notification when the user is already viewing the agent's tab.
+
+### Platform Support
+
+OS notifications currently use `osascript` (macOS only). Linux support (`notify-send`) is not yet implemented.
 
 ## Implementation
 
@@ -71,7 +75,7 @@ Notifications are suppressed when the agent's tab is currently active (the user 
 
 ### UI (`plugin/src/ui.rs`)
 - `status_indicator()` helper returns ANSI-colored indicator string
-- `render_worktree_list` accepts `&BTreeMap<String, AgentStatus>`, maps branch → tab name with `branch.replace('/', "-")`
+- `render_worktree_list` accepts `&BTreeMap<String, AgentStatus>`, maps branch → tab name via `sanitize_tab_name()` which replaces `/` with `-` and strips characters outside `[A-Za-z0-9_-]` (matching `zelligent.sh`)
 
 ### Shell (`zelligent.sh`)
 - `ZELLIGENT_TAB_NAME` env var injected into agent pane command (both setup.sh and direct paths)
