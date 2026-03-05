@@ -154,6 +154,20 @@ layout {
 
 Custom layouts bypass the automatic `setup.sh` preamble. If you need setup to run before the agent, wrap it in your command, e.g. `args "-c" "bash .zelligent/setup.sh /repo /worktree && exec {{agent_cmd}}"`.
 
+## Agent status notifications
+
+When using Claude Code (or another agent with hook support), zelligent tracks agent status and shows it in the plugin UI:
+
+| Indicator | Meaning |
+|---|---|
+| `●` (green) | Agent is working |
+| `●` (yellow) | Agent needs input (permission prompt, etc.) |
+| `✓` (green) | Agent finished |
+
+On macOS, you also get desktop notifications with a sound when an agent needs input or finishes. This uses `osascript` and is currently macOS-only.
+
+`zelligent doctor` sets up the required hooks automatically when Claude Code is installed.
+
 ## Navigating tabs
 
 These are Zellij's default keybindings:

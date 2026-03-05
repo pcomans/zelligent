@@ -158,7 +158,15 @@ KDL
   touch "$PERM_FILE"
 
   if grep -qF "$PLUGIN_PATH" "$PERM_FILE"; then
-    echo "  permissions: ok"
+    # Ensure ReadCliPipes is present (added in agent-status-notifications)
+    if ! grep -qF "ReadCliPipes" "$PERM_FILE"; then
+      # Append ReadCliPipes inside the existing plugin permissions block
+      sed -i.bak "/$PLUGIN_PATH/,/}/ s/}/    ReadCliPipes\\
+}/" "$PERM_FILE" && rm -f "$PERM_FILE.bak"
+      echo "  permissions: added ReadCliPipes to $PERM_FILE"
+    else
+      echo "  permissions: ok"
+    fi
   else
     cat >> "$PERM_FILE" <<PERMS
 "$PLUGIN_PATH" {
@@ -171,7 +179,7 @@ PERMS
     echo "  permissions: granted for $PLUGIN_PATH"
   fi
 
-  # 6. Install Claude Code plugin (skill + hooks)
+  # 7. Install Claude Code plugin (skill + hooks)
   if ! command -v claude &>/dev/null; then
     echo "  claude plugin: claude CLI not found (skipped)"
   else
@@ -198,15 +206,21 @@ PERMS
 
     if [ -z "$PLUGIN_MARKETPLACE" ]; then
       echo "  claude plugin: not bundled (skipped)"
-    elif claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
-      echo "  claude plugin: ok"
     else
       claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
-      if claude plugin install zelligent@zelligent 2>/dev/null; then
-        echo "  claude plugin: installed"
+      if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
+        if claude plugin update zelligent@zelligent 2>/dev/null; then
+          echo "  claude plugin: updated"
+        else
+          echo "  claude plugin: ok (update check failed)"
+        fi
       else
-        echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
-        ERRORS=1
+        if claude plugin install zelligent@zelligent 2>/dev/null; then
+          echo "  claude plugin: installed"
+        else
+          echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
+          ERRORS=1
+        fi
       fi
     fi
   fi

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use zelligent_plugin::{Mode, State, Worktree};
 use zellij_tile::prelude::*;
 
+#[allow(dead_code)]
 pub fn make_pipe_msg(name: &str, args: &[(&str, &str)]) -> PipeMessage {
     let mut map = BTreeMap::new();
     for (k, v) in args {
@@ -16,6 +17,7 @@ pub fn make_pipe_msg(name: &str, args: &[(&str, &str)]) -> PipeMessage {
     }
 }
 
+#[allow(dead_code)]
 pub fn make_tab_info(name: &str, active: bool) -> TabInfo {
     TabInfo {
         position: 0,
