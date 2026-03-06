@@ -66,25 +66,10 @@ if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then
   echo "Building Zellij from $ZELLIGENT_ZELLIJ_SRC..."
   cargo build --release --manifest-path "$ZELLIGENT_ZELLIJ_SRC/Cargo.toml"
   cp "$ZELLIGENT_ZELLIJ_SRC/target/release/zellij" "$INSTALL_DIR/zellij"
-  echo "Installed patched Zellij to $INSTALL_DIR/zellij"
-fi
-
-# Optionally build and install a patched Zellij from local source
-if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then
-  if [ ! -d "$ZELLIGENT_ZELLIJ_SRC" ]; then
-    echo "Error: ZELLIGENT_ZELLIJ_SRC=$ZELLIGENT_ZELLIJ_SRC does not exist" >&2
-    exit 1
+  # macOS invalidates adhoc code signatures on copy; re-sign to prevent SIGKILL
+  if [ "$(uname)" = "Darwin" ]; then
+    codesign --force --sign - "$INSTALL_DIR/zellij"
   fi
-  # Uninstall Homebrew Zellij to avoid PATH conflicts
-  if command -v brew >/dev/null 2>&1; then
-    if brew list zellij &>/dev/null; then
-      echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
-      brew uninstall zellij
-    fi
-  fi
-  echo "Building Zellij from $ZELLIGENT_ZELLIJ_SRC..."
-  cargo build --release --manifest-path "$ZELLIGENT_ZELLIJ_SRC/Cargo.toml"
-  cp "$ZELLIGENT_ZELLIJ_SRC/target/release/zellij" "$INSTALL_DIR/zellij"
   echo "Installed patched Zellij to $INSTALL_DIR/zellij"
 fi
 
