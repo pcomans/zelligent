@@ -190,8 +190,13 @@ Zellij automatically saves your session layout periodically and restores it when
 
 ```bash
 git clone https://github.com/pcomans/zelligent.git
+git clone https://github.com/zellij-org/zellij.git
 cd zelligent
-PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+ZELLIGENT_ZELLIJ_SRC=../zellij \
+  PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" \
+  bash dev-install.sh
 ```
 
 Requires [Rust via rustup](https://rustup.rs) with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`).
+
+`ZELLIGENT_ZELLIJ_SRC` must point to a local [Zellij](https://github.com/zellij-org/zellij) checkout (main branch). The dev-install script builds Zellij from source and installs it alongside zelligent.

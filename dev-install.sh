@@ -50,43 +50,26 @@ rm -rf "$PLUGIN_DST"
 cp -R "$PLUGIN_SRC" "$PLUGIN_DST"
 echo "Installed Claude plugin to $PLUGIN_DST"
 
-# Optionally build and install a patched Zellij from local source
-if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then
-  if [ ! -d "$ZELLIGENT_ZELLIJ_SRC" ]; then
-    echo "Error: ZELLIGENT_ZELLIJ_SRC=$ZELLIGENT_ZELLIJ_SRC does not exist" >&2
-    exit 1
-  fi
-  # Uninstall Homebrew Zellij to avoid PATH conflicts, if Homebrew is available
-  if command -v brew >/dev/null 2>&1; then
-    if brew list zellij &>/dev/null; then
-      echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
-      brew uninstall zellij
-    fi
-  fi
-  echo "Building Zellij from $ZELLIGENT_ZELLIJ_SRC..."
-  cargo build --release --manifest-path "$ZELLIGENT_ZELLIJ_SRC/Cargo.toml"
-  cp "$ZELLIGENT_ZELLIJ_SRC/target/release/zellij" "$INSTALL_DIR/zellij"
-  echo "Installed patched Zellij to $INSTALL_DIR/zellij"
+# Build and install Zellij from source (main branch)
+# Default to sibling ../zellij directory, override with ZELLIGENT_ZELLIJ_SRC
+ZELLIJ_SRC="${ZELLIGENT_ZELLIJ_SRC:?Set ZELLIGENT_ZELLIJ_SRC to your local Zellij checkout}"
+if [ ! -d "$ZELLIJ_SRC" ]; then
+  echo "Error: Zellij source not found at $ZELLIJ_SRC" >&2
+  echo "Either clone https://github.com/zellij-org/zellij next to the zelligent repo," >&2
+  echo "or set ZELLIGENT_ZELLIJ_SRC to your local checkout." >&2
+  exit 1
 fi
-
-# Optionally build and install a patched Zellij from local source
-if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then
-  if [ ! -d "$ZELLIGENT_ZELLIJ_SRC" ]; then
-    echo "Error: ZELLIGENT_ZELLIJ_SRC=$ZELLIGENT_ZELLIJ_SRC does not exist" >&2
-    exit 1
+# Uninstall Homebrew Zellij to avoid PATH conflicts
+if command -v brew >/dev/null 2>&1; then
+  if brew list zellij &>/dev/null; then
+    echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
+    brew uninstall zellij
   fi
-  # Uninstall Homebrew Zellij to avoid PATH conflicts
-  if command -v brew >/dev/null 2>&1; then
-    if brew list zellij &>/dev/null; then
-      echo "Uninstalling Homebrew Zellij to avoid PATH conflicts..."
-      brew uninstall zellij
-    fi
-  fi
-  echo "Building Zellij from $ZELLIGENT_ZELLIJ_SRC..."
-  cargo build --release --manifest-path "$ZELLIGENT_ZELLIJ_SRC/Cargo.toml"
-  cp "$ZELLIGENT_ZELLIJ_SRC/target/release/zellij" "$INSTALL_DIR/zellij"
-  echo "Installed patched Zellij to $INSTALL_DIR/zellij"
 fi
+echo "Building Zellij from $ZELLIJ_SRC..."
+cargo build --release --manifest-path "$ZELLIJ_SRC/Cargo.toml"
+cp "$ZELLIJ_SRC/target/release/zellij" "$INSTALL_DIR/zellij"
+echo "Installed Zellij to $INSTALL_DIR/zellij"
 
 # Update Zellij config to point at the dev plugin path
 CONFIG="$HOME/.config/zellij/config.kdl"
