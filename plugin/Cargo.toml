@@ -12,7 +12,7 @@ name = "zelligent-plugin"
 path = "src/main.rs"
 
 [dependencies]
-zellij-tile = "0.43"
+zellij-tile = { git = "https://github.com/zellij-org/zellij", branch = "main" }
 
 # Dev-deps are only needed for host-side tests/snapshots and are not used in the wasm release build.
 [dev-dependencies]

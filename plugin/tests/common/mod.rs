@@ -36,6 +36,9 @@ pub fn make_tab_info(name: &str, active: bool) -> TabInfo {
         display_area_columns: 0,
         selectable_tiled_panes_count: 0,
         selectable_floating_panes_count: 0,
+        tab_id: 0,
+        has_bell_notification: false,
+        is_flashing_bell: false,
     }
 }
 
