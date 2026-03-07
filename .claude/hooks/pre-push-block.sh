@@ -1,7 +1,7 @@
 #!/bin/bash
-# PreToolUse hook: gate git push behind a docs preflight check.
+# PreToolUse hook: gate git push behind a docs freshness check.
 # Reads JSON from stdin, checks if the command is git push,
-# and requires PREFLIGHT_VERIFIED=1 prefix to proceed.
+# and requires DOCS_VERIFIED=1 prefix to proceed.
 
 COMMAND=$(jq -r '.tool_input.command' < /dev/stdin)
 
@@ -11,10 +11,10 @@ case "$COMMAND" in
   *) exit 0 ;;
 esac
 
-# Allow if preflight token is present
+# Allow if docs verified token is present
 case "$COMMAND" in
-  *PREFLIGHT_VERIFIED=1*) exit 0 ;;
+  *DOCS_VERIFIED=1*) exit 0 ;;
 esac
 
-echo "Pre-push blocked. Confirm that documentation in docs/ and AGENTS.md has been updated or does not need updates, then re-run with PREFLIGHT_VERIFIED=1 git push ..." >&2
+echo "Push blocked. Confirm that documentation in docs/ and AGENTS.md has been updated or does not need updates, then re-run with DOCS_VERIFIED=1 git push ..." >&2
 exit 2
