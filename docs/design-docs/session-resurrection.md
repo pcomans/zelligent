@@ -50,6 +50,14 @@ plugin_config.initial_cwd.clone()
     .or_else(|| Some(running_plugin.store.data().plugin_cwd.clone()))
 ```
 
+### Plugin recovery mode (NotGitRepo)
+
+When the plugin gets a wrong cwd, it enters `NotGitRepo` mode. This mode offers three keyboard shortcuts:
+
+- `d` — dump the session layout to disk (for debugging)
+- `x` — nuke the session (`kill_sessions`, terminates the plugin)
+- `q` / `Esc` — close the plugin
+
 ### Key Zellij source locations
 
 | File | Line | Purpose |

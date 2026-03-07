@@ -51,4 +51,4 @@ You can also mock zellij with a fake binary on PATH to test which command the sc
 
 - Set by Zellij when running inside a session. Use `[ -n "$ZELLIJ" ]` to detect this.
 - Unset it (`ZELLIJ=""`) when testing the outside-Zellij code path.
-- NOT available inside WASM plugins (sandbox blocks environment access).
+- Also available inside WASM plugins (Zellij inherits the host env via WASI `inherit_env`).

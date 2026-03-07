@@ -2,6 +2,8 @@
 
 Zelligent spawns AI coding agents into isolated git worktrees, each in its own Zellij tab. See [docs/PRODUCT_SENSE.md](docs/PRODUCT_SENSE.md) for UX principles and conventions.
 
+> **Note:** `CLAUDE.md` is a symlink to this file. They are the same document.
+
 ## Architecture
 
 CLI (`zelligent.sh`) + Zellij WASM plugin (`plugin/`). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full map.
@@ -51,6 +53,10 @@ Review the generated `.snap` files in `plugin/tests/snapshots/` before committin
 **Integration tests (require Zellij):** headless session creation via `zellij attach --create-background`, layout verification via `dump-layout`.
 
 **Manual testing required:** visual appearance, agent command launching, end-to-end spawn/remove from a live Zellij session. See [docs/design-docs/zellij-behaviors.md](docs/design-docs/zellij-behaviors.md) for testing patterns.
+
+## Push gate
+
+A `.claude/hooks/pre-push-block.sh` hook blocks `git push` unless prefixed with `DOCS_VERIFIED=1`. Before pushing, confirm that `docs/` and `AGENTS.md` have been updated or don't need updates, then run `DOCS_VERIFIED=1 git push ...`.
 
 ## Where to look
 

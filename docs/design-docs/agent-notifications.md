@@ -7,7 +7,7 @@ Zelligent detects agent status (working/waiting/done) and notifies the user. The
 ## Pipeline
 
 ```
-Agent hook (Stop/Start/PermissionRequest)
+Claude Code hook (Stop/UserPromptSubmit/Notification)
   -> zellij pipe --name zelligent-status --args "event=Stop,tab=$ZELLIGENT_TAB_NAME"
   -> Plugin fn pipe() -> handle_pipe() -> Action::Notify
   -> execute() -> run_command(osascript/afplay)
@@ -21,11 +21,11 @@ Agent hook (Stop/Start/PermissionRequest)
 
 The Claude Code plugin (`claude-plugin/plugins/zelligent/hooks/hooks.json`) defines hooks for three events:
 
-| Claude Code event | Maps to | Agent status |
-|---|---|---|
-| `Stop` | Agent finished responding | `Done` |
-| `UserPromptSubmit` / `Start` | Agent started working | `Working` |
-| `PermissionRequest` | Agent needs user input | `NeedsInput` |
+| Claude Code hook event | Matcher | Pipe event value | Agent status |
+|---|---|---|---|
+| `Stop` | (none) | `Stop` | `Done` |
+| `UserPromptSubmit` | (none) | `Start` | `Working` |
+| `Notification` | `permission_prompt` | `PermissionRequest` | `NeedsInput` |
 
 Each hook runs: `zellij pipe --name zelligent-status --args "event=<event>,tab=$ZELLIGENT_TAB_NAME"`
 

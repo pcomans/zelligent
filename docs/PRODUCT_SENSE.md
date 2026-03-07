@@ -26,6 +26,10 @@ Branch names are sanitized for Zellij session/tab names:
 
 Default layout: agent pane (70%) + lazygit (30%) with tab-bar and status-bar chrome. Overridable via `.zelligent/layout.kdl` with `{{cwd}}` and `{{agent_cmd}}` template variables. See [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md) for format rules and gotchas.
 
+### Agent command
+
+`zelligent spawn <branch> [agent-cmd]` defaults to `$SHELL` if no agent command is given.
+
 ### Worktree storage
 
 All worktrees live under `~/.zelligent/worktrees/<repo-name>/<branch-name>`. This keeps them out of the main repo directory.
