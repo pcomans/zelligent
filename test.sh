@@ -169,18 +169,23 @@ rm -rf "$MOCK_BIN_QUOTE"
 # KDL → bash -c execution path, including setup.sh running first.
 echo "Prompt delivery harness:"
 
+if ! command -v python3 &>/dev/null; then
+  echo "  ⚠️  python3 not found, skipping prompt delivery tests"
+else
+
 MOCK_BIN_PROMPT=$(mktemp -d)
 PROMPT_LOG=$(mktemp)
 KDL_PARSER=$(mktemp)
 
-# Python helper: parse KDL args line into bash arguments, then exec bash with them.
-# KDL uses \" for escaped quotes inside "..." strings — same as JSON-style escaping.
+# Regex-based extractor for double-quoted strings from the KDL `args` node.
+# Not a full KDL parser — only handles the \" escape sequences that zelligent
+# actually emits. Sufficient for verifying prompt delivery in tests.
 cat > "$KDL_PARSER" <<'PYEOF'
 #!/usr/bin/env python3
-"""Parse KDL args line from a layout file and run it via bash.
+"""Extract args from a zelligent layout file and run them via bash.
 
-Reads a layout file (argv[1]), finds the `args` node, extracts all quoted
-string arguments, unescapes KDL sequences, and runs: bash <arg1> <arg2> ...
+Finds the first `args` line, extracts double-quoted string arguments using
+regex, unescapes KDL \" sequences, and runs: bash <arg1> <arg2> ...
 Replaces 'exec claude' with 'claude' so the mock binary can return.
 """
 import re, subprocess, sys
@@ -190,11 +195,8 @@ with open(layout_file) as f:
     for line in f:
         stripped = line.strip()
         if stripped.startswith("args "):
-            # Extract all KDL double-quoted strings: "...", handling \"
             tokens = re.findall(r'"((?:[^"\\]|\\.)*)"', stripped)
-            # Unescape KDL: \" → ", \\ → \
             args = [t.replace('\\"', '"').replace('\\\\', '\\') for t in tokens]
-            # Replace 'exec claude' so mock claude can return instead of replacing bash
             args = [a.replace('exec claude', 'claude') for a in args]
             result = subprocess.run(["bash"] + args)
             sys.exit(result.returncode)
@@ -231,6 +233,10 @@ prompt_test_cleanup() {
   git -C "$REPO_ROOT" branch -D "$branch" &>/dev/null || true
 }
 
+# Move setup.sh aside so tests don't invoke the repo's real one (e.g. sleep)
+mv "$SETUP_SH" "$SETUP_SH_BAK" 2>/dev/null || true
+trap restore_setup EXIT INT TERM
+
 # Test 1: positional prompt (interactive mode with initial prompt)
 out_prompt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-prompt-branch 'claude "fix the login bug"' 2>&1)
@@ -266,6 +272,9 @@ check "prompt delivery: bare claude has no args" "" "$BARE_ARGS"
 prompt_test_cleanup test-bare-branch
 
 rm -rf "$MOCK_BIN_PROMPT" "$PROMPT_LOG" "$KDL_PARSER"
+restore_setup
+
+fi # python3 check
 
 # ── --version and --help ──────────────────────────────────────────────────────
 echo "Version and help:"
