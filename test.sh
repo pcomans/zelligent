@@ -24,7 +24,7 @@ check() {
 
 contains() {
   local desc="$1" needle="$2" haystack="$3"
-  if echo "$haystack" | grep -qF "$needle"; then
+  if echo "$haystack" | grep -qF -- "$needle"; then
     pass "$desc"
   else
     fail "$desc (expected to contain: '$needle')"
@@ -33,7 +33,7 @@ contains() {
 
 not_contains() {
   local desc="$1" needle="$2" haystack="$3"
-  if echo "$haystack" | grep -qF "$needle"; then
+  if echo "$haystack" | grep -qF -- "$needle"; then
     fail "$desc (expected NOT to contain: '$needle')"
   else
     pass "$desc"
@@ -163,6 +163,118 @@ git -C "$REPO_ROOT" branch -D test-quoted-branch &>/dev/null || true
 contains "quoted cmd: quotes are escaped" 'exec claude -p \"Sag Hallo auf Deutsch\"' "$out"
 
 rm -rf "$MOCK_BIN_QUOTE"
+
+# ── Prompt delivery harness ──────────────────────────────────────────────────
+# Verify that the prompt actually reaches the claude binary after the full
+# KDL → bash -c execution path, including setup.sh running first.
+echo "Prompt delivery harness:"
+
+if ! command -v python3 &>/dev/null; then
+  echo "  ⚠️  python3 not found, skipping prompt delivery tests"
+else
+
+MOCK_BIN_PROMPT=$(mktemp -d)
+PROMPT_LOG=$(mktemp)
+KDL_PARSER=$(mktemp)
+
+# Regex-based extractor for double-quoted strings from the KDL `args` node.
+# Not a full KDL parser — only handles the \" escape sequences that zelligent
+# actually emits. Sufficient for verifying prompt delivery in tests.
+cat > "$KDL_PARSER" <<'PYEOF'
+#!/usr/bin/env python3
+"""Extract args from a zelligent layout file and run them via bash.
+
+Finds the first `args` line, extracts double-quoted string arguments using
+regex, unescapes KDL \" sequences, and runs: bash <arg1> <arg2> ...
+Replaces 'exec claude' with 'claude' so the mock binary can return.
+"""
+import re, subprocess, sys
+
+layout_file = sys.argv[1]
+with open(layout_file) as f:
+    for line in f:
+        stripped = line.strip()
+        if stripped.startswith("args "):
+            tokens = re.findall(r'"((?:[^"\\]|\\.)*)"', stripped)
+            args = [t.replace('\\"', '"').replace('\\\\', '\\') for t in tokens]
+            args = [a.replace('exec claude', 'claude') for a in args]
+            result = subprocess.run(["bash"] + args)
+            sys.exit(result.returncode)
+
+print("ERROR: no args line found in layout", file=sys.stderr)
+sys.exit(1)
+PYEOF
+chmod +x "$KDL_PARSER"
+
+# Mock claude that logs its arguments
+cat > "$MOCK_BIN_PROMPT/claude" <<MOCK
+#!/bin/bash
+printf '%s\n' "\$@" > "$PROMPT_LOG"
+MOCK
+# Mock zellij that finds the layout file and runs it through the KDL parser
+cat > "$MOCK_BIN_PROMPT/zellij" <<MOCK
+#!/bin/bash
+for arg in "\$@"; do
+  if [ -f "\$arg" ]; then
+    python3 "$KDL_PARSER" "\$arg"
+    exit \$?
+  fi
+done
+MOCK
+cat > "$MOCK_BIN_PROMPT/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_BIN_PROMPT/claude" "$MOCK_BIN_PROMPT/zellij" "$MOCK_BIN_PROMPT/lazygit"
+
+prompt_test_cleanup() {
+  local branch="$1"
+  git -C "$REPO_ROOT" worktree remove --force \
+    "$HOME/.zelligent/worktrees/$REPO_NAME/$branch" &>/dev/null || true
+  git -C "$REPO_ROOT" branch -D "$branch" &>/dev/null || true
+}
+
+# Move setup.sh aside so tests don't invoke the repo's real one (e.g. sleep)
+mv "$SETUP_SH" "$SETUP_SH_BAK" 2>/dev/null || true
+trap restore_setup EXIT INT TERM
+
+# Test 1: positional prompt (interactive mode with initial prompt)
+out_prompt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
+  "$SCRIPT" spawn test-prompt-branch 'claude "fix the login bug"' 2>&1)
+PROMPT_ARGS=$(cat "$PROMPT_LOG")
+contains "prompt delivery: positional prompt reaches claude" "fix the login bug" "$PROMPT_ARGS"
+prompt_test_cleanup test-prompt-branch
+
+# Test 2: -p flag (non-interactive)
+> "$PROMPT_LOG"
+out_pflag=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
+  "$SCRIPT" spawn test-pflag-branch 'claude -p "run all tests and fix failures"' 2>&1)
+PROMPT_ARGS=$(cat "$PROMPT_LOG")
+contains "prompt delivery: -p flag reaches claude" "-p" "$PROMPT_ARGS"
+contains "prompt delivery: -p prompt text reaches claude" "run all tests and fix failures" "$PROMPT_ARGS"
+prompt_test_cleanup test-pflag-branch
+
+# Test 3: prompt with --model flag
+> "$PROMPT_LOG"
+out_model=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
+  "$SCRIPT" spawn test-model-prompt-branch 'claude --model claude-sonnet-4-6 "refactor the auth module"' 2>&1)
+PROMPT_ARGS=$(cat "$PROMPT_LOG")
+contains "prompt delivery: model flag reaches claude" "--model" "$PROMPT_ARGS"
+contains "prompt delivery: model value reaches claude" "claude-sonnet-4-6" "$PROMPT_ARGS"
+contains "prompt delivery: prompt with model flag reaches claude" "refactor the auth module" "$PROMPT_ARGS"
+prompt_test_cleanup test-model-prompt-branch
+
+# Test 4: bare claude (no prompt) — should still work, no args logged
+> "$PROMPT_LOG"
+out_bare=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
+  "$SCRIPT" spawn test-bare-branch claude 2>&1)
+BARE_ARGS=$(cat "$PROMPT_LOG")
+check "prompt delivery: bare claude has no args" "" "$BARE_ARGS"
+prompt_test_cleanup test-bare-branch
+
+rm -rf "$MOCK_BIN_PROMPT" "$PROMPT_LOG" "$KDL_PARSER"
+restore_setup
+
+fi # python3 check
 
 # ── --version and --help ──────────────────────────────────────────────────────
 echo "Version and help:"
