@@ -126,6 +126,38 @@ For each test step in the plan:
 
 Prefer `evaluate_script` over screenshots for text assertions.
 
+#### Deterministic selection assertions (preferred for j/k tests)
+
+When asserting which worktree is currently selected, inspect terminal cell attributes instead of relying on screenshot visuals. The selected row uses inverse video (`isInverse` is non-zero).
+
+```javascript
+() => {
+  const term = window.term;
+  const buf = term?.buffer?.active;
+  const labels = ["feature-a", "feature-b", "feature-c"];
+  const rows = [];
+  for (let i = 0; i < buf.length; i++) {
+    const line = buf.getLine(i);
+    const text = line?.translateToString(true) || "";
+    for (const label of labels) {
+      const idx = text.indexOf(label);
+      if (idx >= 0) {
+        rows.push({
+          label,
+          inverse: line.getCell(idx)?.isInverse?.() || 0,
+        });
+      }
+    }
+  }
+  return {
+    rows,
+    selected: rows.find((r) => r.inverse !== 0)?.label || null,
+  };
+}
+```
+
+Use this as the source of truth for navigation assertions (for example: after pressing `j` twice, expect `selected === "feature-c"`).
+
 #### Sending input
 
 - `press_key` for shortcuts: `"Control+y"`, `"Enter"`, `"Escape"`, `"Tab"`
