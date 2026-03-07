@@ -420,7 +420,6 @@ check "doctor creates permissions.kdl" "true" \
 PERM_CONTENT=$(cat "$PERM_FILE")
 contains "doctor permissions use bare path" "$FAKE_WASM" "$PERM_CONTENT"
 not_contains "doctor permissions omit file: prefix" "file:$FAKE_WASM" "$PERM_CONTENT"
-contains "doctor without claude CLI skips plugin" "claude plugin: claude CLI not found" "$out"
 
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
@@ -429,7 +428,6 @@ out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
 contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
-contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
 

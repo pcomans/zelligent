@@ -245,9 +245,11 @@ if ! GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/d
   exit 1
 fi
 
-REPO_ROOT="${GIT_COMMON_DIR%/.git}"
+REPO_ROOT=$(cd "${GIT_COMMON_DIR%/.git}" && pwd -P)
 REPO_NAME=$(basename "$REPO_ROOT")
 WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
+# Resolve symlinks (e.g. /tmp → /private/tmp on macOS) so path prefix matching works
+WORKTREES_DIR=$(mkdir -p "$WORKTREES_DIR" && cd "$WORKTREES_DIR" && pwd -P)
 
 # Handle nuke subcommand — delete the repo's Zellij session so it won't resurrect
 if [ "$1" = "nuke" ]; then
