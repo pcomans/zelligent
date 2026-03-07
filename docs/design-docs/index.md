@@ -9,3 +9,4 @@ Detailed design documentation for zelligent subsystems.
 | [session-resurrection.md](session-resurrection.md) | Session persistence, serialization, the cwd bug |
 | [agent-notifications.md](agent-notifications.md) | Agent status detection, pipe messages, OS notifications |
 | [zellij-behaviors.md](zellij-behaviors.md) | Tribal knowledge about Zellij CLI behavior |
+| [rust-test-port.md](rust-test-port.md) | Plan: port test.sh to Rust with KDL crate |
