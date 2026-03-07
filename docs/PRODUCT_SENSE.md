@@ -24,13 +24,7 @@ Branch names are sanitized for Zellij session/tab names:
 
 ### Layout format
 
-The default layout (overridable via `.zelligent/layout.kdl`) must:
-- Include `plugin location="zellij:tab-bar"` as first pane
-- Include `plugin location="zellij:status-bar"` as last pane
-- NOT wrap content in a `tab { }` block (that's for session layouts, not `new-tab`)
-- Use `{{cwd}}` and `{{agent_cmd}}` as template variables in custom layouts
-
-See [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md) for layout format details.
+Default layout: agent pane (70%) + lazygit (30%) with tab-bar and status-bar chrome. Overridable via `.zelligent/layout.kdl` with `{{cwd}}` and `{{agent_cmd}}` template variables. See [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md) for format rules and gotchas.
 
 ### Worktree storage
 
