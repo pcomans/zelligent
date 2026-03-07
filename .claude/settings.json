@@ -4,7 +4,6 @@
       "Bash(bash test.sh:*)",
       "Bash(bash tests/harness/fixtures/*)",
       "Bash(cd /tmp/zelligent-test-repo *)",
-      "Bash(lsof -ti:8083 *)",
       "Bash(zellij *)",
       "Bash(git add:*)",
       "Bash(git push:*)",

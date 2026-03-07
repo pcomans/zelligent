@@ -67,9 +67,9 @@ This creates the test repo at `/tmp/zelligent-test-repo` with the appropriate st
 
 Run these as THREE separate Bash commands in sequence:
 
-1. Kill any existing web server on port 8083:
+1. Stop any existing web server:
 ```bash
-lsof -ti:8083 | xargs kill -9 2>/dev/null || true
+zellij web --stop 2>/dev/null || true
 ```
 
 2. Start the web server from the test repo directory:

@@ -401,7 +401,7 @@ MOCK
 chmod +x "$MOCK_DR_BIN/zellij"
 
 out=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
-  PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
 check "doctor exits 0" "0" "$code"
 check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
@@ -420,14 +420,16 @@ check "doctor creates permissions.kdl" "true" \
 PERM_CONTENT=$(cat "$PERM_FILE")
 contains "doctor permissions use bare path" "$FAKE_WASM" "$PERM_CONTENT"
 not_contains "doctor permissions omit file: prefix" "file:$FAKE_WASM" "$PERM_CONTENT"
+contains "doctor without claude CLI skips plugin" "claude plugin: claude CLI not found" "$out"
 
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
-  PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code2=$?
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
 contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
+contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
 

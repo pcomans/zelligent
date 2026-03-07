@@ -10,7 +10,9 @@ zellij web --revoke-all-tokens 2>/dev/null || true
 # Remove worktrees properly before deleting the repo
 if [ -d /tmp/zelligent-test-repo ]; then
   git -C /tmp/zelligent-test-repo worktree list --porcelain 2>/dev/null | grep '^worktree ' | sed 's/^worktree //' | while read -r wt; do
-    [ "$wt" = "/tmp/zelligent-test-repo" ] || [ "$wt" = "/private/tmp/zelligent-test-repo" ] && continue
+    if [ "$wt" = "/tmp/zelligent-test-repo" ] || [ "$wt" = "/private/tmp/zelligent-test-repo" ]; then
+      continue
+    fi
     git -C /tmp/zelligent-test-repo worktree remove --force "$wt" 2>/dev/null || true
   done
 fi

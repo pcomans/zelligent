@@ -29,7 +29,7 @@ The fixture creates 3 worktrees: feature-a, feature-b, feature-c.
 
 ## Test 6: Version is displayed
 - Action: Read the terminal buffer
-- Expected: The version string "0.1.14" appears in the plugin UI
+- Expected: A semantic version string (e.g., "0.1.14") appears in the plugin UI
 
 ## Test 7: Clean close
 - Action: Press q

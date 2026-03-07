@@ -247,9 +247,14 @@ fi
 
 REPO_ROOT=$(cd "${GIT_COMMON_DIR%/.git}" && pwd -P)
 REPO_NAME=$(basename "$REPO_ROOT")
-WORKTREES_DIR="$HOME/.zelligent/worktrees/$REPO_NAME"
-# Resolve symlinks (e.g. /tmp → /private/tmp on macOS) so path prefix matching works
-WORKTREES_DIR=$(mkdir -p "$WORKTREES_DIR" && cd "$WORKTREES_DIR" && pwd -P)
+# Resolve symlinks on the base dir (e.g. /tmp → /private/tmp on macOS) so path prefix matching works.
+# Only resolve the parent (~/.zelligent/worktrees) which always exists after first spawn;
+# don't mkdir the repo-specific dir as a side effect of read-only commands.
+WORKTREES_BASE="$HOME/.zelligent/worktrees"
+if [ -d "$WORKTREES_BASE" ]; then
+  WORKTREES_BASE=$(cd "$WORKTREES_BASE" && pwd -P)
+fi
+WORKTREES_DIR="$WORKTREES_BASE/$REPO_NAME"
 
 # Handle nuke subcommand — delete the repo's Zellij session so it won't resurrect
 if [ "$1" = "nuke" ]; then

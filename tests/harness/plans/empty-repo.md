@@ -20,7 +20,7 @@ Verifies the plugin works correctly in a git repo with no worktrees.
 
 ## Test 4: Version is displayed
 - Action: Read the terminal buffer
-- Expected: The version string "0.1.14" appears somewhere in the plugin UI
+- Expected: A semantic version string (e.g., "0.1.14") appears somewhere in the plugin UI
 
 ## Test 5: Clean close
 - Action: Press q to close the plugin
