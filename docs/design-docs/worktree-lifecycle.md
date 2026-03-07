@@ -30,17 +30,3 @@ Destroys the entire Zellij session for the repo:
 2. Kills any lingering server/client processes (via `ps` + `kill -9`)
 3. Removes resurrection cache from Zellij's session_info directory
 4. Cleans up stale socket files
-
-## Manual end-to-end testing
-
-These require a live Zellij session and cannot be automated:
-
-```bash
-zelligent spawn feature/test-branch claude
-# Expected: new tab opens with left pane (claude) + right pane (lazygit)
-# Expected: tab-bar at top, status-bar at bottom
-# Expected: tab named "feature-test-branch"
-
-zelligent remove feature/test-branch
-# Expected: worktree removed, branch preserved, tab note printed
-```
