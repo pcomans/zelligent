@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(bash test.sh:*)",
+      "Bash(bash tests/harness/fixtures/*)",
+      "Bash(cd /tmp/zelligent-test-repo *)",
+      "Bash(zellij *)",
       "Bash(git add:*)",
       "Bash(git push:*)",
       "Bash(gh pr:*)"
@@ -19,5 +22,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "chrome-devtools-mcp@chrome-devtools-plugins": true
   }
 }

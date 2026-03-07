@@ -40,14 +40,7 @@ not_contains() {
   fi
 }
 
-excludes() {
-  local desc="$1" needle="$2" haystack="$3"
-  if echo "$haystack" | grep -qF "$needle"; then
-    fail "$desc (must not contain: '$needle')"
-  else
-    pass "$desc"
-  fi
-}
+excludes() { not_contains "$@"; }
 
 # ── Session name generation ────────────────────────────────────────────────────
 echo "Session name generation:"
@@ -401,7 +394,7 @@ MOCK
 chmod +x "$MOCK_DR_BIN/zellij"
 
 out=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
-  PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
 check "doctor exits 0" "0" "$code"
 check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
@@ -425,7 +418,7 @@ contains "doctor without claude CLI skips plugin" "claude plugin: claude CLI not
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
-  PATH="$MOCK_DR_BIN:$PATH" "$SCRIPT" doctor 2>&1); code2=$?
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
 contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
