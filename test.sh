@@ -40,14 +40,7 @@ not_contains() {
   fi
 }
 
-excludes() {
-  local desc="$1" needle="$2" haystack="$3"
-  if echo "$haystack" | grep -qF "$needle"; then
-    fail "$desc (must not contain: '$needle')"
-  else
-    pass "$desc"
-  fi
-}
+excludes() { not_contains "$@"; }
 
 # ── Session name generation ────────────────────────────────────────────────────
 echo "Session name generation:"
