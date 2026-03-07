@@ -21,8 +21,8 @@ A Rust plugin compiled to `wasm32-wasip1`. Provides a floating UI inside Zellij 
 - **Worktree browsing** — lists worktrees, lets you switch tabs or spawn/remove worktrees
 - **Branch selection** — browse existing branches or type a new branch name
 - **Tab management** — switches to worktree tabs, closes tabs (name-based, not index-based)
-- **Agent status** — reads CLI pipe messages to show agent status (idle/working/needs-input/done)
-- **Session awareness** — gets session name via `SessionUpdate` events (not env vars, WASM sandbox blocks those)
+- **Agent status** — reads CLI pipe messages to show agent status (idle/working/needs-input/done) and sends OS notifications. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md).
+- **Session awareness** — gets session name via `std::env::var("ZELLIJ_SESSION_NAME")` (WASI inherits host env vars)
 
 ### Key file paths
 
@@ -34,6 +34,7 @@ A Rust plugin compiled to `wasm32-wasip1`. Provides a floating UI inside Zellij 
 | `plugin/tests/render_snapshots.rs` | Insta snapshot tests for UI |
 | `dev-install.sh` | Build + install CLI and WASM plugin locally |
 | `test.sh` | Full test suite runner |
+| `claude-plugin/` | Claude Code plugin (hooks for agent status notifications) |
 
 ### How they interact
 
@@ -49,6 +50,10 @@ User presses Ctrl-Y inside Zellij
   -> Plugin calls `zelligent spawn/remove` via RunCommand when user selects an action
 ```
 
-### WASM sandbox constraints
+### WASM plugin environment
 
-See [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for details. The key constraint: WASM plugins cannot access host environment variables or the filesystem directly. All external operations go through Zellij's plugin API (`RunCommand`, events, pipes).
+See [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for API details. Plugins run in a WASI sandbox but inherit the host environment (`std::env::var()` works). External operations go through Zellij's plugin API (`RunCommand`, events, pipes).
+
+## Claude Code Plugin (`claude-plugin/`)
+
+A Claude Code plugin installed by `zelligent doctor`. Provides hooks that send agent status events to the Zellij plugin via `zellij pipe`. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md) for the full pipeline.

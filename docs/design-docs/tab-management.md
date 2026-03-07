@@ -8,7 +8,7 @@ Important: `new-tab --layout` does NOT inherit `default_tab_template`. Tab-bar a
 
 ## Tab naming
 
-Tabs are named after the branch with `/` replaced by `-`. This matches the worktree's branch name for easy correlation. The plugin uses tab names to identify and switch between worktree tabs.
+Tabs are named after the sanitized branch name (see [PRODUCT_SENSE.md](../PRODUCT_SENSE.md#session-name-format)). The plugin uses tab names as the primary identifier for all tab operations.
 
 ## Tab index vs position bug
 

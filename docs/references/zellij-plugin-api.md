@@ -9,20 +9,11 @@ For general plugin API docs, see the official Zellij documentation:
 
 This doc covers **zelligent-specific gotchas** not found in official docs.
 
-## WASM sandbox gotchas
+## WASM environment
 
-- **No environment variables.** `std::env::var()` returns empty/error. The WASM sandbox does not inherit the host process environment. This means `ZELLIJ_SESSION_NAME` (set for CLI subprocesses) is not available inside plugins.
-- **Getting the session name:** subscribe to `EventType::SessionUpdate` and find the current session:
+Zellij's WASI context calls `builder.inherit_env()` (plugin_loader.rs:451), so **`std::env::var()` works inside plugins** — they inherit the full host environment. The plugin uses `std::env::var("ZELLIJ_SESSION_NAME")` to get the session name (lib.rs:670).
 
-  ```rust
-  Event::SessionUpdate(sessions, _resurrectable) => {
-      if let Some(info) = sessions.iter().find(|s| s.is_current_session) {
-          self.session_name = info.name.clone();
-      }
-  }
-  ```
-
-  `SessionUpdate` signature: `Event::SessionUpdate(Vec<SessionInfo>, Vec<(String, Duration)>)` — first arg is active sessions, second is resurrectable sessions. Requires `PermissionType::ReadApplicationState`.
+Zellij also provides a `get_session_environment_variables` plugin command for accessing `session_env_vars` without relying on WASI inheritance, but the plugin doesn't use it.
 
 ## Tab index vs position bug
 

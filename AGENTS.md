@@ -60,6 +60,7 @@ Review the generated `.snap` files in `plugin/tests/snapshots/` before committin
 | Product & UX conventions | [docs/PRODUCT_SENSE.md](docs/PRODUCT_SENSE.md) |
 | Worktree spawn/remove lifecycle | [docs/design-docs/worktree-lifecycle.md](docs/design-docs/worktree-lifecycle.md) |
 | Tab creation & index vs position bug | [docs/design-docs/tab-management.md](docs/design-docs/tab-management.md) |
+| Agent status notifications | [docs/design-docs/agent-notifications.md](docs/design-docs/agent-notifications.md) |
 | Session resurrection & cwd bug | [docs/design-docs/session-resurrection.md](docs/design-docs/session-resurrection.md) |
 | Zellij CLI behaviors (critical) | [docs/design-docs/zellij-behaviors.md](docs/design-docs/zellij-behaviors.md) |
 | WASM plugin API & sandbox | [docs/references/zellij-plugin-api.md](docs/references/zellij-plugin-api.md) |
