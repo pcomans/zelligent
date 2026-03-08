@@ -28,6 +28,34 @@ zellij_list_sessions() {
   fi
 }
 
+# Resolve the zelligent WASM plugin path, honoring explicit overrides first.
+resolve_plugin_path() {
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    [ -f "$ZELLIGENT_PLUGIN_SRC" ] || return 1
+    printf '%s\n' "$ZELLIGENT_PLUGIN_SRC"
+    return 0
+  fi
+
+  local zelligent_bin zelligent_prefix homebrew_plugin dev_plugin
+  zelligent_bin=$(command -v zelligent 2>/dev/null || true)
+  if [ -n "$zelligent_bin" ]; then
+    zelligent_prefix=$(dirname "$(dirname "$zelligent_bin")")
+    homebrew_plugin="$zelligent_prefix/share/zelligent/zelligent-plugin.wasm"
+    if [ -f "$homebrew_plugin" ]; then
+      printf '%s\n' "$homebrew_plugin"
+      return 0
+    fi
+  fi
+
+  dev_plugin="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
+  if [ -f "$dev_plugin" ]; then
+    printf '%s\n' "$dev_plugin"
+    return 0
+  fi
+
+  return 1
+}
+
 # --- Commands that do not require a git repo ---
 
 usage() {
@@ -509,15 +537,38 @@ else
         }"
 fi
 
+PLUGIN_PATH_LAYOUT=""
+PLUGIN_PATH_LAYOUT_KDL=""
+ZELLIGENT_PATH_CMD=""
+ZELLIGENT_PATH_CMD_KDL=""
+if [ -z "$LAYOUT_TEMPLATE" ]; then
+  if ! PLUGIN_PATH_LAYOUT=$(resolve_plugin_path); then
+    echo "❌ Could not find zelligent plugin (.wasm)." >&2
+    echo "   Install/reinstall with: bash dev-install.sh" >&2
+    exit 1
+  fi
+  PLUGIN_PATH_LAYOUT_KDL="${PLUGIN_PATH_LAYOUT//\\/\\\\}"
+  PLUGIN_PATH_LAYOUT_KDL="${PLUGIN_PATH_LAYOUT_KDL//\"/\\\"}"
+
+  ZELLIGENT_PATH_CMD=$(command -v zelligent 2>/dev/null || echo "$0")
+  ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD//\\/\\\\}"
+  ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD_KDL//\"/\\\"}"
+fi
+
 # Pane content shared by both layouts
 pane_content() {
   cat <<EOF
-    pane size=1 borderless=true {
-        plugin location="zellij:tab-bar"
-    }
     pane split_direction="vertical" {
-        $AGENT_PANE
-        pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+        pane size="24%" {
+            plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
+                zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                agent_cmd "$AGENT_CMD_KDL"
+            }
+        }
+        pane split_direction="horizontal" {
+            $AGENT_PANE
+            pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+        }
     }
     pane size=1 borderless=true {
         plugin location="zellij:status-bar"
