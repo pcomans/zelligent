@@ -1,7 +1,7 @@
 mod common;
 
 use common::{key, render_to_string, state_with_worktrees};
-use zelligent_plugin::{AgentStatus, Mode, State, Worktree};
+use zelligent_plugin::{AgentStatus, Mode, State};
 use zellij_tile::prelude::*;
 
 fn state_with_branches() -> State {
@@ -43,7 +43,10 @@ fn render_browse_with_worktrees() {
 
 #[test]
 fn render_browse_empty() {
-    let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        ..Default::default()
+    };
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
@@ -80,7 +83,10 @@ fn render_select_branch_empty() {
 
 #[test]
 fn render_input_branch_empty() {
-    let s = State { mode: Mode::InputBranch, ..Default::default() };
+    let s = State {
+        mode: Mode::InputBranch,
+        ..Default::default()
+    };
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
@@ -98,37 +104,169 @@ fn render_input_branch_with_text() {
 fn render_confirming() {
     let mut s = state_with_worktrees();
     s.mode = Mode::Confirming;
-    s.selected_index = 1;
+    s.pending_remove_branch = Some("feat-b".into());
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
 #[test]
 fn render_worktree_list_scrolling() {
-    let s = State {
+    let mut s = State {
         mode: Mode::BrowseWorktrees,
-        worktrees: (0..20)
-            .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
+        tabs: (0..20)
+            .map(|i| TabInfo {
+                position: i,
+                name: format!("branch-{i}"),
+                active: i == 0,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            })
             .collect(),
         selected_index: 15,
         ..Default::default()
     };
+    let output: String = (0..20)
+        .map(|i| format!("branch-{i}\tbranch-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    s.handle_list_worktrees(Some(0), output.as_bytes(), b"");
     // Small viewport forces scrolling
     insta::assert_snapshot!(render_to_string(&s, 10, 80));
 }
 
 #[test]
 fn render_browse_mixed_dir_branch_names() {
-    let s = State {
+    let mut s = State {
         mode: Mode::BrowseWorktrees,
         repo_name: "myrepo".into(),
-        worktrees: vec![
-            Worktree { dir: "autonomy".into(), branch: "plugin-snapshot-tests".into() },
-            Worktree { dir: "competition".into(), branch: "competition".into() },
-            Worktree { dir: "ding".into(), branch: "feat/ding-dong".into() },
+        tabs: vec![
+            TabInfo {
+                position: 0,
+                name: "plugin-snapshot-tests".into(),
+                active: true,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+            TabInfo {
+                position: 1,
+                name: "competition".into(),
+                active: false,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+            TabInfo {
+                position: 2,
+                name: "feature-ding-dong".into(),
+                active: false,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
         ],
         ..Default::default()
     };
+    s.handle_list_worktrees(
+        Some(0),
+        b"autonomy\tplugin-snapshot-tests\ncompetition\tcompetition\nding\tfeat/ding-dong\n",
+        b"",
+    );
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_browse_clips_labels_to_viewport_width() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        tabs: vec![
+            TabInfo {
+                position: 0,
+                name: "feature-super-long-branch-name-for-viewport".into(),
+                active: true,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+            TabInfo {
+                position: 1,
+                name: "manual-tab-with-a-very-long-name".into(),
+                active: false,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+        ],
+        ..Default::default()
+    };
+    s.handle_list_worktrees(
+        Some(0),
+        b"feature/super-long-branch-name-for-viewport\tfeature/super-long-branch-name-for-viewport\n",
+        b"",
+    );
+    insta::assert_snapshot!(render_to_string(&s, 14, 40));
 }
 
 #[test]
@@ -146,8 +284,10 @@ fn render_not_git_repo() {
 #[test]
 fn render_browse_with_agent_statuses() {
     let mut s = state_with_worktrees();
-    s.agent_statuses.insert("feat-a".into(), AgentStatus::Working);
-    s.agent_statuses.insert("feat-b".into(), AgentStatus::NeedsInput);
+    s.agent_statuses
+        .insert("feat-a".into(), AgentStatus::Working);
+    s.agent_statuses
+        .insert("feat-b".into(), AgentStatus::NeedsInput);
     // feat-c stays Idle (no entry)
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }

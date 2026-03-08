@@ -2,11 +2,11 @@
 source: tests/render_snapshots.rs
 expression: typed
 ---
-[1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
+[1m[36m zelligent · repo ─────────────────────────────────────────────────────────────[0m
 
   [1mNew branch name:[0m
 
   > fix[7m [0m
 
-  [2mEnter[0m create  [2mEsc[0m back
-  [2mVERSION[0m
+  [2mEnter create  Esc back                                                        [0m
+  [2mVERSION                                                             [0m
