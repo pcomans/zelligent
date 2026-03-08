@@ -10,7 +10,7 @@ pub enum AgentStatus {
     #[default]
     Idle,
     Working,
-    NeedsInput,
+    Awaiting,
     Done,
 }
 
@@ -433,7 +433,7 @@ impl State {
             Action::Notify { tab_name, status } => {
                 // macOS-only: osascript and afplay. On Linux, use notify-send/paplay.
                 let body = match status {
-                    AgentStatus::NeedsInput => format!("{tab_name} needs input"),
+                    AgentStatus::Awaiting => format!("{tab_name} awaiting input"),
                     AgentStatus::Done => format!("{tab_name} finished"),
                     _ => return,
                 };
@@ -450,7 +450,7 @@ impl State {
                     ],
                     BTreeMap::new(),
                 );
-                if matches!(status, AgentStatus::NeedsInput) {
+                if matches!(status, AgentStatus::Awaiting) {
                     run_command(
                         &["afplay", "/System/Library/Sounds/Glass.aiff"],
                         BTreeMap::new(),
@@ -785,7 +785,7 @@ impl State {
         };
         let status = match msg.args.get("event").map(|s| s.as_str()) {
             Some("Start") | Some("UserPromptSubmit") => AgentStatus::Working,
-            Some("PermissionRequest") => AgentStatus::NeedsInput,
+            Some("PermissionRequest") => AgentStatus::Awaiting,
             Some("Stop") => AgentStatus::Done,
             _ => return Action::None,
         };
@@ -796,7 +796,7 @@ impl State {
         self.agent_statuses.insert(tab_name.clone(), status);
         // TODO: consider suppressing notifications when the tab is active
         match status {
-            AgentStatus::NeedsInput | AgentStatus::Done => Action::Notify { tab_name, status },
+            AgentStatus::Awaiting | AgentStatus::Done => Action::Notify { tab_name, status },
             _ => Action::None,
         }
     }
@@ -2049,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn pipe_permission_request_sets_needs_input_and_notifies() {
+    fn pipe_permission_request_sets_awaiting_and_notifies() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
         let action = s.handle_pipe(&pipe_msg(
@@ -2060,12 +2060,12 @@ mod tests {
             action,
             Action::Notify {
                 tab_name: "feat-a".into(),
-                status: AgentStatus::NeedsInput
+                status: AgentStatus::Awaiting
             }
         );
         assert_eq!(
             s.agent_statuses.get("feat-a"),
-            Some(&AgentStatus::NeedsInput)
+            Some(&AgentStatus::Awaiting)
         );
     }
 
