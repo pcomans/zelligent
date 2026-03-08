@@ -40,6 +40,13 @@ pub struct Worktree {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SidebarItem {
+    pub tab_name: String,
+    pub display_name: String,
+    pub matched_branch: Option<String>,
+}
+
 /// Actions returned by key/event handlers, executed by the plugin shell.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -58,7 +65,10 @@ pub enum Action {
     FetchWorktreesAndBranches,
     DumpLayout,
     NukeSession,
-    Notify { tab_name: String, status: AgentStatus },
+    Notify {
+        tab_name: String,
+        status: AgentStatus,
+    },
 }
 
 #[derive(Default)]
@@ -78,12 +88,13 @@ pub struct State {
     pub initial_cwd: PathBuf,
     pub session_name: Option<String>,
     pub tabs: Vec<TabInfo>,
-    /// Flipped to `true` after the first successful worktree list load.
-    /// Auto-selection of the active tab's worktree only happens before this
-    /// so that subsequent refreshes do not override the user's cursor position.
     pub has_loaded: bool,
+    pub sidebar_items: Vec<SidebarItem>,
+    pub pending_remove_branch: Option<String>,
     /// Agent status per tab name (sanitized branch name).
     pub agent_statuses: BTreeMap<String, AgentStatus>,
+    /// Last rendered row count, used to map mouse line clicks to list items.
+    pub last_rows: usize,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -120,7 +131,9 @@ pub fn sanitize_branch_name(name: &str) -> String {
         result.truncate(result.len() - 5);
     }
 
-    result.trim_matches(|c| c == '-' || c == '.' || c == '/').to_string()
+    result
+        .trim_matches(|c| c == '-' || c == '.' || c == '/')
+        .to_string()
 }
 
 /// Parse `zelligent list-worktrees` output.
@@ -164,7 +177,119 @@ pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
     ((current as isize + delta).rem_euclid(len as isize)) as usize
 }
 
+fn rows_to_visible_items(rows: usize, reserved_rows: usize) -> usize {
+    rows.saturating_sub(reserved_rows).saturating_div(2).max(1)
+}
+
 impl State {
+    fn selected_tab_name(&self) -> Option<&str> {
+        self.sidebar_items
+            .get(self.selected_index)
+            .map(|item| item.tab_name.as_str())
+    }
+
+    fn recompute_sidebar_items(&mut self) {
+        let prev_selected_tab = self.selected_tab_name().map(|name| name.to_string());
+
+        // Deterministic first-match mapping when multiple branches sanitize to the same tab name.
+        let mut matched_branch_by_tab = BTreeMap::new();
+        for wt in &self.worktrees {
+            matched_branch_by_tab
+                .entry(Self::tab_name_for_branch(&wt.branch))
+                .or_insert_with(|| wt.branch.clone());
+        }
+
+        // Disambiguate duplicate tab names in the sidebar for clearer navigation.
+        let mut total_by_tab_name: BTreeMap<String, usize> = BTreeMap::new();
+        for tab in &self.tabs {
+            *total_by_tab_name.entry(tab.name.clone()).or_default() += 1;
+        }
+        let mut seen_by_tab_name: BTreeMap<String, usize> = BTreeMap::new();
+
+        self.sidebar_items = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let seen = seen_by_tab_name.entry(tab.name.clone()).or_default();
+                *seen += 1;
+                let total = *total_by_tab_name.get(&tab.name).unwrap_or(&1);
+                let display_name = if total > 1 {
+                    format!("{} ({})", tab.name, *seen)
+                } else {
+                    tab.name.clone()
+                };
+                SidebarItem {
+                    tab_name: tab.name.clone(),
+                    display_name,
+                    matched_branch: matched_branch_by_tab.get(&tab.name).cloned(),
+                }
+            })
+            .collect();
+
+        if self.sidebar_items.is_empty() {
+            self.selected_index = 0;
+            return;
+        }
+
+        if let Some(prev) = prev_selected_tab {
+            if let Some(idx) = self
+                .sidebar_items
+                .iter()
+                .position(|item| item.tab_name == prev)
+            {
+                self.selected_index = idx;
+                return;
+            }
+        }
+
+        if let Some(active_tab) = self.tabs.iter().find(|t| t.active) {
+            if let Some(idx) = self
+                .sidebar_items
+                .iter()
+                .position(|item| item.tab_name == active_tab.name)
+            {
+                self.selected_index = idx;
+                return;
+            }
+        }
+
+        if self.selected_index >= self.sidebar_items.len() {
+            self.selected_index = self.sidebar_items.len() - 1;
+        }
+    }
+
+    fn visible_sidebar_window(&self, reserved_rows: usize) -> (usize, usize) {
+        let max_visible = rows_to_visible_items(self.last_rows, reserved_rows);
+        let start = if self.selected_index >= max_visible {
+            self.selected_index - max_visible + 1
+        } else {
+            0
+        };
+        (start, max_visible.min(self.sidebar_items.len()))
+    }
+
+    fn sidebar_index_at_line(&self, line: usize) -> Option<usize> {
+        if self.sidebar_items.is_empty() {
+            return None;
+        }
+        // Header is line 0, then one blank line before the first row.
+        let first_item_line = 2;
+        if line < first_item_line {
+            return None;
+        }
+        let (start, visible_len) = self.visible_sidebar_window(6);
+        // Each item always renders as two lines.
+        let relative = (line - first_item_line) / 2;
+        if relative >= visible_len {
+            return None;
+        }
+        Some(start + relative)
+    }
+
+    fn selected_sidebar_item(&self) -> Option<&SidebarItem> {
+        self.sidebar_items.get(self.selected_index)
+    }
+
     fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("cmd_type".to_string(), cmd_type.to_string());
@@ -241,7 +366,10 @@ impl State {
             Action::Close => close_self(),
             Action::Spawn(branch) => self.fire_spawn(branch),
             Action::Remove(branch) => self.fire_remove(branch),
-            Action::CloseTabAndRefresh { tab_name, return_to } => {
+            Action::CloseTabAndRefresh {
+                tab_name,
+                return_to,
+            } => {
                 go_to_tab_name(tab_name);
                 close_focused_tab();
                 if let Some(name) = return_to {
@@ -305,7 +433,12 @@ impl State {
 
     // --- Pure state handlers (no zellij calls, fully testable) ---
 
-    pub fn handle_git_toplevel(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Action {
+    pub fn handle_git_toplevel(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Action {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
             let cwd = self.initial_cwd.display();
@@ -340,31 +473,7 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
-        if !self.has_loaded && self.tabs.iter().any(|t| t.active) {
-            // On the very first load where tab state is known, jump to the
-            // worktree for the active tab so the cursor starts in a meaningful
-            // position. If tabs haven't arrived yet we leave has_loaded = false
-            // so the TabUpdate handler can retry once they do.
-            self.has_loaded = true;
-            if let Some(idx) = self.find_worktree_for_active_tab() {
-                self.selected_index = idx;
-                return;
-            }
-        }
-        // On refresh (or when no tab match was found), preserve the user's
-        // cursor position and only clamp if it went out of range.
-        if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
-            self.selected_index = self.worktrees.len() - 1;
-        }
-    }
-
-    /// Return the index of the worktree whose tab name matches the active tab, if any.
-    /// Returns the first match; see `tab_name_for_branch` for the ambiguity caveat.
-    pub fn find_worktree_for_active_tab(&self) -> Option<usize> {
-        let active_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str())?;
-        self.worktrees
-            .iter()
-            .position(|wt| Self::tab_name_for_branch(&wt.branch) == active_name)
+        self.recompute_sidebar_items();
     }
 
     pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
@@ -378,7 +487,12 @@ impl State {
         self.branches = parse_branches(&output);
     }
 
-    pub fn handle_spawn_result(&mut self, exit_code: Option<i32>, stderr: &[u8], context: &BTreeMap<String, String>) -> Action {
+    pub fn handle_spawn_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> Action {
         let branch = context.get("branch").cloned().unwrap_or_default();
         if exit_code == Some(0) {
             self.status_message = format!("Spawned '{branch}'");
@@ -391,9 +505,15 @@ impl State {
         Action::Refresh
     }
 
-    pub fn handle_remove_result(&mut self, exit_code: Option<i32>, stderr: &[u8], context: &BTreeMap<String, String>) -> Action {
+    pub fn handle_remove_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> Action {
         let branch = context.get("branch").cloned().unwrap_or_default();
         self.mode = Mode::BrowseWorktrees;
+        self.pending_remove_branch = None;
         if exit_code == Some(0) {
             self.status_message = format!("Removed '{branch}'");
             self.status_is_error = false;
@@ -402,7 +522,10 @@ impl State {
                 let tab_name = Self::tab_name_for_branch(&branch);
                 self.agent_statuses.remove(&tab_name);
                 let return_to = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
-                return Action::CloseTabAndRefresh { tab_name, return_to };
+                return Action::CloseTabAndRefresh {
+                    tab_name,
+                    return_to,
+                };
             }
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
@@ -417,8 +540,8 @@ impl State {
     /// chars stripped (matching zelligent.sh).
     ///
     /// Note: this mapping is not injective — `feat/cool` and `feat-cool` both
-    /// produce `feat-cool`. In that case `find_worktree_for_active_tab` will
-    /// match the first worktree in the list, which may not be the intended one.
+    /// produce `feat-cool`. Sidebar matching resolves this deterministically to
+    /// the first matching worktree.
     pub fn tab_name_for_branch(branch: &str) -> String {
         ui::sanitize_tab_name(branch)
     }
@@ -427,6 +550,18 @@ impl State {
     pub fn has_tab_for_branch(&self, branch: &str) -> bool {
         let tab_name = Self::tab_name_for_branch(branch);
         self.tabs.iter().any(|t| t.name == tab_name)
+    }
+
+    /// Return the first worktree matching the active tab's sanitized branch name.
+    pub fn find_worktree_for_active_tab(&self) -> Option<usize> {
+        let active_name = self
+            .tabs
+            .iter()
+            .find(|t| t.active)
+            .map(|t| t.name.as_str())?;
+        self.worktrees
+            .iter()
+            .position(|wt| Self::tab_name_for_branch(&wt.branch) == active_name)
     }
 
     /// Switch to an existing tab for the branch, or spawn a new one.
@@ -444,14 +579,16 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), 1);
+                    self.selected_index =
+                        wrap_navigate(self.selected_index, self.sidebar_items.len(), 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), -1);
+                    self.selected_index =
+                        wrap_navigate(self.selected_index, self.sidebar_items.len(), -1);
                 }
                 BareKey::Enter => {
-                    if let Some(wt) = self.worktrees.get(self.selected_index) {
-                        return self.spawn_or_switch(wt.branch.clone());
+                    if let Some(item) = self.selected_sidebar_item() {
+                        return Action::SwitchToTab(item.tab_name.clone());
                     }
                 }
                 BareKey::Char('n') => {
@@ -464,8 +601,17 @@ impl State {
                     self.input_buffer.clear();
                 }
                 BareKey::Char('d') => {
-                    if !self.worktrees.is_empty() {
-                        self.mode = Mode::Confirming;
+                    if let Some(item) = self.selected_sidebar_item() {
+                        if let Some(branch) = &item.matched_branch {
+                            self.pending_remove_branch = Some(branch.clone());
+                            self.mode = Mode::Confirming;
+                        } else {
+                            self.status_message = "Not a worktree tab".to_string();
+                            self.status_is_error = true;
+                        }
+                    } else {
+                        self.status_message = "No tab selected".to_string();
+                        self.status_is_error = true;
                     }
                 }
                 BareKey::Char('r') => {
@@ -482,14 +628,51 @@ impl State {
         Action::None
     }
 
+    pub fn handle_mouse_browse(&mut self, mouse: &Mouse) -> Action {
+        match mouse {
+            Mouse::ScrollDown(lines) => {
+                self.selected_index = wrap_navigate(
+                    self.selected_index,
+                    self.sidebar_items.len(),
+                    *lines as isize,
+                );
+            }
+            Mouse::ScrollUp(lines) => {
+                self.selected_index = wrap_navigate(
+                    self.selected_index,
+                    self.sidebar_items.len(),
+                    -(*lines as isize),
+                );
+            }
+            Mouse::LeftClick(line, _) => {
+                if *line < 0 {
+                    return Action::None;
+                }
+                if let Some(idx) = self.sidebar_index_at_line(*line as usize) {
+                    if idx == self.selected_index {
+                        if let Some(item) = self.selected_sidebar_item() {
+                            return Action::SwitchToTab(item.tab_name.clone());
+                        }
+                    } else {
+                        self.selected_index = idx;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     pub fn handle_key_select_branch(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.filtered_branches.len(), 1);
+                    self.selected_index =
+                        wrap_navigate(self.selected_index, self.filtered_branches.len(), 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.filtered_branches.len(), -1);
+                    self.selected_index =
+                        wrap_navigate(self.selected_index, self.filtered_branches.len(), -1);
                 }
                 BareKey::Enter => {
                     if let Some(branch) = self.filtered_branches.get(self.selected_index).cloned() {
@@ -509,8 +692,8 @@ impl State {
 
     pub fn handle_key_input_branch(&mut self, key: &KeyWithModifier) -> Action {
         let no_mod = key.has_no_modifiers();
-        let shift_only = key.key_modifiers.len() == 1
-            && key.key_modifiers.contains(&KeyModifier::Shift);
+        let shift_only =
+            key.key_modifiers.len() == 1 && key.key_modifiers.contains(&KeyModifier::Shift);
 
         match key.bare_key {
             BareKey::Enter if no_mod => {
@@ -543,8 +726,8 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('y') => {
-                    if let Some(wt) = self.worktrees.get(self.selected_index) {
-                        let branch = wt.branch.clone();
+                    if let Some(branch) = &self.pending_remove_branch {
+                        let branch = branch.clone();
                         self.status_message = format!("Removing '{branch}'...");
                         self.status_is_error = false;
                         return Action::Remove(branch);
@@ -552,6 +735,7 @@ impl State {
                 }
                 BareKey::Char('n') | BareKey::Esc => {
                     self.mode = Mode::BrowseWorktrees;
+                    self.pending_remove_branch = None;
                 }
                 _ => {}
             }
@@ -580,9 +764,7 @@ impl State {
         self.agent_statuses.insert(tab_name.clone(), status);
         // TODO: consider suppressing notifications when the tab is active
         match status {
-            AgentStatus::NeedsInput | AgentStatus::Done => {
-                Action::Notify { tab_name, status }
-            }
+            AgentStatus::NeedsInput | AgentStatus::Done => Action::Notify { tab_name, status },
             _ => Action::None,
         }
     }
@@ -613,7 +795,7 @@ impl State {
     pub fn render_to(&self, w: &mut impl Write, rows: usize, cols: usize) {
         match self.mode {
             Mode::Loading => {
-                ui::render_header(w, "loading...", cols);
+                ui::render_header(w, "loading...", None, cols);
                 writeln!(w).unwrap();
                 if self.status_is_error {
                     ui::render_status(w, &self.status_message, self.status_is_error);
@@ -622,32 +804,39 @@ impl State {
                 }
             }
             Mode::NotGitRepo => {
-                ui::render_header(w, "error", cols);
+                ui::render_header(w, "error", None, cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::BrowseWorktrees => {
-                ui::render_header(w, &self.repo_name, cols);
-                ui::render_worktree_list(w, &self.worktrees, &self.agent_statuses, self.selected_index, rows);
-                ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_header(w, &self.repo_name, Some(self.sidebar_items.len()), cols);
+                ui::render_sidebar_list(
+                    w,
+                    &self.sidebar_items,
+                    &self.agent_statuses,
+                    self.selected_index,
+                    rows,
+                    cols,
+                );
+                ui::render_status_strip(w, &self.status_message, self.status_is_error, cols);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::SelectBranch => {
-                ui::render_header(w, &self.repo_name, cols);
+                ui::render_header(w, &self.repo_name, None, cols);
                 ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::InputBranch => {
-                ui::render_header(w, &self.repo_name, cols);
+                ui::render_header(w, &self.repo_name, None, cols);
                 ui::render_input(w, &self.input_buffer);
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::Confirming => {
-                ui::render_header(w, &self.repo_name, cols);
-                if let Some(wt) = self.worktrees.get(self.selected_index) {
-                    ui::render_confirm(w, &wt.branch);
+                ui::render_header(w, &self.repo_name, None, cols);
+                if let Some(branch) = &self.pending_remove_branch {
+                    ui::render_confirm(w, branch);
                 }
             }
         }
@@ -678,6 +867,7 @@ impl ZellijPlugin for State {
 
         subscribe(&[
             EventType::Key,
+            EventType::Mouse,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
@@ -686,9 +876,7 @@ impl ZellijPlugin for State {
 
     fn update(&mut self, event: Event) -> bool {
         let action = match event {
-            Event::PermissionRequestResult(PermissionStatus::Granted) => {
-                Action::FetchToplevel
-            }
+            Event::PermissionRequestResult(PermissionStatus::Granted) => Action::FetchToplevel,
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
                 self.status_message = "Permissions denied. Plugin cannot run commands.".to_string();
                 self.status_is_error = true;
@@ -712,26 +900,21 @@ impl ZellijPlugin for State {
             }
             Event::TabUpdate(tab_info) => {
                 self.tabs = tab_info;
-                // If worktrees loaded before tabs arrived, do the initial
-                // auto-select now that we have tab state.
-                if !self.has_loaded && !self.worktrees.is_empty() {
-                    self.has_loaded = true;
-                    if let Some(idx) = self.find_worktree_for_active_tab() {
-                        self.selected_index = idx;
-                    }
-                }
+                self.recompute_sidebar_items();
                 Action::None
             }
-            Event::Key(key) => {
-                match self.mode {
-                    Mode::Loading => Action::None,
-                    Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
-                    Mode::BrowseWorktrees => self.handle_key_browse(&key),
-                    Mode::SelectBranch => self.handle_key_select_branch(&key),
-                    Mode::InputBranch => self.handle_key_input_branch(&key),
-                    Mode::Confirming => self.handle_key_confirming(&key),
-                }
-            }
+            Event::Mouse(mouse) => match self.mode {
+                Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
+                _ => Action::None,
+            },
+            Event::Key(key) => match self.mode {
+                Mode::Loading => Action::None,
+                Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
+                Mode::BrowseWorktrees => self.handle_key_browse(&key),
+                Mode::SelectBranch => self.handle_key_select_branch(&key),
+                Mode::InputBranch => self.handle_key_input_branch(&key),
+                Mode::Confirming => self.handle_key_confirming(&key),
+            },
             _ => return false,
         };
         self.execute(&action);
@@ -745,6 +928,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        self.last_rows = rows;
         self.render_to(&mut std::io::stdout(), rows, cols);
     }
 }
@@ -755,24 +939,101 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn key(bare: BareKey) -> KeyWithModifier {
-        KeyWithModifier { bare_key: bare, key_modifiers: BTreeSet::new() }
+        KeyWithModifier {
+            bare_key: bare,
+            key_modifiers: BTreeSet::new(),
+        }
     }
 
     fn key_shift(bare: BareKey) -> KeyWithModifier {
         let mut mods = BTreeSet::new();
         mods.insert(KeyModifier::Shift);
-        KeyWithModifier { bare_key: bare, key_modifiers: mods }
+        KeyWithModifier {
+            bare_key: bare,
+            key_modifiers: mods,
+        }
     }
 
     fn state_with_worktrees() -> State {
         let mut s = State::default();
         s.mode = Mode::BrowseWorktrees;
         s.worktrees = vec![
-            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
-            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
-            Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
+            Worktree {
+                dir: "feat-a".into(),
+                branch: "feat-a".into(),
+            },
+            Worktree {
+                dir: "feat-b".into(),
+                branch: "feat-b".into(),
+            },
+            Worktree {
+                dir: "feat-c".into(),
+                branch: "feat-c".into(),
+            },
         ];
-        s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
+        s.tabs = vec![
+            TabInfo {
+                position: 0,
+                name: "feat-a".to_string(),
+                active: true,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+            TabInfo {
+                position: 1,
+                name: "feat-b".to_string(),
+                active: false,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+            TabInfo {
+                position: 2,
+                name: "feat-c".to_string(),
+                active: false,
+                panes_to_hide: 0,
+                is_fullscreen_active: false,
+                is_sync_panes_active: false,
+                are_floating_panes_visible: false,
+                other_focused_clients: vec![],
+                active_swap_layout_name: None,
+                is_swap_layout_dirty: false,
+                viewport_rows: 0,
+                viewport_columns: 0,
+                display_area_rows: 0,
+                display_area_columns: 0,
+                selectable_tiled_panes_count: 0,
+                selectable_floating_panes_count: 0,
+            },
+        ];
+        s.branches = vec![
+            "main".into(),
+            "feat-a".into(),
+            "feat-b".into(),
+            "dev".into(),
+        ];
+        s.recompute_sidebar_items();
         s
     }
 
@@ -831,7 +1092,11 @@ mod tests {
 
     #[test]
     fn input_branch_enter_sanitizes_and_spawns() {
-        let mut s = State { mode: Mode::InputBranch, input_buffer: "claude alerts".into(), ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "claude alerts".into(),
+            ..Default::default()
+        };
         let action = s.handle_key_input_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::Spawn("claude-alerts".into()));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
@@ -940,7 +1205,10 @@ mod tests {
 
     #[test]
     fn browse_jk_noop_on_empty() {
-        let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            ..Default::default()
+        };
         s.handle_key_browse(&key(BareKey::Char('j')));
         assert_eq!(s.selected_index, 0);
         s.handle_key_browse(&key(BareKey::Char('k')));
@@ -948,18 +1216,18 @@ mod tests {
     }
 
     #[test]
-    fn browse_enter_spawns_selected() {
+    fn browse_enter_switches_selected() {
         let mut s = state_with_worktrees();
         s.selected_index = 1;
         let action = s.handle_key_browse(&key(BareKey::Enter));
-        assert_eq!(action, Action::Spawn("feat-b".into()));
-        assert_eq!(s.status_message, "Spawning 'feat-b'...");
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
     }
 
     #[test]
     fn browse_enter_switches_to_existing_tab() {
         let mut s = state_with_worktrees();
         s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
+        s.recompute_sidebar_items();
         s.selected_index = 0; // feat-a has a tab open
         let action = s.handle_key_browse(&key(BareKey::Enter));
         assert_eq!(action, Action::SwitchToTab("feat-a".into()));
@@ -967,7 +1235,10 @@ mod tests {
 
     #[test]
     fn browse_enter_noop_on_empty() {
-        let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            ..Default::default()
+        };
         let action = s.handle_key_browse(&key(BareKey::Enter));
         assert_eq!(action, Action::None);
     }
@@ -996,13 +1267,31 @@ mod tests {
         let mut s = state_with_worktrees();
         s.handle_key_browse(&key(BareKey::Char('d')));
         assert_eq!(s.mode, Mode::Confirming);
+        assert_eq!(s.pending_remove_branch.as_deref(), Some("feat-a"));
     }
 
     #[test]
-    fn browse_d_noop_on_empty() {
-        let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    fn browse_d_errors_on_empty() {
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            ..Default::default()
+        };
         s.handle_key_browse(&key(BareKey::Char('d')));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert!(s.status_is_error);
+        assert_eq!(s.status_message, "No tab selected");
+    }
+
+    #[test]
+    fn browse_d_on_user_tab_shows_error() {
+        let mut s = State::default();
+        s.mode = Mode::BrowseWorktrees;
+        s.tabs = vec![make_tab("scratch", true)];
+        s.recompute_sidebar_items();
+        s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert!(s.status_is_error);
+        assert_eq!(s.status_message, "Not a worktree tab");
     }
 
     #[test]
@@ -1023,6 +1312,18 @@ mod tests {
     fn browse_esc_returns_close() {
         let mut s = state_with_worktrees();
         assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::Close);
+    }
+
+    #[test]
+    fn browse_mouse_click_selects_then_switches() {
+        let mut s = state_with_worktrees();
+        s.last_rows = 20;
+        assert_eq!(s.selected_index, 0);
+        let action_first = s.handle_mouse_browse(&Mouse::LeftClick(4, 0));
+        assert_eq!(action_first, Action::None);
+        assert_eq!(s.selected_index, 1);
+        let action_second = s.handle_mouse_browse(&Mouse::LeftClick(4, 0));
+        assert_eq!(action_second, Action::SwitchToTab("feat-b".into()));
     }
 
     // --- SelectBranch key handler tests ---
@@ -1093,7 +1394,10 @@ mod tests {
 
     #[test]
     fn input_branch_typing() {
-        let mut s = State { mode: Mode::InputBranch, ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            ..Default::default()
+        };
         s.handle_key_input_branch(&key(BareKey::Char('f')));
         s.handle_key_input_branch(&key(BareKey::Char('o')));
         s.handle_key_input_branch(&key(BareKey::Char('o')));
@@ -1102,21 +1406,32 @@ mod tests {
 
     #[test]
     fn input_branch_shift_chars() {
-        let mut s = State { mode: Mode::InputBranch, ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            ..Default::default()
+        };
         s.handle_key_input_branch(&key_shift(BareKey::Char('F')));
         assert_eq!(s.input_buffer, "F");
     }
 
     #[test]
     fn input_branch_backspace() {
-        let mut s = State { mode: Mode::InputBranch, input_buffer: "ab".into(), ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "ab".into(),
+            ..Default::default()
+        };
         s.handle_key_input_branch(&key(BareKey::Backspace));
         assert_eq!(s.input_buffer, "a");
     }
 
     #[test]
     fn input_branch_enter_spawns() {
-        let mut s = State { mode: Mode::InputBranch, input_buffer: "feat/new".into(), ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "feat/new".into(),
+            ..Default::default()
+        };
         let action = s.handle_key_input_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::Spawn("feat/new".into()));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
@@ -1137,7 +1452,11 @@ mod tests {
 
     #[test]
     fn input_branch_enter_noop_on_empty() {
-        let mut s = State { mode: Mode::InputBranch, input_buffer: "  ".into(), ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "  ".into(),
+            ..Default::default()
+        };
         let action = s.handle_key_input_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::None);
         assert_eq!(s.mode, Mode::InputBranch);
@@ -1147,7 +1466,11 @@ mod tests {
 
     #[test]
     fn input_branch_esc_goes_back() {
-        let mut s = State { mode: Mode::InputBranch, input_buffer: "wip".into(), ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "wip".into(),
+            ..Default::default()
+        };
         s.handle_key_input_branch(&key(BareKey::Esc));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
     }
@@ -1158,7 +1481,7 @@ mod tests {
     fn confirm_y_removes() {
         let mut s = state_with_worktrees();
         s.mode = Mode::Confirming;
-        s.selected_index = 1;
+        s.pending_remove_branch = Some("feat-b".into());
         let action = s.handle_key_confirming(&key(BareKey::Char('y')));
         assert_eq!(action, Action::Remove("feat-b".into()));
         assert_eq!(s.status_message, "Removing 'feat-b'...");
@@ -1168,16 +1491,20 @@ mod tests {
     fn confirm_n_cancels() {
         let mut s = state_with_worktrees();
         s.mode = Mode::Confirming;
+        s.pending_remove_branch = Some("feat-a".into());
         s.handle_key_confirming(&key(BareKey::Char('n')));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(s.pending_remove_branch, None);
     }
 
     #[test]
     fn confirm_esc_cancels() {
         let mut s = state_with_worktrees();
         s.mode = Mode::Confirming;
+        s.pending_remove_branch = Some("feat-a".into());
         s.handle_key_confirming(&key(BareKey::Esc));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(s.pending_remove_branch, None);
     }
 
     // --- Command result handler tests ---
@@ -1185,7 +1512,11 @@ mod tests {
     #[test]
     fn git_toplevel_sets_repo() {
         let mut s = State::default();
-        let action = s.handle_git_toplevel(Some(0), b"repo_root=/home/user/myrepo\nrepo_name=myrepo\n", b"");
+        let action = s.handle_git_toplevel(
+            Some(0),
+            b"repo_root=/home/user/myrepo\nrepo_name=myrepo\n",
+            b"",
+        );
         assert_eq!(s.repo_root, "/home/user/myrepo");
         assert_eq!(s.repo_name, "myrepo");
         assert_eq!(s.mode, Mode::BrowseWorktrees);
@@ -1195,7 +1526,11 @@ mod tests {
     #[test]
     fn git_toplevel_parses_by_key() {
         let mut s = State::default();
-        let action = s.handle_git_toplevel(Some(0), b"repo_name=myrepo\nrepo_root=/home/user/myrepo\n", b"");
+        let action = s.handle_git_toplevel(
+            Some(0),
+            b"repo_name=myrepo\nrepo_root=/home/user/myrepo\n",
+            b"",
+        );
         assert_eq!(s.repo_root, "/home/user/myrepo");
         assert_eq!(s.repo_name, "myrepo");
         assert_eq!(action, Action::FetchWorktreesAndBranches);
@@ -1246,6 +1581,7 @@ mod tests {
     fn remove_result_success() {
         let mut s = state_with_worktrees();
         s.mode = Mode::Confirming;
+        s.tabs = vec![make_tab("other-tab", true)];
         let mut ctx = BTreeMap::new();
         ctx.insert("branch".into(), "feat-a".into());
         let action = s.handle_remove_result(Some(0), b"", &ctx);
@@ -1314,7 +1650,10 @@ mod tests {
         assert_eq!(State::tab_name_for_branch("fix-bug"), "fix-bug");
         // Dots and other special chars are stripped (matching zelligent.sh)
         assert_eq!(State::tab_name_for_branch("release/1.2.3"), "release-123");
-        assert_eq!(State::tab_name_for_branch("feat.something"), "featsomething");
+        assert_eq!(
+            State::tab_name_for_branch("feat.something"),
+            "featsomething"
+        );
     }
 
     #[test]
@@ -1346,54 +1685,80 @@ mod tests {
             make_tab("feat-b", true),
             make_tab("feat-c", false),
         ];
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
+        s.handle_list_worktrees(
+            Some(0),
+            b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n",
+            b"",
+        );
         assert_eq!(s.selected_index, 1);
-        assert!(s.has_loaded);
     }
 
     #[test]
-    fn list_worktrees_auto_selects_active_tab_with_slash_branch() {
+    fn list_worktrees_matches_branch_when_tab_name_differs() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feature-cool", true)];
         s.handle_list_worktrees(Some(0), b"main\tmain\nfeature-cool\tfeature/cool\n", b"");
-        assert_eq!(s.selected_index, 1);
+        assert_eq!(s.selected_index, 0);
+        assert_eq!(
+            s.sidebar_items[0].matched_branch.as_deref(),
+            Some("feature/cool")
+        );
     }
 
     #[test]
-    fn list_worktrees_does_not_auto_select_on_refresh() {
+    fn list_worktrees_preserves_selected_tab_name_across_recompute() {
         let mut s = State::default();
-        s.has_loaded = true;
-        s.tabs = vec![make_tab("feat-a", true)];
-        s.selected_index = 2;
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
-        assert_eq!(s.selected_index, 2);
+        s.tabs = vec![
+            make_tab("tab-a", false),
+            make_tab("tab-b", true),
+            make_tab("tab-c", false),
+        ];
+        s.worktrees = vec![
+            Worktree {
+                dir: "tab-a".into(),
+                branch: "tab-a".into(),
+            },
+            Worktree {
+                dir: "tab-b".into(),
+                branch: "tab-b".into(),
+            },
+        ];
+        s.recompute_sidebar_items();
+        s.selected_index = 2; // tab-c
+        s.tabs = vec![
+            make_tab("tab-c", false),
+            make_tab("tab-a", false),
+            make_tab("tab-b", true),
+        ];
+        s.handle_list_worktrees(Some(0), b"tab-a\ttab-a\ntab-b\ttab-b\n", b"");
+        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.sidebar_items[0].tab_name, "tab-c");
     }
 
     #[test]
-    fn list_worktrees_defers_auto_select_when_tabs_not_yet_available() {
+    fn list_worktrees_with_no_tabs_keeps_sidebar_empty() {
         let mut s = State::default();
         s.selected_index = 0;
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
-        assert!(!s.has_loaded);
         assert_eq!(s.selected_index, 0);
+        assert!(s.sidebar_items.is_empty());
     }
 
     #[test]
-    fn tab_update_triggers_auto_select_when_worktrees_already_loaded() {
+    fn tab_update_recomputes_sidebar_items() {
         let mut s = State::default();
         s.worktrees = vec![
-            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
-            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+            Worktree {
+                dir: "feat-a".into(),
+                branch: "feat-a".into(),
+            },
+            Worktree {
+                dir: "feat-b".into(),
+                branch: "feat-b".into(),
+            },
         ];
-        let tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
-        s.tabs = tabs;
-        if !s.has_loaded && !s.worktrees.is_empty() {
-            s.has_loaded = true;
-            if let Some(idx) = s.find_worktree_for_active_tab() {
-                s.selected_index = idx;
-            }
-        }
-        assert!(s.has_loaded);
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
+        s.recompute_sidebar_items();
         assert_eq!(s.selected_index, 1);
     }
 
@@ -1409,7 +1774,6 @@ mod tests {
     #[test]
     fn list_worktrees_clamps_on_refresh_when_out_of_range() {
         let mut s = State::default();
-        s.has_loaded = true;
         s.selected_index = 5;
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
         assert_eq!(s.selected_index, 0);
@@ -1419,8 +1783,44 @@ mod tests {
     fn list_worktrees_ambiguous_tab_name_selects_first_match() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-cool", true)];
-        s.handle_list_worktrees(Some(0), b"feat-cool\tfeat/cool\nfeat-cool\tfeat-cool\n", b"");
+        s.handle_list_worktrees(
+            Some(0),
+            b"feat-cool\tfeat/cool\nfeat-cool\tfeat-cool\n",
+            b"",
+        );
         assert_eq!(s.selected_index, 0);
+        assert_eq!(
+            s.sidebar_items[0].matched_branch.as_deref(),
+            Some("feat/cool")
+        );
+    }
+
+    #[test]
+    fn list_worktrees_duplicate_tab_names_get_disambiguated_display_names() {
+        let mut s = State::default();
+        s.tabs = vec![
+            make_tab("feature-b", true),
+            make_tab("feature-b", false),
+            make_tab("feature-c", false),
+        ];
+        s.handle_list_worktrees(
+            Some(0),
+            b"feature-b\tfeature-b\nfeature-c\tfeature-c\n",
+            b"",
+        );
+        assert_eq!(s.sidebar_items[0].display_name, "feature-b (1)");
+        assert_eq!(s.sidebar_items[1].display_name, "feature-b (2)");
+        assert_eq!(s.sidebar_items[2].display_name, "feature-c");
+    }
+
+    #[test]
+    fn list_worktrees_marks_unmatched_tabs_as_user_tabs() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("scratch", true)];
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        assert_eq!(s.sidebar_items.len(), 1);
+        assert_eq!(s.sidebar_items[0].tab_name, "scratch");
+        assert_eq!(s.sidebar_items[0].matched_branch, None);
     }
 
     #[test]
@@ -1446,7 +1846,8 @@ mod tests {
 
     #[test]
     fn find_worktree_for_active_tab_empty_tabs() {
-        let s = state_with_worktrees();
+        let mut s = state_with_worktrees();
+        s.tabs.clear();
         assert_eq!(s.find_worktree_for_active_tab(), None);
     }
 
@@ -1485,7 +1886,11 @@ mod tests {
 
     #[test]
     fn input_branch_esc_clears_buffer() {
-        let mut s = State { mode: Mode::InputBranch, input_buffer: "wip".into(), ..Default::default() };
+        let mut s = State {
+            mode: Mode::InputBranch,
+            input_buffer: "wip".into(),
+            ..Default::default()
+        };
         s.handle_key_input_branch(&key(BareKey::Esc));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
         assert!(s.input_buffer.is_empty());
@@ -1503,7 +1908,10 @@ mod tests {
 
     #[test]
     fn not_git_repo_d_returns_dump_layout() {
-        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let mut s = State {
+            mode: Mode::NotGitRepo,
+            ..Default::default()
+        };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('d')));
         assert_eq!(action, Action::DumpLayout);
     }
@@ -1521,7 +1929,10 @@ mod tests {
 
     #[test]
     fn not_git_repo_x_without_session_shows_error() {
-        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let mut s = State {
+            mode: Mode::NotGitRepo,
+            ..Default::default()
+        };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('x')));
         assert_eq!(action, Action::None);
         assert!(s.status_is_error);
@@ -1530,14 +1941,20 @@ mod tests {
 
     #[test]
     fn not_git_repo_q_returns_close() {
-        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let mut s = State {
+            mode: Mode::NotGitRepo,
+            ..Default::default()
+        };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('q')));
         assert_eq!(action, Action::Close);
     }
 
     #[test]
     fn not_git_repo_esc_returns_close() {
-        let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
+        let mut s = State {
+            mode: Mode::NotGitRepo,
+            ..Default::default()
+        };
         let action = s.handle_key_not_git_repo(&key(BareKey::Esc));
         assert_eq!(action, Action::Close);
     }
@@ -1561,7 +1978,10 @@ mod tests {
     #[test]
     fn pipe_unknown_name_ignored() {
         let mut s = State::default();
-        let action = s.handle_pipe(&pipe_msg("other-plugin", &[("tab", "feat-a"), ("event", "Stop")]));
+        let action = s.handle_pipe(&pipe_msg(
+            "other-plugin",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
         assert_eq!(action, Action::None);
         assert!(s.agent_statuses.is_empty());
     }
@@ -1577,7 +1997,10 @@ mod tests {
     fn pipe_start_sets_working_no_notify() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Start")]));
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
     }
@@ -1586,7 +2009,10 @@ mod tests {
     fn pipe_user_prompt_submit_sets_working() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "UserPromptSubmit")]));
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "UserPromptSubmit")],
+        ));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
     }
@@ -1595,17 +2021,38 @@ mod tests {
     fn pipe_permission_request_sets_needs_input_and_notifies() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "PermissionRequest")]));
-        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::NeedsInput });
-        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::NeedsInput));
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "PermissionRequest")],
+        ));
+        assert_eq!(
+            action,
+            Action::Notify {
+                tab_name: "feat-a".into(),
+                status: AgentStatus::NeedsInput
+            }
+        );
+        assert_eq!(
+            s.agent_statuses.get("feat-a"),
+            Some(&AgentStatus::NeedsInput)
+        );
     }
 
     #[test]
     fn pipe_stop_sets_done_and_notifies() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
-        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::Done });
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
+        assert_eq!(
+            action,
+            Action::Notify {
+                tab_name: "feat-a".into(),
+                status: AgentStatus::Done
+            }
+        );
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
     }
 
@@ -1613,8 +2060,17 @@ mod tests {
     fn pipe_active_tab_still_notifies() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", true)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
-        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::Done });
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
+        assert_eq!(
+            action,
+            Action::Notify {
+                tab_name: "feat-a".into(),
+                status: AgentStatus::Done
+            }
+        );
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
     }
 
@@ -1622,17 +2078,32 @@ mod tests {
     fn pipe_different_tab_active_notifies() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-b", true), make_tab("feat-a", false)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
-        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::Done });
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
+        assert_eq!(
+            action,
+            Action::Notify {
+                tab_name: "feat-a".into(),
+                status: AgentStatus::Done
+            }
+        );
     }
 
     #[test]
     fn pipe_status_overwrite() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
-        s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Start")]));
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
-        s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "Stop")]));
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
     }
 
@@ -1640,7 +2111,10 @@ mod tests {
     fn pipe_unknown_tab_ignored() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-b", false)];
-        let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "unknown-tab"), ("event", "Stop")]));
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "unknown-tab"), ("event", "Stop")],
+        ));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("unknown-tab"), None);
     }

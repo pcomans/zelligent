@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use zelligent_plugin::{Mode, State, Worktree};
+use zelligent_plugin::{Mode, State};
 use zellij_tile::prelude::*;
 
 #[allow(dead_code)]
@@ -40,7 +40,10 @@ pub fn make_tab_info(name: &str, active: bool) -> TabInfo {
 }
 
 pub fn key(bare: BareKey) -> KeyWithModifier {
-    KeyWithModifier { bare_key: bare, key_modifiers: BTreeSet::new() }
+    KeyWithModifier {
+        bare_key: bare,
+        key_modifiers: BTreeSet::new(),
+    }
 }
 
 pub fn render_to_string(state: &State, rows: usize, cols: usize) -> String {
@@ -54,11 +57,21 @@ pub fn render_to_string(state: &State, rows: usize, cols: usize) -> String {
 pub fn state_with_worktrees() -> State {
     let mut s = State::default();
     s.mode = Mode::BrowseWorktrees;
-    s.worktrees = vec![
-        Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
-        Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
-        Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
+    s.tabs = vec![
+        make_tab_info("feat-a", true),
+        make_tab_info("feat-b", false),
+        make_tab_info("feat-c", false),
     ];
-    s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
+    s.handle_list_worktrees(
+        Some(0),
+        b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n",
+        b"",
+    );
+    s.branches = vec![
+        "main".into(),
+        "feat-a".into(),
+        "feat-b".into(),
+        "dev".into(),
+    ];
     s
 }
