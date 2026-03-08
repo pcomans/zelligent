@@ -1,6 +1,6 @@
 mod common;
 
-use common::{key, render_to_string, state_with_worktrees};
+use common::{key, make_tab_info, render_to_string, state_with_worktrees};
 use zelligent_plugin::{AgentStatus, Mode, State};
 use zellij_tile::prelude::*;
 
@@ -113,23 +113,10 @@ fn render_worktree_list_scrolling() {
     let mut s = State {
         mode: Mode::BrowseWorktrees,
         tabs: (0..20)
-            .map(|i| TabInfo {
-                position: i,
-                name: format!("branch-{i}"),
-                active: i == 0,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
+            .map(|i| {
+                let mut tab = make_tab_info(&format!("branch-{i}"), i == 0);
+                tab.position = i;
+                tab
             })
             .collect(),
         selected_index: 15,
@@ -151,60 +138,9 @@ fn render_browse_mixed_dir_branch_names() {
         mode: Mode::BrowseWorktrees,
         repo_name: "myrepo".into(),
         tabs: vec![
-            TabInfo {
-                position: 0,
-                name: "plugin-snapshot-tests".into(),
-                active: true,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
-            TabInfo {
-                position: 1,
-                name: "competition".into(),
-                active: false,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
-            TabInfo {
-                position: 2,
-                name: "feature-ding-dong".into(),
-                active: false,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
+            make_tab_info("plugin-snapshot-tests", true),
+            make_tab_info("competition", false),
+            make_tab_info("feat-ding-dong", false),
         ],
         ..Default::default()
     };
@@ -222,42 +158,8 @@ fn render_browse_clips_labels_to_viewport_width() {
         mode: Mode::BrowseWorktrees,
         repo_name: "myrepo".into(),
         tabs: vec![
-            TabInfo {
-                position: 0,
-                name: "feature-super-long-branch-name-for-viewport".into(),
-                active: true,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
-            TabInfo {
-                position: 1,
-                name: "manual-tab-with-a-very-long-name".into(),
-                active: false,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
+            make_tab_info("feature-super-long-branch-name-for-viewport", true),
+            make_tab_info("manual-tab-with-a-very-long-name", false),
         ],
         ..Default::default()
     };

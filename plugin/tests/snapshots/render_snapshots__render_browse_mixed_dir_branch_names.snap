@@ -8,8 +8,8 @@ expression: "render_to_string(&s, 20, 80)"
   ▌[7m[2m    worktree tab                                                             [0m[0m
      [36m⎇[0m competition                                                              
    [2m    worktree tab                                                             [0m
-     [2m□[0m feature-ding-dong                                                        
-   [2m    user tab                                                                 [0m
+     [36m⎇[0m feat-ding-dong                                                           
+   [2m    branch: feat/ding-dong                                                   [0m
 
 
 
