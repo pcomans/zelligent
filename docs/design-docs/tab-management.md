@@ -4,7 +4,7 @@
 
 The CLI creates tabs using `zellij action new-tab --layout FILE --name NAME`. The layout must be a flat pane list (no `tab { }` wrapper) because `new-tab` provides its own tab context.
 
-Important: `new-tab --layout` does NOT inherit `default_tab_template`. Tab-bar and status-bar plugins must be included explicitly in the layout file.
+Important: `new-tab --layout` does NOT inherit `default_tab_template`. Any desired plugins/chrome (sidebar plugin, status-bar, tab-bar, etc.) must be included explicitly in the layout file.
 
 ## Tab naming
 
@@ -44,7 +44,7 @@ There is no plugin API to obtain a tab's internal index. The only reliable ident
 
 ## Plugin tab operations
 
-The plugin (Ctrl-Y floating UI) provides:
-- **Switch to tab** — `go_to_tab_name(worktree_tab_name)` then closes the plugin
+The plugin (persistent sidebar in spawned tabs, Ctrl-Y floating fallback elsewhere) provides:
+- **Switch to tab** — `go_to_tab_name(tab_name)`
 - **Close tab** — uses the name-based workaround above, then refreshes the worktree list
 - **Session nuke** — `kill_sessions` (terminates the plugin's own process, nothing after it runs). Note: this only kills the session, it does NOT clean up resurrection cache or stale processes like `zelligent nuke` does. The session may resurrect on next attach.

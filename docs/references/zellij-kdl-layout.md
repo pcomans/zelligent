@@ -15,17 +15,21 @@ A `tab { }` wrapper causes session-level replacement, breaking existing tabs and
 
 ## `new-tab` does not inherit `default_tab_template`
 
-Tab-bar and status-bar plugins must be included explicitly in the layout file. Every zelligent layout includes:
+Any desired chrome/plugins must be included explicitly in the layout file. The built-in zelligent spawned-tab layout includes:
 
 ```kdl
-pane size=1 borderless=true {
-    plugin location="zellij:tab-bar"
+pane split_direction="vertical" {
+    pane size="24%" {
+        plugin location="file:/.../zelligent-plugin.wasm"
+    }
+    // agent + lazygit panes
 }
-// ... content panes ...
 pane size=1 borderless=true {
     plugin location="zellij:status-bar"
 }
 ```
+
+Note: zelligent intentionally omits `zellij:tab-bar` from spawned-tab layouts; the sidebar plugin is the primary navigator.
 
 ## Template variables
 

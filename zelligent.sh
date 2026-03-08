@@ -96,24 +96,17 @@ if [ "$1" = "doctor" ]; then
   # 2. Find the Zellij plugin
   PLUGIN_PATH=""
   PLUGIN_MODE=""
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    if [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-      echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
-      ERRORS=1
-    else
-      PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
+  if PLUGIN_PATH=$(resolve_plugin_path); then
+    if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
       PLUGIN_MODE="custom"
-    fi
-  else
-    HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
-    DEV_PLUGIN="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
-    if [ -f "$HOMEBREW_PLUGIN" ]; then
-      PLUGIN_PATH="$HOMEBREW_PLUGIN"
-      PLUGIN_MODE="homebrew"
-    elif [ -f "$DEV_PLUGIN" ]; then
-      PLUGIN_PATH="$DEV_PLUGIN"
+    elif [ "$PLUGIN_PATH" = "$HOME/.local/share/zelligent/zelligent-plugin.wasm" ]; then
       PLUGIN_MODE="dev"
+    else
+      PLUGIN_MODE="homebrew"
     fi
+  elif [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
+    ERRORS=1
   fi
 
   if [ -z "$PLUGIN_PATH" ]; then
@@ -337,10 +330,12 @@ fi
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
   # Check plugin is available
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ] && [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-    echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
-    exit 1
-  elif [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    if ! resolve_plugin_path >/dev/null; then
+      echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
+      exit 1
+    fi
+  elif ! command -v zelligent &>/dev/null; then
     echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
     exit 1
   fi

@@ -8,7 +8,7 @@ A Bash script installed as `zelligent`. Handles:
 
 - **Session management** — creates/attaches Zellij sessions named after the git repo (`basename` of repo root)
 - **Worktree lifecycle** — `spawn` creates git worktrees under `~/.zelligent/worktrees/<repo>/`, `remove` cleans them up
-- **Layout generation** — builds KDL layout files for Zellij tabs (agent pane + lazygit pane + chrome)
+- **Layout generation** — builds KDL layout files for spawned tabs (persistent sidebar plugin + agent/lazygit split + status-bar)
 - **Doctor** — `zelligent doctor` sets up Zellij config, keybindings, plugin permissions, and Claude Code plugin
 - **Nuke** — `zelligent nuke` force-deletes the session, its server processes, and resurrection cache
 
@@ -16,11 +16,11 @@ The CLI resolves the main repo root even when run from a worktree (`git rev-pars
 
 ## Zellij WASM Plugin (`plugin/`)
 
-A Rust plugin compiled to `wasm32-wasip1`. Provides a floating UI inside Zellij (launched via Ctrl-Y keybinding). Handles:
+A Rust plugin compiled to `wasm32-wasip1`. It runs as a persistent sidebar in zelligent-managed spawned tabs, and can also be opened via Ctrl-Y in other tabs/sessions. Handles:
 
-- **Worktree browsing** — lists worktrees, lets you switch tabs or spawn/remove worktrees
+- **Session tab browsing** — lists all open session tabs and enriches rows when a tab maps to a zelligent-managed worktree
 - **Branch selection** — browse existing branches or type a new branch name
-- **Tab management** — switches to worktree tabs, closes tabs (name-based, not index-based)
+- **Tab management** — switches tabs and removes matched worktrees (name-based, not index-based)
 - **Agent status** — reads CLI pipe messages to show agent status (idle/working/needs-input/done) and sends OS notifications. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md).
 - **Session awareness** — gets session name via `std::env::var("ZELLIJ_SESSION_NAME")` (WASI inherits host env vars)
 
@@ -41,11 +41,10 @@ A Rust plugin compiled to `wasm32-wasip1`. Provides a floating UI inside Zellij 
 ```
 User runs `zelligent spawn feature/foo claude`
   -> CLI creates git worktree at ~/.zelligent/worktrees/<repo>/feature/foo
-  -> CLI generates KDL layout (agent pane + lazygit pane)
+  -> CLI generates KDL layout (sidebar plugin + agent pane + lazygit pane + status-bar)
   -> CLI calls `zellij action new-tab --layout <file> --name feature-foo`
 
-User presses Ctrl-Y inside Zellij
-  -> Zellij launches the WASM plugin as a floating pane
+Plugin starts (embedded sidebar or Ctrl-Y floating launch)
   -> Plugin calls `zelligent list-worktrees` and `zelligent list-branches` via RunCommand
   -> Plugin calls `zelligent spawn/remove` via RunCommand when user selects an action
 ```
