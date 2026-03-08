@@ -88,7 +88,6 @@ pub struct State {
     pub initial_cwd: PathBuf,
     pub session_name: Option<String>,
     pub tabs: Vec<TabInfo>,
-    pub has_loaded: bool,
     pub sidebar_items: Vec<SidebarItem>,
     pub pending_remove_branch: Option<String>,
     /// Agent status per tab name (sanitized branch name).
@@ -228,9 +227,11 @@ impl State {
 
         if self.sidebar_items.is_empty() {
             self.selected_index = 0;
+            self.validate_pending_remove_branch();
             return;
         }
 
+        let mut restored_selection = false;
         if let Some(prev) = prev_selected_tab {
             if let Some(idx) = self
                 .sidebar_items
@@ -238,38 +239,65 @@ impl State {
                 .position(|item| item.tab_name == prev)
             {
                 self.selected_index = idx;
-                return;
+                restored_selection = true;
             }
         }
 
-        if let Some(active_tab) = self.tabs.iter().find(|t| t.active) {
-            if let Some(idx) = self
-                .sidebar_items
-                .iter()
-                .position(|item| item.tab_name == active_tab.name)
-            {
-                self.selected_index = idx;
-                return;
+        if !restored_selection {
+            if let Some(active_tab) = self.tabs.iter().find(|t| t.active) {
+                if let Some(idx) = self
+                    .sidebar_items
+                    .iter()
+                    .position(|item| item.tab_name == active_tab.name)
+                {
+                    self.selected_index = idx;
+                    restored_selection = true;
+                }
             }
         }
 
-        if self.selected_index >= self.sidebar_items.len() {
+        if !restored_selection && self.selected_index >= self.sidebar_items.len() {
             self.selected_index = self.sidebar_items.len() - 1;
+        }
+
+        self.validate_pending_remove_branch();
+    }
+
+    fn validate_pending_remove_branch(&mut self) {
+        let Some(branch) = self.pending_remove_branch.as_ref() else {
+            return;
+        };
+        let still_exists = self.worktrees.iter().any(|wt| wt.branch == *branch);
+        if still_exists {
+            return;
+        }
+        self.pending_remove_branch = None;
+        if matches!(self.mode, Mode::Confirming) {
+            self.mode = Mode::BrowseWorktrees;
+            self.status_message = "Remove canceled: worktree no longer exists".to_string();
+            self.status_is_error = false;
         }
     }
 
     fn visible_sidebar_window(&self, reserved_rows: usize) -> (usize, usize) {
+        if self.sidebar_items.is_empty() || self.last_rows == 0 {
+            return (0, 0);
+        }
+        let selected_index = self
+            .selected_index
+            .min(self.sidebar_items.len().saturating_sub(1));
         let max_visible = rows_to_visible_items(self.last_rows, reserved_rows);
-        let start = if self.selected_index >= max_visible {
-            self.selected_index - max_visible + 1
+        let start = if selected_index >= max_visible {
+            selected_index - max_visible + 1
         } else {
             0
         };
-        (start, max_visible.min(self.sidebar_items.len()))
+        let end = (start + max_visible).min(self.sidebar_items.len());
+        (start, end.saturating_sub(start))
     }
 
     fn sidebar_index_at_line(&self, line: usize) -> Option<usize> {
-        if self.sidebar_items.is_empty() {
+        if self.sidebar_items.is_empty() || self.last_rows == 0 {
             return None;
         }
         // Header is line 0, then one blank line before the first row.
@@ -283,7 +311,8 @@ impl State {
         if relative >= visible_len {
             return None;
         }
-        Some(start + relative)
+        let index = start + relative;
+        (index < self.sidebar_items.len()).then_some(index)
     }
 
     fn selected_sidebar_item(&self) -> Option<&SidebarItem> {
@@ -629,6 +658,9 @@ impl State {
     }
 
     pub fn handle_mouse_browse(&mut self, mouse: &Mouse) -> Action {
+        if self.last_rows == 0 {
+            return Action::None;
+        }
         match mouse {
             Mouse::ScrollDown(lines) => {
                 self.selected_index = wrap_navigate(
@@ -954,6 +986,27 @@ mod tests {
         }
     }
 
+    fn make_tab(name: &str, active: bool) -> TabInfo {
+        TabInfo {
+            position: 0,
+            name: name.to_string(),
+            active,
+            panes_to_hide: 0,
+            is_fullscreen_active: false,
+            is_sync_panes_active: false,
+            are_floating_panes_visible: false,
+            other_focused_clients: vec![],
+            active_swap_layout_name: None,
+            is_swap_layout_dirty: false,
+            viewport_rows: 0,
+            viewport_columns: 0,
+            display_area_rows: 0,
+            display_area_columns: 0,
+            selectable_tiled_panes_count: 0,
+            selectable_floating_panes_count: 0,
+        }
+    }
+
     fn state_with_worktrees() -> State {
         let mut s = State::default();
         s.mode = Mode::BrowseWorktrees;
@@ -972,60 +1025,9 @@ mod tests {
             },
         ];
         s.tabs = vec![
-            TabInfo {
-                position: 0,
-                name: "feat-a".to_string(),
-                active: true,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
-            TabInfo {
-                position: 1,
-                name: "feat-b".to_string(),
-                active: false,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
-            TabInfo {
-                position: 2,
-                name: "feat-c".to_string(),
-                active: false,
-                panes_to_hide: 0,
-                is_fullscreen_active: false,
-                is_sync_panes_active: false,
-                are_floating_panes_visible: false,
-                other_focused_clients: vec![],
-                active_swap_layout_name: None,
-                is_swap_layout_dirty: false,
-                viewport_rows: 0,
-                viewport_columns: 0,
-                display_area_rows: 0,
-                display_area_columns: 0,
-                selectable_tiled_panes_count: 0,
-                selectable_floating_panes_count: 0,
-            },
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
         ];
         s.branches = vec![
             "main".into(),
@@ -1326,6 +1328,31 @@ mod tests {
         assert_eq!(action_second, Action::SwitchToTab("feat-b".into()));
     }
 
+    #[test]
+    fn browse_mouse_click_ignores_rows_outside_visible_tail_window() {
+        let mut s = State::default();
+        s.mode = Mode::BrowseWorktrees;
+        s.tabs = (0..20)
+            .map(|i| make_tab(&format!("tab-{i}"), i == 19))
+            .collect();
+        s.recompute_sidebar_items();
+        s.selected_index = 19;
+        s.last_rows = 10; // visible items = 2, showing indices 18..=19
+
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(8, 0));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.selected_index, 19);
+    }
+
+    #[test]
+    fn browse_mouse_click_before_first_render_is_ignored() {
+        let mut s = state_with_worktrees();
+        assert_eq!(s.last_rows, 0);
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 0));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.selected_index, 0);
+    }
+
     // --- SelectBranch key handler tests ---
 
     #[test]
@@ -1507,6 +1534,31 @@ mod tests {
         assert_eq!(s.pending_remove_branch, None);
     }
 
+    #[test]
+    fn recompute_cancels_confirm_when_pending_branch_disappears() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.pending_remove_branch = Some("missing".into());
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(s.pending_remove_branch, None);
+        assert_eq!(
+            s.status_message,
+            "Remove canceled: worktree no longer exists"
+        );
+        assert!(!s.status_is_error);
+    }
+
+    #[test]
+    fn recompute_keeps_confirm_when_pending_branch_still_exists() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.pending_remove_branch = Some("feat-a".into());
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
+        assert_eq!(s.mode, Mode::Confirming);
+        assert_eq!(s.pending_remove_branch.as_deref(), Some("feat-a"));
+    }
+
     // --- Command result handler tests ---
 
     #[test]
@@ -1620,27 +1672,6 @@ mod tests {
         assert!(s.status_message.contains("uncommitted changes"));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
         assert_eq!(action, Action::Refresh);
-    }
-
-    fn make_tab(name: &str, active: bool) -> TabInfo {
-        TabInfo {
-            position: 0,
-            name: name.to_string(),
-            active,
-            panes_to_hide: 0,
-            is_fullscreen_active: false,
-            is_sync_panes_active: false,
-            are_floating_panes_visible: false,
-            other_focused_clients: vec![],
-            active_swap_layout_name: None,
-            is_swap_layout_dirty: false,
-            viewport_rows: 0,
-            viewport_columns: 0,
-            display_area_rows: 0,
-            display_area_columns: 0,
-            selectable_tiled_panes_count: 0,
-            selectable_floating_panes_count: 0,
-        }
     }
 
     #[test]

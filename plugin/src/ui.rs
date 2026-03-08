@@ -10,7 +10,7 @@ pub const YELLOW: &str = "\x1b[33m";
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::{AgentStatus, Mode, SidebarItem};
 
@@ -53,22 +53,70 @@ fn clip_to_width(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
+
+    fn consume_ansi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
+        out.push(chars.next().unwrap_or('\x1b'));
+        if !matches!(chars.peek(), Some('[')) {
+            return;
+        }
+        out.push(chars.next().unwrap());
+        for c in chars.by_ref() {
+            out.push(c);
+            if ('@'..='~').contains(&c) {
+                break;
+            }
+        }
+    }
+
     let mut out = String::new();
     let mut used = 0usize;
-    for c in text.chars() {
+    let mut chars = text.chars().peekable();
+    let mut truncated = false;
+    while let Some(c) = chars.peek().copied() {
+        if c == '\x1b' {
+            consume_ansi(&mut chars, &mut out);
+            continue;
+        }
+        let c = chars.next().unwrap();
         let char_width = UnicodeWidthChar::width(c).unwrap_or(0);
         if used + char_width > max_chars {
+            truncated = true;
             break;
         }
         out.push(c);
         used += char_width;
     }
+    if truncated && out.contains('\x1b') && !out.ends_with(RESET) {
+        out.push_str(RESET);
+    }
     out
+}
+
+fn visible_width(text: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.peek().copied() {
+        if c == '\x1b' {
+            chars.next();
+            if matches!(chars.peek(), Some('[')) {
+                chars.next();
+                for csi in chars.by_ref() {
+                    if ('@'..='~').contains(&csi) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        let c = chars.next().unwrap();
+        width += UnicodeWidthChar::width(c).unwrap_or(0);
+    }
+    width
 }
 
 fn fit_text(text: &str, width: usize) -> String {
     let truncated = clip_to_width(text, width);
-    let pad = width.saturating_sub(UnicodeWidthStr::width(truncated.as_str()));
+    let pad = width.saturating_sub(visible_width(truncated.as_str()));
     format!("{truncated}{}", " ".repeat(pad))
 }
 
@@ -280,7 +328,7 @@ pub fn render_status_strip(w: &mut impl Write, message: &str, is_error: bool, co
 
 #[cfg(test)]
 mod tests {
-    use super::{clip_to_width, fit_text};
+    use super::{clip_to_width, fit_text, visible_width, CYAN, RESET};
 
     #[test]
     fn clip_to_width_respects_ascii_width() {
@@ -296,5 +344,21 @@ mod tests {
     fn fit_text_pads_to_requested_width() {
         let fitted = fit_text("abc", 6);
         assert_eq!(fitted, "abc   ");
+    }
+
+    #[test]
+    fn fit_text_ignores_ansi_sequences_for_padding() {
+        let styled = format!("{CYAN}abc{RESET}");
+        let fitted = fit_text(&styled, 6);
+        assert_eq!(visible_width(&fitted), 6);
+    }
+
+    #[test]
+    fn clip_to_width_preserves_ansi_sequence_integrity() {
+        let styled = format!("{CYAN}abcdef{RESET}");
+        let clipped = clip_to_width(&styled, 3);
+        assert!(clipped.contains(CYAN));
+        assert!(clipped.contains(RESET));
+        assert_eq!(visible_width(&clipped), 3);
     }
 }
