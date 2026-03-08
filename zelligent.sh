@@ -28,6 +28,34 @@ zellij_list_sessions() {
   fi
 }
 
+# Resolve the zelligent WASM plugin path, honoring explicit overrides first.
+resolve_plugin_path() {
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    [ -f "$ZELLIGENT_PLUGIN_SRC" ] || return 1
+    printf '%s\n' "$ZELLIGENT_PLUGIN_SRC"
+    return 0
+  fi
+
+  local zelligent_bin zelligent_prefix homebrew_plugin dev_plugin
+  zelligent_bin=$(command -v zelligent 2>/dev/null || true)
+  if [ -n "$zelligent_bin" ]; then
+    zelligent_prefix=$(dirname "$(dirname "$zelligent_bin")")
+    homebrew_plugin="$zelligent_prefix/share/zelligent/zelligent-plugin.wasm"
+    if [ -f "$homebrew_plugin" ]; then
+      printf '%s\n' "$homebrew_plugin"
+      return 0
+    fi
+  fi
+
+  dev_plugin="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
+  if [ -f "$dev_plugin" ]; then
+    printf '%s\n' "$dev_plugin"
+    return 0
+  fi
+
+  return 1
+}
+
 # --- Commands that do not require a git repo ---
 
 usage() {
@@ -68,24 +96,17 @@ if [ "$1" = "doctor" ]; then
   # 2. Find the Zellij plugin
   PLUGIN_PATH=""
   PLUGIN_MODE=""
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    if [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-      echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
-      ERRORS=1
-    else
-      PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
+  if PLUGIN_PATH=$(resolve_plugin_path); then
+    if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
       PLUGIN_MODE="custom"
-    fi
-  else
-    HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
-    DEV_PLUGIN="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
-    if [ -f "$HOMEBREW_PLUGIN" ]; then
-      PLUGIN_PATH="$HOMEBREW_PLUGIN"
-      PLUGIN_MODE="homebrew"
-    elif [ -f "$DEV_PLUGIN" ]; then
-      PLUGIN_PATH="$DEV_PLUGIN"
+    elif [ "$PLUGIN_PATH" = "$HOME/.local/share/zelligent/zelligent-plugin.wasm" ]; then
       PLUGIN_MODE="dev"
+    else
+      PLUGIN_MODE="homebrew"
     fi
+  elif [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
+    ERRORS=1
   fi
 
   if [ -z "$PLUGIN_PATH" ]; then
@@ -309,10 +330,12 @@ fi
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
   # Check plugin is available
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ] && [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-    echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
-    exit 1
-  elif [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    if ! resolve_plugin_path >/dev/null; then
+      echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
+      exit 1
+    fi
+  elif ! command -v zelligent &>/dev/null; then
     echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
     exit 1
   fi
@@ -509,15 +532,38 @@ else
         }"
 fi
 
+PLUGIN_PATH_LAYOUT=""
+PLUGIN_PATH_LAYOUT_KDL=""
+ZELLIGENT_PATH_CMD=""
+ZELLIGENT_PATH_CMD_KDL=""
+if [ -z "$LAYOUT_TEMPLATE" ]; then
+  if ! PLUGIN_PATH_LAYOUT=$(resolve_plugin_path); then
+    echo "❌ Could not find zelligent plugin (.wasm)." >&2
+    echo "   Install/reinstall with: bash dev-install.sh" >&2
+    exit 1
+  fi
+  PLUGIN_PATH_LAYOUT_KDL="${PLUGIN_PATH_LAYOUT//\\/\\\\}"
+  PLUGIN_PATH_LAYOUT_KDL="${PLUGIN_PATH_LAYOUT_KDL//\"/\\\"}"
+
+  ZELLIGENT_PATH_CMD=$(command -v zelligent 2>/dev/null || echo "$0")
+  ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD//\\/\\\\}"
+  ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD_KDL//\"/\\\"}"
+fi
+
 # Pane content shared by both layouts
 pane_content() {
   cat <<EOF
-    pane size=1 borderless=true {
-        plugin location="zellij:tab-bar"
-    }
     pane split_direction="vertical" {
-        $AGENT_PANE
-        pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+        pane size="24%" {
+            plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
+                zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                agent_cmd "$AGENT_CMD_KDL"
+            }
+        }
+        pane split_direction="horizontal" {
+            $AGENT_PANE
+            pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+        }
     }
     pane size=1 borderless=true {
         plugin location="zellij:status-bar"

@@ -1,7 +1,7 @@
 mod common;
 
-use common::{key, render_to_string, state_with_worktrees};
-use zelligent_plugin::{AgentStatus, Mode, State, Worktree};
+use common::{key, make_tab_info, render_to_string, state_with_worktrees};
+use zelligent_plugin::{AgentStatus, Mode, State};
 use zellij_tile::prelude::*;
 
 fn state_with_branches() -> State {
@@ -43,7 +43,10 @@ fn render_browse_with_worktrees() {
 
 #[test]
 fn render_browse_empty() {
-    let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        ..Default::default()
+    };
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
@@ -80,7 +83,10 @@ fn render_select_branch_empty() {
 
 #[test]
 fn render_input_branch_empty() {
-    let s = State { mode: Mode::InputBranch, ..Default::default() };
+    let s = State {
+        mode: Mode::InputBranch,
+        ..Default::default()
+    };
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
@@ -98,37 +104,71 @@ fn render_input_branch_with_text() {
 fn render_confirming() {
     let mut s = state_with_worktrees();
     s.mode = Mode::Confirming;
-    s.selected_index = 1;
+    s.pending_remove_branch = Some("feat-b".into());
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
 #[test]
 fn render_worktree_list_scrolling() {
-    let s = State {
+    let mut s = State {
         mode: Mode::BrowseWorktrees,
-        worktrees: (0..20)
-            .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
+        tabs: (0..20)
+            .map(|i| {
+                let mut tab = make_tab_info(&format!("branch-{i}"), i == 0);
+                tab.position = i;
+                tab
+            })
             .collect(),
         selected_index: 15,
         ..Default::default()
     };
+    let output: String = (0..20)
+        .map(|i| format!("branch-{i}\tbranch-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    s.handle_list_worktrees(Some(0), output.as_bytes(), b"");
     // Small viewport forces scrolling
     insta::assert_snapshot!(render_to_string(&s, 10, 80));
 }
 
 #[test]
 fn render_browse_mixed_dir_branch_names() {
-    let s = State {
+    let mut s = State {
         mode: Mode::BrowseWorktrees,
         repo_name: "myrepo".into(),
-        worktrees: vec![
-            Worktree { dir: "autonomy".into(), branch: "plugin-snapshot-tests".into() },
-            Worktree { dir: "competition".into(), branch: "competition".into() },
-            Worktree { dir: "ding".into(), branch: "feat/ding-dong".into() },
+        tabs: vec![
+            make_tab_info("plugin-snapshot-tests", true),
+            make_tab_info("competition", false),
+            make_tab_info("feat-ding-dong", false),
         ],
         ..Default::default()
     };
+    s.handle_list_worktrees(
+        Some(0),
+        b"autonomy\tplugin-snapshot-tests\ncompetition\tcompetition\nding\tfeat/ding-dong\n",
+        b"",
+    );
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_browse_clips_labels_to_viewport_width() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        tabs: vec![
+            make_tab_info("feature-super-long-branch-name-for-viewport", true),
+            make_tab_info("manual-tab-with-a-very-long-name", false),
+        ],
+        ..Default::default()
+    };
+    s.handle_list_worktrees(
+        Some(0),
+        b"feature/super-long-branch-name-for-viewport\tfeature/super-long-branch-name-for-viewport\n",
+        b"",
+    );
+    insta::assert_snapshot!(render_to_string(&s, 14, 40));
 }
 
 #[test]
@@ -146,8 +186,10 @@ fn render_not_git_repo() {
 #[test]
 fn render_browse_with_agent_statuses() {
     let mut s = state_with_worktrees();
-    s.agent_statuses.insert("feat-a".into(), AgentStatus::Working);
-    s.agent_statuses.insert("feat-b".into(), AgentStatus::NeedsInput);
+    s.agent_statuses
+        .insert("feat-a".into(), AgentStatus::Working);
+    s.agent_statuses
+        .insert("feat-b".into(), AgentStatus::Awaiting);
     // feat-c stays Idle (no entry)
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
