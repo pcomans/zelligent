@@ -9,6 +9,8 @@ SCRIPT="$(cd "$(dirname "$0")" && pwd)/zelligent.sh"
 GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
+# Spawn now requires a resolvable plugin path; use the script path as a stable fake in tests.
+export ZELLIGENT_PLUGIN_SRC="${ZELLIGENT_PLUGIN_SRC:-$SCRIPT}"
 
 pass() { echo "  ✅ $1"; ((PASS++)); }
 fail() { echo "  ❌ $1"; ((FAIL++)); }
@@ -85,7 +87,8 @@ EXPECTED_CWD="$HOME/.zelligent/worktrees/$REPO_NAME/test-layout-branch"
 contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
-contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"
+contains "layout contains sidebar plugin" 'plugin location="file:'    "$out"
+excludes "layout omits tab-bar"           'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 contains "new worktree: setup.sh runs as preamble" 'setup.sh'        "$out"
@@ -770,7 +773,7 @@ MOCK
 
   DUMP=$(ZELLIJ_SESSION_NAME="$TEST_SESSION" zellij action dump-layout 2>/dev/null)
   contains "tab appears in session layout" 'tab name="integration-test-branch"' "$DUMP"
-  contains "tab has tab-bar"    'plugin location="zellij:tab-bar"'    "$DUMP"
+  contains "tab has sidebar plugin" 'plugin location="file:' "$DUMP"
   contains "tab has status-bar" 'plugin location="zellij:status-bar"' "$DUMP"
 
   zellij kill-session "$TEST_SESSION" 2>/dev/null
