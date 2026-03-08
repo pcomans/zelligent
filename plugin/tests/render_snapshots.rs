@@ -189,7 +189,7 @@ fn render_browse_with_agent_statuses() {
     s.agent_statuses
         .insert("feat-a".into(), AgentStatus::Working);
     s.agent_statuses
-        .insert("feat-b".into(), AgentStatus::NeedsInput);
+        .insert("feat-b".into(), AgentStatus::Awaiting);
     // feat-c stays Idle (no entry)
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }

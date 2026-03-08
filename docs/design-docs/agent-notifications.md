@@ -2,7 +2,7 @@
 
 ## Overview
 
-Zelligent detects agent status (working/waiting/done) and notifies the user. The system works with any agent that has a hook system (currently Claude Code).
+Zelligent detects agent status (idle/working/awaiting/done) and notifies the user. The system works with any agent that has a hook system (currently Claude Code).
 
 ## Pipeline
 
@@ -25,7 +25,7 @@ The Claude Code plugin (`claude-plugin/plugins/zelligent/hooks/hooks.json`) defi
 |---|---|---|---|
 | `Stop` | (none) | `Stop` | `Done` |
 | `UserPromptSubmit` | (none) | `Start` | `Working` |
-| `Notification` | `permission_prompt` | `PermissionRequest` | `NeedsInput` |
+| `Notification` | `permission_prompt` | `PermissionRequest` | `Awaiting` |
 
 Each hook runs: `zellij pipe --name zelligent-status --args "event=<event>,tab=$ZELLIGENT_TAB_NAME"`
 
@@ -37,7 +37,7 @@ Pipes arrive via `fn pipe(&mut self, msg: PipeMessage)` -- a separate WASM expor
 
 ### 4. Plugin sends OS notifications
 
-For `NeedsInput` and `Done` statuses, the plugin runs `osascript` to show a macOS notification. For `NeedsInput`, it also plays `Glass.aiff` via `afplay`.
+For `Awaiting` and `Done` statuses, the plugin runs `osascript` to show a macOS notification. For `Awaiting`, it also plays `Glass.aiff` via `afplay`.
 
 Linux support (`notify-send`) is not yet implemented.
 
@@ -47,7 +47,7 @@ Linux support (`notify-send`) is not yet implemented.
 enum AgentStatus {
     Idle,       // default, no indicator
     Working,    // green dot
-    NeedsInput, // yellow dot
+    Awaiting,   // yellow dot
     Done,       // green checkmark
 }
 ```

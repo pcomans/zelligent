@@ -5,9 +5,9 @@ expression: "render_to_string(&s, 20, 80)"
 [1m[36m zelligent · myrepo (3) ───────────────────────────────────────────────────────[0m
 
   ▌[7m  [36m⎇[0m plugin-snapshot-tests                                                    [0m
-  ▌[7m[2m    worktree tab                                                             [0m[0m
+  ▌[7m[2m    branch: plugin-snapshot-tests                                            [0m[0m
      [36m⎇[0m competition                                                              
-   [2m    worktree tab                                                             [0m
+   [2m    branch: competition                                                      [0m
      [36m⎇[0m feat-ding-dong                                                           
    [2m    branch: feat/ding-dong                                                   [0m
 

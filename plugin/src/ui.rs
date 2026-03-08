@@ -28,15 +28,14 @@ fn status_indicator(status: &AgentStatus) -> String {
     match status {
         AgentStatus::Idle => "  ".to_string(),
         AgentStatus::Working => format!("{GREEN}●{RESET} "),
-        AgentStatus::NeedsInput => format!("{YELLOW}●{RESET} "),
+        AgentStatus::Awaiting => format!("{YELLOW}●{RESET} "),
         AgentStatus::Done => format!("{GREEN}✓{RESET} "),
     }
 }
 
 fn subtitle_for_item(item: &SidebarItem) -> String {
     match &item.matched_branch {
-        Some(branch) if branch != &item.tab_name => format!("branch: {branch}"),
-        Some(_) => "worktree tab".to_string(),
+        Some(branch) => format!("branch: {branch}"),
         None => "user tab".to_string(),
     }
 }
