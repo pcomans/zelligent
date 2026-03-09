@@ -332,6 +332,40 @@ if [ -z "$1" ]; then
     exec zellij attach "$REPO_NAME"
   else
     echo "Creating Zellij session '$REPO_NAME'..."
+    # Prefer launching the initial session with the zelligent layout
+    # so users land directly in the persistent sidebar workspace view.
+    if PLUGIN_PATH_STARTUP=$(resolve_plugin_path); then
+      PLUGIN_PATH_STARTUP_KDL="${PLUGIN_PATH_STARTUP//\\/\\\\}"
+      PLUGIN_PATH_STARTUP_KDL="${PLUGIN_PATH_STARTUP_KDL//\"/\\\"}"
+      ZELLIGENT_PATH_CMD=$(command -v zelligent 2>/dev/null || echo "$0")
+      ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD//\\/\\\\}"
+      ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD_KDL//\"/\\\"}"
+      REPO_ROOT_KDL="${REPO_ROOT//\\/\\\\}"
+      REPO_ROOT_KDL="${REPO_ROOT_KDL//\"/\\\"}"
+      LAYOUT_STARTUP=$(mktemp "/tmp/zelligent-startup-layout.XXXXXX")
+      cat > "$LAYOUT_STARTUP" <<EOF
+layout {
+    tab name="$REPO_NAME" {
+        pane split_direction="horizontal" {
+            pane size="24%" {
+                plugin location="file:$PLUGIN_PATH_STARTUP_KDL" {
+                    zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                    agent_cmd "bash"
+                }
+            }
+            pane split_direction="horizontal" {
+                pane command="bash" cwd="$REPO_ROOT_KDL"
+                pane command="lazygit" cwd="$REPO_ROOT_KDL" size="30%"
+            }
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+}
+EOF
+      exec zellij --new-session-with-layout "$LAYOUT_STARTUP" --session "$REPO_NAME"
+    fi
     exec zellij --session "$REPO_NAME"
   fi
 fi
@@ -535,7 +569,7 @@ fi
 # Pane content shared by both layouts
 pane_content() {
   cat <<EOF
-    pane split_direction="vertical" {
+    pane split_direction="horizontal" {
         pane size="24%" {
             plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
                 zelligent_path "$ZELLIGENT_PATH_CMD_KDL"

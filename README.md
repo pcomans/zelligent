@@ -39,6 +39,7 @@ zelligent
 ```
 
 This opens a Zellij session named after your repo. If the session already exists, it reattaches to it.
+If no session exists, it starts one with the zelligent layout (persistent left sidebar + agent/lazygit split + status bar).
 
 Spawn an agent in a new worktree:
 
@@ -98,7 +99,7 @@ zelligent doctor                            # check and fix setup
 |---|---|
 | Inside a Zellij session | Opens a new tab in the current session |
 | Outside Zellij, session exists | Attaches to the session, opens a new tab |
-| Outside Zellij, no session | Creates a new session |
+| Outside Zellij, no session | Creates a new session with the zelligent layout |
 
 `zelligent remove` refuses to delete worktrees with uncommitted changes. The local branch is kept.
 
