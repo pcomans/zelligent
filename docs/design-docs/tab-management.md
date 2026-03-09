@@ -44,7 +44,7 @@ There is no plugin API to obtain a tab's internal index. The only reliable ident
 
 ## Plugin tab operations
 
-The plugin (persistent sidebar in spawned tabs, Ctrl-Y floating fallback elsewhere) provides:
+The plugin (persistent sidebar in spawned tabs) provides:
 - **Switch to tab** — `go_to_tab_name(tab_name)`
 - **Close tab** — uses the name-based workaround above, then refreshes the worktree list
 - **Session nuke** — `kill_sessions` (terminates the plugin's own process, nothing after it runs). Note: this only kills the session, it does NOT clean up resurrection cache or stale processes like `zelligent nuke` does. The session may resurrect on next attach.

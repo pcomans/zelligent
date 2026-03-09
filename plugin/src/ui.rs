@@ -3,10 +3,14 @@ pub const BOLD: &str = "\x1b[1m";
 pub const DIM: &str = "\x1b[2m";
 pub const RESET: &str = "\x1b[0m";
 pub const INVERSE: &str = "\x1b[7m";
+pub const BLACK: &str = "\x1b[30m";
 pub const GREEN: &str = "\x1b[32m";
 pub const RED: &str = "\x1b[31m";
 pub const CYAN: &str = "\x1b[36m";
 pub const YELLOW: &str = "\x1b[33m";
+pub const BG_GREEN: &str = "\x1b[42m";
+const POWERLINE_RIGHT_SEPARATOR: &str = "";
+const ASCII_RIGHT_SEPARATOR: &str = ">";
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -119,6 +123,35 @@ fn fit_text(text: &str, width: usize) -> String {
     format!("{truncated}{}", " ".repeat(pad))
 }
 
+fn selected_chip(text: &str, width: usize, supports_arrow_fonts: bool) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let separator = if supports_arrow_fonts {
+        POWERLINE_RIGHT_SEPARATOR
+    } else {
+        ASCII_RIGHT_SEPARATOR
+    };
+    let sep_width = visible_width(separator);
+    // two spaces around label text
+    let base_width = 2usize.saturating_add(sep_width.saturating_mul(2));
+
+    // If the viewport is tiny, fall back to plain clipped text.
+    if width <= base_width {
+        return fit_text(text, width);
+    }
+
+    let label_width = width.saturating_sub(base_width);
+    let clipped = clip_to_width(text, label_width);
+    let mut chip = format!(
+        "{BG_GREEN}{BLACK}{separator}{RESET}{BG_GREEN}{BLACK} {clipped} {RESET}{GREEN}{separator}{RESET}"
+    );
+    let pad = width.saturating_sub(visible_width(&chip));
+    chip.push_str(&" ".repeat(pad));
+    chip
+}
+
 pub fn render_header(w: &mut impl Write, repo_name: &str, tab_count: Option<usize>, cols: usize) {
     let repo_name = if repo_name.is_empty() {
         "repo"
@@ -140,6 +173,7 @@ pub fn render_sidebar_list(
     selected: usize,
     rows: usize,
     cols: usize,
+    supports_arrow_fonts: bool,
 ) {
     // Keep browse-mode footer pinned to the bottom:
     // header(1) + list_budget + status_strip(1) + footer(3) = total rows
@@ -189,29 +223,28 @@ pub fn render_sidebar_list(
     for (idx, item) in items.iter().enumerate().skip(start).take(max_visible) {
         let is_selected = idx == selected;
         let left = if is_selected { "▌" } else { " " };
-        let wrap_start = if is_selected { INVERSE } else { "" };
-        let wrap_end = if is_selected { RESET } else { "" };
         let indicator = status_indicator(
             agent_statuses
                 .get(&item.tab_name)
                 .unwrap_or(&AgentStatus::Idle),
         );
         let kind = kind_icon(item);
+        let label = if is_selected {
+            selected_chip(&item.display_name, row1_label_width, supports_arrow_fonts)
+        } else {
+            fit_text(&item.display_name, row1_label_width)
+        };
         let line1 = format!(
             "{indicator}{kind}{}",
-            fit_text(&item.display_name, row1_label_width)
+            label
         );
         let line2 = format!(
             "    {}",
             fit_text(&subtitle_for_item(item), row2_subtitle_width)
         );
-        writeln!(w, "  {left}{wrap_start}{line1}{wrap_end}",).unwrap();
+        writeln!(w, "  {left}{line1}",).unwrap();
         lines_written += 1;
-        if is_selected {
-            writeln!(w, "  {left}{wrap_start}{DIM}{line2}{RESET}{wrap_end}",).unwrap();
-        } else {
-            writeln!(w, "  {left}{DIM}{line2}{RESET}",).unwrap();
-        }
+        writeln!(w, "  {left}{DIM}{line2}{RESET}",).unwrap();
         lines_written += 1;
     }
     while lines_written < list_line_budget {
@@ -327,7 +360,7 @@ pub fn render_status_strip(w: &mut impl Write, message: &str, is_error: bool, co
 
 #[cfg(test)]
 mod tests {
-    use super::{clip_to_width, fit_text, visible_width, CYAN, RESET};
+    use super::{clip_to_width, fit_text, selected_chip, visible_width, CYAN, RESET};
 
     #[test]
     fn clip_to_width_respects_ascii_width() {
@@ -359,5 +392,17 @@ mod tests {
         assert!(clipped.contains(CYAN));
         assert!(clipped.contains(RESET));
         assert_eq!(visible_width(&clipped), 3);
+    }
+
+    #[test]
+    fn selected_chip_with_arrows_fits_requested_width() {
+        let chip = selected_chip("feature-super-long", 12, true);
+        assert_eq!(visible_width(&chip), 12);
+    }
+
+    #[test]
+    fn selected_chip_without_arrows_fits_requested_width() {
+        let chip = selected_chip("feature-super-long", 10, false);
+        assert_eq!(visible_width(&chip), 10);
     }
 }

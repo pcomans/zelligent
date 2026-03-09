@@ -133,25 +133,7 @@ if [ "$1" = "doctor" ]; then
   mkdir -p "$(dirname "$CONFIG")"
   touch "$CONFIG"
 
-  if grep -v '^\s*//' "$CONFIG" | grep -qF 'zelligent-plugin.wasm'; then
-    echo "  keybinding: ok ($CONFIG)"
-  else
-    cat >> "$CONFIG" <<KDL
-
-keybinds {
-    shared_except "locked" {
-        bind "Ctrl y" {
-            LaunchOrFocusPlugin "file:$PLUGIN_PATH" {
-                floating true
-                move_to_focused_tab true
-                agent_cmd "$SHELL"
-            }
-        }
-    }
-}
-KDL
-    echo "  keybinding: added Ctrl-y to $CONFIG"
-  fi
+  echo "  keybinding: skipped (persistent sidebar only)"
 
   if [ "$(uname)" = "Darwin" ]; then
     if grep -v '^\s*//' "$CONFIG" | grep -qF 'copy_command'; then

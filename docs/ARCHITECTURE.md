@@ -9,14 +9,14 @@ A Bash script installed as `zelligent`. Handles:
 - **Session management** — creates/attaches Zellij sessions named after the git repo (`basename` of repo root)
 - **Worktree lifecycle** — `spawn` creates git worktrees under `~/.zelligent/worktrees/<repo>/`, `remove` cleans them up
 - **Layout generation** — builds KDL layout files for spawned tabs (persistent sidebar plugin + agent/lazygit split + status-bar)
-- **Doctor** — `zelligent doctor` sets up Zellij config, keybindings, plugin permissions, and Claude Code plugin
+- **Doctor** — `zelligent doctor` sets up Zellij config, plugin permissions, and Claude Code plugin
 - **Nuke** — `zelligent nuke` force-deletes the session, its server processes, and resurrection cache
 
 The CLI resolves the main repo root even when run from a worktree (`git rev-parse --git-common-dir`).
 
 ## Zellij WASM Plugin (`plugin/`)
 
-A Rust plugin compiled to `wasm32-wasip1`. It runs as a persistent sidebar in zelligent-managed spawned tabs, and can also be opened via Ctrl-Y in other tabs/sessions. Handles:
+A Rust plugin compiled to `wasm32-wasip1`. It runs as a persistent sidebar in zelligent-managed spawned tabs. Handles:
 
 - **Session tab browsing** — lists all open session tabs and enriches rows when a tab maps to a zelligent-managed worktree
 - **Branch selection** — browse existing branches or type a new branch name
@@ -44,7 +44,7 @@ User runs `zelligent spawn feature/foo claude`
   -> CLI generates KDL layout (sidebar plugin + agent pane + lazygit pane + status-bar)
   -> CLI calls `zellij action new-tab --layout <file> --name feature-foo`
 
-Plugin starts (embedded sidebar or Ctrl-Y floating launch)
+Plugin starts as an embedded sidebar
   -> Plugin calls `zelligent list-worktrees` and `zelligent list-branches` via RunCommand
   -> Plugin calls `zelligent spawn/remove` via RunCommand when user selects an action
 ```
