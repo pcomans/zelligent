@@ -363,6 +363,7 @@ chmod +x "$MOCK_NOARGS_LAYOUT_BIN/zellij" "$MOCK_NOARGS_LAYOUT_BIN/zelligent"
 out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="$FAKE_NOARGS_WASM" PATH="$MOCK_NOARGS_LAYOUT_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
 check "no args with plugin: exits 0" "0" "$code"
 contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
+contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
 excludes "no args with plugin: no vertical split stack" 'split_direction="vertical"' "$out"
@@ -743,6 +744,7 @@ cleanup_test_branch
 contains "outside zellij (new): prints session message"          "Creating Zellij session"            "$out"
 contains "outside zellij (new): session named after repo"        "$REPO_NAME"                         "$out"
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
+contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
 
 # Outside Zellij, repo session already exists: add tab and attach

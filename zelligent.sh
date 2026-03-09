@@ -345,7 +345,7 @@ if [ -z "$1" ]; then
       LAYOUT_STARTUP=$(mktemp "/tmp/zelligent-startup-layout.XXXXXX")
       cat > "$LAYOUT_STARTUP" <<EOF
 layout {
-    tab name="$REPO_NAME" {
+    default_tab_template {
         pane split_direction="horizontal" {
             pane size="24%" {
                 plugin location="file:$PLUGIN_PATH_STARTUP_KDL" {
@@ -353,13 +353,16 @@ layout {
                     agent_cmd "bash"
                 }
             }
-            pane split_direction="horizontal" {
-                pane command="bash" cwd="$REPO_ROOT_KDL"
-                pane command="lazygit" cwd="$REPO_ROOT_KDL" size="30%"
-            }
+            children
         }
         pane size=1 borderless=true {
             plugin location="zellij:status-bar"
+        }
+    }
+    tab name="$REPO_NAME" {
+        pane split_direction="horizontal" {
+            pane command="bash" cwd="$REPO_ROOT_KDL"
+            pane command="lazygit" cwd="$REPO_ROOT_KDL" size="30%"
         }
     }
 }
@@ -566,7 +569,17 @@ if [ -z "$LAYOUT_TEMPLATE" ]; then
   ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD_KDL//\"/\\\"}"
 fi
 
-# Pane content shared by both layouts
+# Main tab content (without sidebar/status chrome)
+tab_body_content() {
+  cat <<EOF
+        pane split_direction="horizontal" {
+            $AGENT_PANE
+            pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+        }
+EOF
+}
+
+# Full tab content used for `new-tab --layout` (must include its own chrome)
 pane_content() {
   cat <<EOF
     pane split_direction="horizontal" {
@@ -576,13 +589,30 @@ pane_content() {
                 agent_cmd "$AGENT_CMD_KDL"
             }
         }
-        pane split_direction="horizontal" {
-            $AGENT_PANE
-            pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
-        }
+$(tab_body_content)
     }
     pane size=1 borderless=true {
         plugin location="zellij:status-bar"
+    }
+EOF
+}
+
+# Session-level default tab template so manual tabs inherit the sidebar frame
+session_default_tab_template() {
+  cat <<EOF
+    default_tab_template {
+        pane split_direction="horizontal" {
+            pane size="24%" {
+                plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
+                    zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                    agent_cmd "$AGENT_CMD_KDL"
+                }
+            }
+            children
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
     }
 EOF
 }
@@ -598,8 +628,15 @@ elif [ -n "$ZELLIJ" ]; then
   # Tab layout: no tab wrapper (new-tab provides the tab context)
   { echo "layout {"; pane_content; echo "}"; } > "$LAYOUT"
 else
-  # Session layout: wrap in a named tab
-  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; pane_content; echo "    }"; echo "}"; } > "$LAYOUT"
+  # Session layout: include a default tab template so manual tabs inherit sidebar chrome
+  {
+    echo "layout {"
+    session_default_tab_template
+    echo "    tab name=\"$SESSION_NAME\" {"
+    tab_body_content
+    echo "    }"
+    echo "}"
+  } > "$LAYOUT"
 fi
 
 # Inside Zellij: open as a new tab in the current session.
