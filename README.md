@@ -17,13 +17,46 @@ Use the CLI to spawn worktrees, or press **`Ctrl-y`** inside Zellij to manage th
 
 ## Quick start
 
-Install with Homebrew (pulls in Zellij and lazygit automatically):
+### macOS / Linux (Homebrew)
 
 ```bash
 brew install pcomans/zelligent/zelligent
+zelligent doctor
 ```
 
-Run the setup wizard:
+### Linux (manual install)
+
+**1. Install dependencies:**
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install git cargo rustc
+rustup target add wasm32-wasip1
+
+# Or use your distro's package manager for git, rust, cargo
+```
+
+**2. Install Zellij and lazygit:**
+
+```bash
+# Zellij
+curl -L https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
+sudo mv /tmp/zellij /usr/local/bin/
+
+# Lazygit
+curl -L https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_$(curl -s https://api.github.com/repos/jesseduffield/lazygit/releases/latest | grep -o '"tag_name": "v[^"]*' | cut -d'"' -f4 | tr -d v)_Linux_x86_64.tar.gz | tar -xz -C /tmp lazygit
+sudo mv /tmp/lazygit /usr/local/bin/
+```
+
+**3. Build and install zelligent:**
+
+```bash
+git clone https://github.com/pcomans/zelligent.git
+cd zelligent
+bash dev-install.sh
+```
+
+**4. Verify:**
 
 ```bash
 zelligent doctor
@@ -191,7 +224,7 @@ Zellij automatically saves your session layout periodically and restores it when
 ```bash
 git clone https://github.com/pcomans/zelligent.git
 cd zelligent
-PATH="$HOME/.rustup/toolchains/stable-$(rustc -vV | grep host | cut -d' ' -f2)/bin:$PATH" bash dev-install.sh
+bash dev-install.sh
 ```
 
-Requires [Rust via rustup](https://rustup.rs) with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`).
+Requires [Rust via rustup](https://rustup.rs) with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`). After installing Rust, restart your terminal or run `source "$HOME/.cargo/env"` to ensure `cargo` is in your PATH.
