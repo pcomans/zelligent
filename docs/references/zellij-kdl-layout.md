@@ -18,7 +18,7 @@ A `tab { }` wrapper causes session-level replacement, breaking existing tabs and
 Any desired chrome/plugins must be included explicitly in the layout file. The built-in zelligent spawned-tab layout includes:
 
 ```kdl
-pane split_direction="vertical" {
+pane split_direction="horizontal" {
     pane size="24%" {
         plugin location="file:/.../zelligent-plugin.wasm"
     }
@@ -30,6 +30,13 @@ pane size=1 borderless=true {
 ```
 
 Note: zelligent intentionally omits `zellij:tab-bar` from spawned-tab layouts; the sidebar plugin is the primary navigator.
+
+## Session-level `default_tab_template` in zelligent sessions
+
+When zelligent creates a brand-new session (eg. no existing repo session), it includes a `default_tab_template`
+in the session layout. This makes manually created tabs (`Ctrl+t n`) inherit the sidebar + status-bar frame.
+
+This does **not** change the `new-tab --layout` rule above: zelligent still includes chrome explicitly for spawned tabs.
 
 ## Template variables
 

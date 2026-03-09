@@ -8,7 +8,7 @@ A Bash script installed as `zelligent`. Handles:
 
 - **Session management** — creates/attaches Zellij sessions named after the git repo (`basename` of repo root)
 - **Worktree lifecycle** — `spawn` creates git worktrees under `~/.zelligent/worktrees/<repo>/`, `remove` cleans them up
-- **Layout generation** — builds KDL layout files for spawned tabs (persistent sidebar plugin + agent/lazygit split + status-bar)
+- **Layout generation** — builds KDL layout files for spawned tabs (persistent sidebar plugin + agent/lazygit split + status-bar) and seeds new sessions with a `default_tab_template` so manual tabs inherit sidebar chrome
 - **Doctor** — `zelligent doctor` sets up Zellij config, plugin permissions, and Claude Code plugin
 - **Nuke** — `zelligent nuke` force-deletes the session, its server processes, and resurrection cache
 
@@ -21,7 +21,7 @@ A Rust plugin compiled to `wasm32-wasip1`. It runs as a persistent sidebar in ze
 - **Session tab browsing** — lists all open session tabs and enriches rows when a tab maps to a zelligent-managed worktree
 - **Branch selection** — browse existing branches or type a new branch name
 - **Tab management** — switches tabs and removes matched worktrees (name-based, not index-based)
-- **Agent status** — reads CLI pipe messages to show agent status (idle/working/needs-input/done) and sends OS notifications. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md).
+- **Agent status** — reads CLI pipe messages to show agent status (idle/working/awaiting/done) and sends OS notifications. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md).
 - **Session awareness** — gets session name via `std::env::var("ZELLIJ_SESSION_NAME")` (WASI inherits host env vars)
 
 ### Key file paths
