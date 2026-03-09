@@ -4,8 +4,8 @@ expression: "render_to_string(&s, 14, 40)"
 ---
 [1m[36m zelligent · myrepo (2) ───────────────[0m
 
-  ▌[7m  [36m⎇[0m feature-super-long-branch-name-fo[0m
-  ▌[7m[2m    branch: feature/super-long-branch[0m[0m
+  ▌  [36m⎇[0m [42m[30m[0m[42m[30m feature-super-long-branch-nam [0m[32m[0m
+  ▌[2m    branch: feature/super-long-branch[0m
      [2m□[0m manual-tab-with-a-very-long-name 
    [2m    user tab                         [0m
 

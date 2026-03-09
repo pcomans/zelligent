@@ -92,6 +92,8 @@ pub struct State {
     pub pending_remove_branch: Option<String>,
     /// Agent status per tab name (sanitized branch name).
     pub agent_statuses: BTreeMap<String, AgentStatus>,
+    /// None means "unknown yet" (assume arrows are supported by default).
+    pub supports_arrow_fonts: Option<bool>,
     /// Last rendered row count, used to map mouse line clicks to list items.
     pub last_rows: usize,
 }
@@ -409,7 +411,6 @@ impl State {
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
-                close_self();
             }
             Action::Refresh => {
                 self.fire_list_worktrees();
@@ -850,6 +851,7 @@ impl State {
                     self.selected_index,
                     rows,
                     cols,
+                    self.supports_arrow_fonts.unwrap_or(true),
                 );
                 ui::render_status_strip(w, &self.status_message, self.status_is_error, cols);
                 ui::render_footer(w, &self.mode, VERSION, cols);
@@ -903,6 +905,7 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
+            EventType::ModeUpdate,
         ]);
     }
 
@@ -933,6 +936,12 @@ impl ZellijPlugin for State {
             Event::TabUpdate(tab_info) => {
                 self.tabs = tab_info;
                 self.recompute_sidebar_items();
+                Action::None
+            }
+            Event::ModeUpdate(mode_info) => {
+                // Zellij's `arrow_fonts` capability is inverted in plugin mode:
+                // false means arrow separators are available.
+                self.supports_arrow_fonts = Some(!mode_info.capabilities.arrow_fonts);
                 Action::None
             }
             Event::Mouse(mouse) => match self.mode {

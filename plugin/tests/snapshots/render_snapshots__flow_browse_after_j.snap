@@ -6,8 +6,8 @@ expression: after_j
 
      [36m⎇[0m feat-a                                                                   
    [2m    branch: feat-a                                                           [0m
-  ▌[7m  [36m⎇[0m feat-b                                                                   [0m
-  ▌[7m[2m    branch: feat-b                                                           [0m[0m
+  ▌  [36m⎇[0m [42m[30m[0m[42m[30m feat-b [0m[32m[0m                                                               
+  ▌[2m    branch: feat-b                                                           [0m
      [36m⎇[0m feat-c                                                                   
    [2m    branch: feat-c                                                           [0m
 

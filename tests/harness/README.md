@@ -46,8 +46,8 @@ fixture: setup-my-scenario.sh
 # My Test Scenario
 
 ## Test 1: Something works
-- Action: Press Ctrl+Y
-- Expected: The plugin opens
+- Action: Run `zelligent spawn test-branch`
+- Expected: A new tab opens with the persistent zelligent sidebar on the left
 ```
 
 ## Fixture scripts

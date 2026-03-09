@@ -514,10 +514,9 @@ check "doctor exits 0" "0" "$code"
 check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
 CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
-contains "doctor adds keybinding" "zelligent-plugin.wasm" "$CONFIG_CONTENT"
-contains "doctor adds Ctrl y" "Ctrl y" "$CONFIG_CONTENT"
+not_contains "doctor does not add launcher keybinding" "Ctrl y" "$CONFIG_CONTENT"
 
-# doctor writes permissions with file: prefix matching the config keybinding
+# doctor writes permissions for the plugin path
 if [ "$(uname)" = "Darwin" ]; then
   PERM_FILE="$MOCK_DR_HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
 else
@@ -536,7 +535,7 @@ out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
-contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
+contains "doctor idempotent: keybinding skipped" "keybinding: skipped (persistent sidebar only)" "$out2"
 contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
@@ -544,7 +543,7 @@ check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
 rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
 
-# doctor with existing keybinds block in config: appends without corrupting
+# doctor with existing keybinds block in config: preserves existing keybinds
 MOCK_DR_BIN2=$(mktemp -d)
 MOCK_DR_HOME2=$(mktemp -d)
 FAKE_WASM_DIR2=$(mktemp -d)
@@ -570,7 +569,7 @@ out=$(HOME="$MOCK_DR_HOME2" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM2" \
 check "doctor with existing keybinds exits 0" "0" "$code"
 CONFIG_CONTENT2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
 contains "doctor preserves existing keybinds" "Ctrl x" "$CONFIG_CONTENT2"
-contains "doctor adds new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
+not_contains "doctor does not add new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
 
 rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2" "$FAKE_WASM_DIR2"
 

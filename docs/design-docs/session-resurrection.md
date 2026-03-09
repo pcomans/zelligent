@@ -25,7 +25,7 @@ The `serialization_interval` config controls how frequently Zellij snapshots the
 
 **Root cause chain:**
 
-1. Plugin launched via Ctrl-Y keybinding has no `cwd` property in keybinding config
+1. Plugin launched from layout without explicit `cwd` has `PluginConfig.initial_cwd = None`
 2. `PluginConfig.initial_cwd` = `None`
 3. At runtime, `FillPluginCwd` resolves cwd from the focused pane (works correctly)
 4. But layout serialization (`plugin_map.rs:242`) reads the static `plugin_config.initial_cwd` = `None`

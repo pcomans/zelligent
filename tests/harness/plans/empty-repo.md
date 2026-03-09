@@ -4,24 +4,24 @@ fixture: setup-empty-repo.sh
 
 # Empty Repo Smoke Test
 
-Verifies the plugin works correctly in a git repo with no worktrees.
+Verifies the persistent sidebar plugin works correctly when starting from a repo with no managed worktrees.
 
-## Test 1: Plugin opens on Ctrl+Y
-- Action: Press Ctrl+Y
-- Expected: A floating pane appears showing the zelligent plugin with the Zelligent logo (empty state) and navigation hints at the bottom
+## Test 1: Spawn creates a sidebar tab
+- Action: Run `zelligent spawn smoke-empty bash`
+- Expected: A new tab opens with the zelligent sidebar visible on the left.
 
-## Test 2: Plugin closes on q
-- Action: Press q
-- Expected: The floating plugin pane closes, back to shell prompt
+## Test 2: Sidebar shows required two-line rows
+- Action: Read the sidebar list.
+- Expected: Each row renders as two lines (title + subtitle).
 
-## Test 3: Plugin reopens
-- Action: Press Ctrl+Y again
-- Expected: The plugin opens again showing the same empty state
+## Test 3: Enter switches tabs without hiding sidebar
+- Action: Create/switch to another tab row using Enter from the sidebar.
+- Expected: Tab focus changes and the sidebar remains visible.
 
 ## Test 4: Version is displayed
 - Action: Read the terminal buffer
 - Expected: A semantic version string (e.g., "0.1.14") appears somewhere in the plugin UI
 
-## Test 5: Clean close
-- Action: Press q to close the plugin
-- Expected: Back to shell prompt, no errors visible
+## Test 5: Key hints are visible
+- Action: Inspect the bottom hint row of the sidebar.
+- Expected: Navigation/action keys are shown in the footer.
