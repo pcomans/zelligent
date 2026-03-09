@@ -11,7 +11,7 @@ Zelligent spawns AI coding agents into isolated git worktrees, each in its own Z
 - **Tabs are named after branches.** `feature/my-thing` becomes tab `feature-my-thing` (slashes replaced with dashes).
 - **Persistent sidebar navigator.** Default spawned layout: 24% sidebar (left) + 70/30 agent/lazygit split (right) + status-bar chrome.
 - **Single navigation surface.** The sidebar plugin is persistent in zelligent-managed tabs and acts as the canonical tab navigator.
-- **Minimal setup.** `zelligent doctor` configures everything. `zelligent` with no args creates or attaches to the session.
+- **Minimal setup.** `zelligent doctor` configures everything. `zelligent` with no args creates or attaches to the session, and new sessions start with the zelligent sidebar layout.
 
 ## Conventions
 

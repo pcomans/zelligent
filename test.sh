@@ -342,6 +342,30 @@ check "no args creates session" "0" "$code"
 contains "no args: prints session message" "session" "$out"
 rm -rf "$MOCK_NOARGS_BIN"
 
+# No args outside Zellij with plugin available: starts with zelligent layout
+MOCK_NOARGS_LAYOUT_BIN=$(mktemp -d)
+FAKE_NOARGS_WASM_DIR=$(mktemp -d)
+FAKE_NOARGS_WASM="$FAKE_NOARGS_WASM_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_NOARGS_WASM"
+cat > "$MOCK_NOARGS_LAYOUT_BIN/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "list-sessions" ]; then echo ""; exit 0; fi
+echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
+MOCK
+cat > "$MOCK_NOARGS_LAYOUT_BIN/zelligent" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_NOARGS_LAYOUT_BIN/zellij" "$MOCK_NOARGS_LAYOUT_BIN/zelligent"
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="$FAKE_NOARGS_WASM" PATH="$MOCK_NOARGS_LAYOUT_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+check "no args with plugin: exits 0" "0" "$code"
+contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
+contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
+contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
+rm -rf "$MOCK_NOARGS_LAYOUT_BIN" "$FAKE_NOARGS_WASM_DIR"
+
 # ── Stale socket timeout ──────────────────────────────────────────────────────
 echo "Stale socket timeout:"
 
