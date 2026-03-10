@@ -147,7 +147,7 @@ fn render_not_git_repo() {
 fn render_browse_with_agent_statuses() {
     let mut s = state_with_worktrees();
     s.agent_statuses.insert("feat-a".into(), AgentStatus::Working);
-    s.agent_statuses.insert("feat-b".into(), AgentStatus::NeedsInput);
+    s.agent_statuses.insert("feat-b".into(), AgentStatus::Awaiting);
     // feat-c stays Idle (no entry)
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }

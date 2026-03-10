@@ -7,11 +7,15 @@ pub const GREEN: &str = "\x1b[32m";
 pub const RED: &str = "\x1b[31m";
 pub const CYAN: &str = "\x1b[36m";
 pub const YELLOW: &str = "\x1b[33m";
+pub const BG_CYAN: &str = "\x1b[46m";
+pub const FG_BLACK: &str = "\x1b[30m";
 
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use crate::{AgentStatus, Mode, Worktree};
+use unicode_width::UnicodeWidthStr;
+
+use crate::{AgentStatus, Mode, SidebarItem, Worktree};
 
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
@@ -23,21 +27,135 @@ pub fn sanitize_tab_name(branch: &str) -> String {
         .collect()
 }
 
-fn status_indicator(status: &AgentStatus) -> String {
+/// Visible width of a string (accounts for wide/emoji chars).
+pub fn visible_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Clip a string to fit within `max_width` visible columns, adding "…" if truncated.
+pub fn clip_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut width = 0;
+    let mut result = String::new();
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > max_width.saturating_sub(1) {
+            // Need room for ellipsis
+            if width < max_width {
+                result.push('…');
+            }
+            return result;
+        }
+        result.push(ch);
+        width += cw;
+    }
+    result
+}
+
+/// Pad or truncate text to exactly `width` visible columns.
+pub fn fit_text(s: &str, width: usize) -> String {
+    let vis = visible_width(s);
+    if vis <= width {
+        format!("{}{}", s, " ".repeat(width - vis))
+    } else {
+        clip_to_width(s, width)
+    }
+}
+
+fn status_indicator(status: &AgentStatus) -> &'static str {
     match status {
-        AgentStatus::Idle => "  ".to_string(),
-        AgentStatus::Working => format!("{GREEN}● {RESET}"),
-        AgentStatus::NeedsInput => format!("{YELLOW}● {RESET}"),
-        AgentStatus::Done => format!("{GREEN}✓ {RESET}"),
+        AgentStatus::Idle => "  ",
+        AgentStatus::Working => "● ",
+        AgentStatus::Awaiting => "● ",
+        AgentStatus::Done => "✓ ",
+    }
+}
+
+fn status_color(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "",
+        AgentStatus::Working => GREEN,
+        AgentStatus::Awaiting => YELLOW,
+        AgentStatus::Done => GREEN,
     }
 }
 
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
-    let title = format!(" zelligent: {} ", repo_name);
-    let pad = cols.saturating_sub(title.len());
+    let title = format!(" {} ", repo_name);
+    let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 
+/// Render the sidebar list from sidebar_items (two-line rows: name + subtitle).
+pub fn render_sidebar_list(
+    w: &mut impl Write,
+    items: &[SidebarItem],
+    agent_statuses: &BTreeMap<String, AgentStatus>,
+    selected: usize,
+    rows: usize,
+    cols: usize,
+) {
+    if items.is_empty() {
+        writeln!(w).unwrap();
+        writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
+        writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
+        writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
+        writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
+        writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
+        writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
+        writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
+        writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
+        writeln!(w).unwrap();
+        writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
+        writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
+        return;
+    }
+
+    // Two lines per item, reserve space for header, footer, status
+    let lines_per_item = 2;
+    let max_items = rows.saturating_sub(5).max(1) / lines_per_item;
+    let start = if selected >= max_items {
+        selected - max_items + 1
+    } else {
+        0
+    };
+
+    let content_width = cols.saturating_sub(4); // 2 left margin + 2 right
+
+    writeln!(w).unwrap();
+    for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
+        let is_selected = idx == selected;
+        let status = agent_statuses
+            .get(&item.tab_name)
+            .unwrap_or(&AgentStatus::Idle);
+        let ind = status_indicator(status);
+        let sc = status_color(status);
+
+        // Line 1: status indicator + display name
+        let name = fit_text(&item.display_name, content_width.saturating_sub(2));
+        if is_selected {
+            writeln!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}").unwrap();
+        } else {
+            writeln!(w, "  {sc}{ind}{RESET} {name} ", ).unwrap();
+        }
+
+        // Line 2: subtitle (branch or "user tab")
+        let subtitle = match &item.matched_branch {
+            Some(branch) => format!("branch: {branch}"),
+            None => "user tab".to_string(),
+        };
+        let subtitle = fit_text(&subtitle, content_width);
+        if is_selected {
+            writeln!(w, "    {DIM}{INVERSE} {subtitle} {RESET}").unwrap();
+        } else {
+            writeln!(w, "    {DIM} {subtitle} {RESET}").unwrap();
+        }
+    }
+}
+
+/// Render worktree list (legacy, used when sidebar_items are empty).
 pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_statuses: &BTreeMap<String, AgentStatus>, selected: usize, rows: usize) {
     if worktrees.is_empty() {
         writeln!(w).unwrap();
@@ -66,13 +184,13 @@ pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_st
     for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
         let tab_name = sanitize_tab_name(&wt.branch);
-        let indicator = status_indicator(
-            agent_statuses.get(&tab_name).unwrap_or(&AgentStatus::Idle),
-        );
+        let status = agent_statuses.get(&tab_name).unwrap_or(&AgentStatus::Idle);
+        let ind = status_indicator(status);
+        let sc = status_color(status);
         if wt.dir != wt.branch {
-            writeln!(w, "  {indicator}{cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
+            writeln!(w, "  {sc}{ind}{RESET}{cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
         } else {
-            writeln!(w, "  {indicator}{cursor} {dir} {RESET}", dir = wt.dir).unwrap();
+            writeln!(w, "  {sc}{ind}{RESET}{cursor} {dir} {RESET}", dir = wt.dir).unwrap();
         }
     }
 }
@@ -129,7 +247,7 @@ pub fn render_confirm(w: &mut impl Write, worktree_dir: &str, branch: &str) {
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
 
-pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
+pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize) {
     writeln!(w).unwrap();
     match mode {
         Mode::Loading => {}
@@ -138,7 +256,7 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
                 w,
                 "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
                  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
-                 {DIM}r{RESET} refresh  {DIM}q{RESET} quit"
+                 {DIM}r{RESET} refresh"
             )
             .unwrap();
         }
@@ -155,7 +273,8 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
         }
         Mode::NotGitRepo | Mode::Confirming => {}
     }
-    writeln!(w, "  {DIM}{version}{RESET}").unwrap();
+    let ver_line = fit_text(version, cols.saturating_sub(2));
+    writeln!(w, "  {DIM}{ver_line}{RESET}").unwrap();
 }
 
 pub fn render_status(w: &mut impl Write, message: &str, is_error: bool) {

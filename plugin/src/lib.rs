@@ -10,7 +10,7 @@ pub enum AgentStatus {
     #[default]
     Idle,
     Working,
-    NeedsInput,
+    Awaiting,
     Done,
 }
 
@@ -280,7 +280,7 @@ impl State {
             Action::Notify { tab_name, status } => {
                 // macOS-only: osascript and afplay. On Linux, use notify-send/paplay.
                 let body = match status {
-                    AgentStatus::NeedsInput => format!("{tab_name} needs input"),
+                    AgentStatus::Awaiting => format!("{tab_name} needs input"),
                     AgentStatus::Done => format!("{tab_name} finished"),
                     _ => return,
                 };
@@ -297,7 +297,7 @@ impl State {
                     ],
                     BTreeMap::new(),
                 );
-                if matches!(status, AgentStatus::NeedsInput) {
+                if matches!(status, AgentStatus::Awaiting) {
                     run_command(
                         &["afplay", "/System/Library/Sounds/Glass.aiff"],
                         BTreeMap::new(),
@@ -638,7 +638,7 @@ impl State {
         };
         let status = match msg.args.get("event").map(|s| s.as_str()) {
             Some("Start") | Some("UserPromptSubmit") => AgentStatus::Working,
-            Some("PermissionRequest") => AgentStatus::NeedsInput,
+            Some("PermissionRequest") => AgentStatus::Awaiting,
             Some("Stop") => AgentStatus::Done,
             Some(other) => {
                 self.status_message = format!("Unknown agent event: {other}");
@@ -658,7 +658,7 @@ impl State {
         self.agent_statuses.insert(tab_name.clone(), status);
         // TODO: consider suppressing notifications when the tab is active
         match status {
-            AgentStatus::NeedsInput | AgentStatus::Done => {
+            AgentStatus::Awaiting | AgentStatus::Done => {
                 Action::Notify { tab_name, status }
             }
             _ => Action::None,
@@ -703,24 +703,28 @@ impl State {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_worktree_list(w, &self.worktrees, &self.agent_statuses, self.selected_index, rows);
+                if !self.sidebar_items.is_empty() {
+                    ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows, cols);
+                } else {
+                    ui::render_worktree_list(w, &self.worktrees, &self.agent_statuses, self.selected_index, rows);
+                }
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::InputBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_input(w, &self.input_buffer);
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
@@ -1767,8 +1771,8 @@ mod tests {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "feat-a"), ("event", "PermissionRequest")]));
-        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::NeedsInput });
-        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::NeedsInput));
+        assert_eq!(action, Action::Notify { tab_name: "feat-a".into(), status: AgentStatus::Awaiting });
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Awaiting));
     }
 
     #[test]
