@@ -44,6 +44,17 @@ not_contains() {
 
 excludes() { not_contains "$@"; }
 
+count_equals() {
+  local desc="$1" needle="$2" expected="$3" haystack="$4"
+  local actual
+  actual=$(echo "$haystack" | grep -oF -- "$needle" | wc -l | tr -d ' ')
+  if [ "$actual" -eq "$expected" ]; then
+    pass "$desc"
+  else
+    fail "$desc (expected $expected occurrences of '$needle', got $actual)"
+  fi
+}
+
 # ── Session name generation ────────────────────────────────────────────────────
 echo "Session name generation:"
 
@@ -88,7 +99,7 @@ contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains sidebar plugin" 'plugin location="file:'    "$out"
-excludes "layout uses left sidebar split (no top stack)" 'split_direction="vertical"' "$out"
+count_equals "L1: exactly one horizontal split per tab" 'split_direction="horizontal"' 1 "$out"
 excludes "layout omits tab-bar"           'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
@@ -366,7 +377,7 @@ contains "no args with plugin: uses session layout" "--new-session-with-layout" 
 contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
-excludes "no args with plugin: no vertical split stack" 'split_direction="vertical"' "$out"
+count_equals "no args with plugin: L1 one horizontal split in template" 'split_direction="horizontal"' 1 "$out"
 rm -rf "$MOCK_NOARGS_LAYOUT_BIN" "$FAKE_NOARGS_WASM_DIR"
 
 # ── Stale socket timeout ──────────────────────────────────────────────────────
