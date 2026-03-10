@@ -2,9 +2,9 @@
 source: tests/render_snapshots.rs
 expression: "render_to_string(&s, 20, 80)"
 ---
-[1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
+[1m[36m  ──────────────────────────────────────────────────────────────────────────────[0m
 
   [2mNo branches found.[0m
 
   [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m create  [2mEsc[0m back
-  [2mVERSION[0m
+  [2mVERSION                                                             [0m
