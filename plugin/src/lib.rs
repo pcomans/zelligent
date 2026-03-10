@@ -40,6 +40,13 @@ pub struct Worktree {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarItem {
+    pub tab_name: String,
+    pub display_name: String,
+    pub matched_branch: Option<String>,
+}
+
 /// Actions returned by key/event handlers, executed by the plugin shell.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -78,10 +85,8 @@ pub struct State {
     pub initial_cwd: PathBuf,
     pub session_name: Option<String>,
     pub tabs: Vec<TabInfo>,
-    /// Flipped to `true` after the first successful worktree list load.
-    /// Auto-selection of the active tab's worktree only happens before this
-    /// so that subsequent refreshes do not override the user's cursor position.
-    pub has_loaded: bool,
+    /// Sidebar items built from tabs + worktrees. Navigated in browse mode.
+    pub sidebar_items: Vec<SidebarItem>,
     /// Agent status per tab name (sanitized branch name).
     pub agent_statuses: BTreeMap<String, AgentStatus>,
 }
@@ -252,7 +257,6 @@ impl State {
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
-                close_self();
             }
             Action::Refresh => {
                 self.fire_list_worktrees();
@@ -340,21 +344,43 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
-        if !self.has_loaded && self.tabs.iter().any(|t| t.active) {
-            // On the very first load where tab state is known, jump to the
-            // worktree for the active tab so the cursor starts in a meaningful
-            // position. If tabs haven't arrived yet we leave has_loaded = false
-            // so the TabUpdate handler can retry once they do.
-            self.has_loaded = true;
-            if let Some(idx) = self.find_worktree_for_active_tab() {
+        self.recompute_sidebar_items();
+    }
+
+    /// Rebuild sidebar_items from tabs + worktrees, preserving cursor by tab name.
+    pub fn recompute_sidebar_items(&mut self) {
+        // Remember the currently selected tab name for cursor restoration
+        let prev_tab_name = self.sidebar_items
+            .get(self.selected_index)
+            .map(|item| item.tab_name.clone());
+
+        let mut items = Vec::new();
+        for tab in &self.tabs {
+            let matched = self.worktrees.iter().find(|wt| {
+                Self::tab_name_for_branch(&wt.branch) == tab.name
+            });
+            items.push(SidebarItem {
+                tab_name: tab.name.clone(),
+                display_name: tab.name.clone(),
+                matched_branch: matched.map(|wt| wt.branch.clone()),
+            });
+        }
+        self.sidebar_items = items;
+
+        // Restore cursor position by name, or select active tab
+        if let Some(prev_name) = &prev_tab_name {
+            if let Some(idx) = self.sidebar_items.iter().position(|i| i.tab_name == *prev_name) {
                 self.selected_index = idx;
                 return;
             }
         }
-        // On refresh (or when no tab match was found), preserve the user's
-        // cursor position and only clamp if it went out of range.
-        if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
-            self.selected_index = self.worktrees.len() - 1;
+        // Fallback: select the active tab
+        if let Some(idx) = self.sidebar_items.iter().position(|i| {
+            self.tabs.iter().any(|t| t.active && t.name == i.tab_name)
+        }) {
+            self.selected_index = idx;
+        } else if self.selected_index >= self.sidebar_items.len() && !self.sidebar_items.is_empty() {
+            self.selected_index = self.sidebar_items.len() - 1;
         }
     }
 
@@ -489,8 +515,11 @@ impl State {
                     self.status_is_error = false;
                     return Action::Refresh;
                 }
-                BareKey::Char('q') | BareKey::Esc => {
+                BareKey::Esc => {
                     return Action::Close;
+                }
+                BareKey::Char('q') => {
+                    // No-op in sidebar mode (closing the sidebar is destructive)
                 }
                 _ => {}
             }
@@ -746,14 +775,7 @@ impl ZellijPlugin for State {
             }
             Event::TabUpdate(tab_info) => {
                 self.tabs = tab_info;
-                // If worktrees loaded before tabs arrived, do the initial
-                // auto-select now that we have tab state.
-                if !self.has_loaded && !self.worktrees.is_empty() {
-                    self.has_loaded = true;
-                    if let Some(idx) = self.find_worktree_for_active_tab() {
-                        self.selected_index = idx;
-                    }
-                }
+                self.recompute_sidebar_items();
                 Action::None
             }
             Event::Key(key) => {
@@ -1048,9 +1070,9 @@ mod tests {
     }
 
     #[test]
-    fn browse_q_returns_close() {
+    fn browse_q_is_noop_in_sidebar_mode() {
         let mut s = state_with_worktrees();
-        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::Close);
+        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::None);
     }
 
     #[test]
@@ -1419,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn list_worktrees_auto_selects_active_tab_on_initial_load() {
+    fn recompute_sidebar_selects_active_tab() {
         let mut s = State::default();
         s.tabs = vec![
             make_tab("feat-a", false),
@@ -1427,80 +1449,81 @@ mod tests {
             make_tab("feat-c", false),
         ];
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
+        // selected_index should point to active tab in sidebar_items
         assert_eq!(s.selected_index, 1);
-        assert!(s.has_loaded);
+        assert_eq!(s.sidebar_items.len(), 3);
+        assert_eq!(s.sidebar_items[1].tab_name, "feat-b");
     }
 
     #[test]
-    fn list_worktrees_auto_selects_active_tab_with_slash_branch() {
+    fn recompute_sidebar_selects_active_tab_with_slash_branch() {
         let mut s = State::default();
-        s.tabs = vec![make_tab("feature-cool", true)];
+        s.tabs = vec![make_tab("main", false), make_tab("feature-cool", true)];
         s.handle_list_worktrees(Some(0), b"main\tmain\nfeature-cool\tfeature/cool\n", b"");
         assert_eq!(s.selected_index, 1);
+        assert_eq!(s.sidebar_items[1].matched_branch, Some("feature/cool".into()));
     }
 
     #[test]
-    fn list_worktrees_does_not_auto_select_on_refresh() {
+    fn recompute_sidebar_preserves_cursor_by_name() {
         let mut s = State::default();
-        s.has_loaded = true;
-        s.tabs = vec![make_tab("feat-a", true)];
-        s.selected_index = 2;
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
-        assert_eq!(s.selected_index, 2);
-    }
-
-    #[test]
-    fn list_worktrees_defers_auto_select_when_tabs_not_yet_available() {
-        let mut s = State::default();
-        s.selected_index = 0;
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
-        assert!(!s.has_loaded);
-        assert_eq!(s.selected_index, 0);
-    }
-
-    #[test]
-    fn tab_update_triggers_auto_select_when_worktrees_already_loaded() {
-        let mut s = State::default();
-        s.worktrees = vec![
-            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
-            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+        s.tabs = vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
         ];
-        let tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
-        s.tabs = tabs;
-        if !s.has_loaded && !s.worktrees.is_empty() {
-            s.has_loaded = true;
-            if let Some(idx) = s.find_worktree_for_active_tab() {
-                s.selected_index = idx;
-            }
-        }
-        assert!(s.has_loaded);
-        assert_eq!(s.selected_index, 1);
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
+        // Move cursor to feat-c
+        s.selected_index = 2;
+        // Simulate tab update (e.g. active tab changed) — cursor should stay on feat-c
+        s.tabs = vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", true),
+            make_tab("feat-c", false),
+        ];
+        s.recompute_sidebar_items();
+        assert_eq!(s.selected_index, 2);
+        assert_eq!(s.sidebar_items[2].tab_name, "feat-c");
     }
 
     #[test]
-    fn list_worktrees_falls_back_to_clamp_when_no_tab_match() {
+    fn recompute_sidebar_no_tabs_empty() {
         let mut s = State::default();
-        s.selected_index = 5;
-        s.tabs = vec![make_tab("unrelated", true)];
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
+        assert!(s.sidebar_items.is_empty());
         assert_eq!(s.selected_index, 0);
     }
 
     #[test]
-    fn list_worktrees_clamps_on_refresh_when_out_of_range() {
+    fn recompute_sidebar_tab_without_worktree() {
         let mut s = State::default();
-        s.has_loaded = true;
-        s.selected_index = 5;
+        s.tabs = vec![make_tab("user-tab", true)];
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        assert_eq!(s.sidebar_items.len(), 1);
+        assert_eq!(s.sidebar_items[0].tab_name, "user-tab");
+        assert_eq!(s.sidebar_items[0].matched_branch, None);
+    }
+
+    #[test]
+    fn recompute_sidebar_clamps_on_shrink() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("a", false), make_tab("b", true)];
+        s.recompute_sidebar_items();
+        s.selected_index = 1;
+        // Remove a tab
+        s.tabs = vec![make_tab("a", true)];
+        s.recompute_sidebar_items();
         assert_eq!(s.selected_index, 0);
     }
 
     #[test]
-    fn list_worktrees_ambiguous_tab_name_selects_first_match() {
+    fn recompute_sidebar_ambiguous_tab_name() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-cool", true)];
         s.handle_list_worktrees(Some(0), b"feat-cool\tfeat/cool\nfeat-cool\tfeat-cool\n", b"");
-        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.sidebar_items.len(), 1);
+        // Matches first worktree
+        assert_eq!(s.sidebar_items[0].matched_branch, Some("feat/cool".into()));
     }
 
     #[test]
