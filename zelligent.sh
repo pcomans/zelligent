@@ -28,6 +28,34 @@ zellij_list_sessions() {
   fi
 }
 
+# Resolve the zelligent WASM plugin path, honoring explicit overrides first.
+resolve_plugin_path() {
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    [ -f "$ZELLIGENT_PLUGIN_SRC" ] || return 1
+    printf '%s\n' "$ZELLIGENT_PLUGIN_SRC"
+    return 0
+  fi
+
+  local zelligent_bin zelligent_prefix homebrew_plugin dev_plugin
+  zelligent_bin=$(command -v zelligent 2>/dev/null || true)
+  if [ -n "$zelligent_bin" ]; then
+    zelligent_prefix=$(dirname "$(dirname "$zelligent_bin")")
+    homebrew_plugin="$zelligent_prefix/share/zelligent/zelligent-plugin.wasm"
+    if [ -f "$homebrew_plugin" ]; then
+      printf '%s\n' "$homebrew_plugin"
+      return 0
+    fi
+  fi
+
+  dev_plugin="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
+  if [ -f "$dev_plugin" ]; then
+    printf '%s\n' "$dev_plugin"
+    return 0
+  fi
+
+  return 1
+}
+
 # --- Commands that do not require a git repo ---
 
 usage() {
@@ -68,24 +96,17 @@ if [ "$1" = "doctor" ]; then
   # 2. Find the Zellij plugin
   PLUGIN_PATH=""
   PLUGIN_MODE=""
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    if [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-      echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
-      ERRORS=1
-    else
-      PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
+  if PLUGIN_PATH=$(resolve_plugin_path); then
+    if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
       PLUGIN_MODE="custom"
-    fi
-  else
-    HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
-    DEV_PLUGIN="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
-    if [ -f "$HOMEBREW_PLUGIN" ]; then
-      PLUGIN_PATH="$HOMEBREW_PLUGIN"
-      PLUGIN_MODE="homebrew"
-    elif [ -f "$DEV_PLUGIN" ]; then
-      PLUGIN_PATH="$DEV_PLUGIN"
+    elif [ "$PLUGIN_PATH" = "$HOME/.local/share/zelligent/zelligent-plugin.wasm" ]; then
       PLUGIN_MODE="dev"
+    else
+      PLUGIN_MODE="homebrew"
     fi
+  elif [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
+    ERRORS=1
   fi
 
   if [ -z "$PLUGIN_PATH" ]; then
@@ -112,25 +133,7 @@ if [ "$1" = "doctor" ]; then
   mkdir -p "$(dirname "$CONFIG")"
   touch "$CONFIG"
 
-  if grep -v '^\s*//' "$CONFIG" | grep -qF 'zelligent-plugin.wasm'; then
-    echo "  keybinding: ok ($CONFIG)"
-  else
-    cat >> "$CONFIG" <<KDL
-
-keybinds {
-    shared_except "locked" {
-        bind "Ctrl y" {
-            LaunchOrFocusPlugin "file:$PLUGIN_PATH" {
-                floating true
-                move_to_focused_tab true
-                agent_cmd "$SHELL"
-            }
-        }
-    }
-}
-KDL
-    echo "  keybinding: added Ctrl-y to $CONFIG"
-  fi
+  echo "  keybinding: skipped (persistent sidebar only)"
 
   if [ "$(uname)" = "Darwin" ]; then
     if grep -v '^\s*//' "$CONFIG" | grep -qF 'copy_command'; then
@@ -309,10 +312,12 @@ fi
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
   # Check plugin is available
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ] && [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-    echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
-    exit 1
-  elif [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
+  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    if ! resolve_plugin_path >/dev/null; then
+      echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
+      exit 1
+    fi
+  elif ! command -v zelligent &>/dev/null; then
     echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
     exit 1
   fi
@@ -327,6 +332,42 @@ if [ -z "$1" ]; then
     exec zellij attach "$REPO_NAME"
   else
     echo "Creating Zellij session '$REPO_NAME'..."
+    # Start with sidebar layout if plugin is available
+    if PLUGIN_PATH_STARTUP=$(resolve_plugin_path); then
+      PLUGIN_PATH_STARTUP_KDL="${PLUGIN_PATH_STARTUP//\\/\\\\}"
+      PLUGIN_PATH_STARTUP_KDL="${PLUGIN_PATH_STARTUP_KDL//\"/\\\"}"
+      ZELLIGENT_PATH_CMD=$(command -v zelligent 2>/dev/null || echo "$0")
+      ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD//\\/\\\\}"
+      ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD_KDL//\"/\\\"}"
+      REPO_ROOT_KDL="${REPO_ROOT//\\/\\\\}"
+      REPO_ROOT_KDL="${REPO_ROOT_KDL//\"/\\\"}"
+      LAYOUT_STARTUP=$(mktemp "/tmp/zelligent-startup-layout.XXXXXX")
+      cat > "$LAYOUT_STARTUP" <<EOF
+layout {
+    default_tab_template {
+        pane split_direction="horizontal" {
+            pane size="24%" {
+                plugin location="file:$PLUGIN_PATH_STARTUP_KDL" {
+                    zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                    agent_cmd "bash"
+                }
+            }
+            children
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="$REPO_NAME" {
+        pane {
+            pane command="bash" cwd="$REPO_ROOT_KDL"
+            pane command="lazygit" cwd="$REPO_ROOT_KDL" size="30%"
+        }
+    }
+}
+EOF
+      exec zellij --new-session-with-layout "$LAYOUT_STARTUP" --session "$REPO_NAME"
+    fi
     exec zellij --session "$REPO_NAME"
   fi
 fi
@@ -509,18 +550,68 @@ else
         }"
 fi
 
-# Pane content shared by both layouts
+PLUGIN_PATH_LAYOUT=""
+PLUGIN_PATH_LAYOUT_KDL=""
+ZELLIGENT_PATH_CMD=""
+ZELLIGENT_PATH_CMD_KDL=""
+if [ -z "$LAYOUT_TEMPLATE" ]; then
+  if ! PLUGIN_PATH_LAYOUT=$(resolve_plugin_path); then
+    echo "❌ Could not find zelligent plugin (.wasm)." >&2
+    echo "   Install/reinstall with: bash dev-install.sh" >&2
+    exit 1
+  fi
+  PLUGIN_PATH_LAYOUT_KDL="${PLUGIN_PATH_LAYOUT//\\/\\\\}"
+  PLUGIN_PATH_LAYOUT_KDL="${PLUGIN_PATH_LAYOUT_KDL//\"/\\\"}"
+
+  ZELLIGENT_PATH_CMD=$(command -v zelligent 2>/dev/null || echo "$0")
+  ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD//\\/\\\\}"
+  ZELLIGENT_PATH_CMD_KDL="${ZELLIGENT_PATH_CMD_KDL//\"/\\\"}"
+fi
+
+# Agent + lazygit vertical split (used as tab body content)
+tab_body_content() {
+  cat <<EOF
+        pane {
+            $AGENT_PANE
+            pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+        }
+EOF
+}
+
+# Full tab content for `new-tab --layout` (sidebar + agent/lazygit + status-bar)
 pane_content() {
   cat <<EOF
-    pane size=1 borderless=true {
-        plugin location="zellij:tab-bar"
-    }
-    pane split_direction="vertical" {
-        $AGENT_PANE
-        pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
+    pane split_direction="horizontal" {
+        pane size="24%" {
+            plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
+                zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                agent_cmd "$AGENT_CMD_KDL"
+            }
+        }
+$(tab_body_content)
     }
     pane size=1 borderless=true {
         plugin location="zellij:status-bar"
+    }
+EOF
+}
+
+# Session-level default tab template so manual tabs inherit the sidebar frame
+session_default_tab_template() {
+  cat <<EOF
+    default_tab_template {
+        pane split_direction="horizontal" {
+            pane size="24%" {
+                plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
+                    zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
+                    agent_cmd "$AGENT_CMD_KDL"
+                }
+            }
+            children
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
     }
 EOF
 }
@@ -536,8 +627,15 @@ elif [ -n "$ZELLIJ" ]; then
   # Tab layout: no tab wrapper (new-tab provides the tab context)
   { echo "layout {"; pane_content; echo "}"; } > "$LAYOUT"
 else
-  # Session layout: wrap in a named tab
-  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; pane_content; echo "    }"; echo "}"; } > "$LAYOUT"
+  # Session layout: include a default tab template so manual tabs inherit sidebar chrome
+  {
+    echo "layout {"
+    session_default_tab_template
+    echo "    tab name=\"$SESSION_NAME\" {"
+    tab_body_content
+    echo "    }"
+    echo "}"
+  } > "$LAYOUT"
 fi
 
 # Inside Zellij: open as a new tab in the current session.
