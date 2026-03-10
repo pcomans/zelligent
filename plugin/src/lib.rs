@@ -660,11 +660,7 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                if !self.sidebar_items.is_empty() {
-                    ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows, cols);
-                } else {
-                    ui::render_worktree_list(w, &self.worktrees, &self.agent_statuses, self.selected_index, rows);
-                }
+                ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows, cols);
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
