@@ -486,12 +486,17 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), 1);
+                    let len = if self.sidebar_items.is_empty() { self.worktrees.len() } else { self.sidebar_items.len() };
+                    self.selected_index = wrap_navigate(self.selected_index, len, 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), -1);
+                    let len = if self.sidebar_items.is_empty() { self.worktrees.len() } else { self.sidebar_items.len() };
+                    self.selected_index = wrap_navigate(self.selected_index, len, -1);
                 }
                 BareKey::Enter => {
+                    if let Some(item) = self.sidebar_items.get(self.selected_index) {
+                        return Action::SwitchToTab(item.tab_name.clone());
+                    }
                     if let Some(wt) = self.worktrees.get(self.selected_index) {
                         return self.spawn_or_switch(wt.branch.clone());
                     }
@@ -515,10 +520,7 @@ impl State {
                     self.status_is_error = false;
                     return Action::Refresh;
                 }
-                BareKey::Esc => {
-                    return Action::Close;
-                }
-                BareKey::Char('q') => {
+                BareKey::Esc | BareKey::Char('q') => {
                     // No-op in sidebar mode (closing the sidebar is destructive)
                 }
                 _ => {}
@@ -1076,9 +1078,9 @@ mod tests {
     }
 
     #[test]
-    fn browse_esc_returns_close() {
+    fn browse_esc_is_noop_in_sidebar_mode() {
         let mut s = state_with_worktrees();
-        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::Close);
+        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::None);
     }
 
     // --- SelectBranch key handler tests ---
