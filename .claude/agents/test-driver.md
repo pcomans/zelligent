@@ -102,6 +102,8 @@ You are now in the Zellij session manager on "New Session".
 
 Setup is complete.
 
+**Alternative (for sidebar tests):** If the test plan specifies `setup: zelligent`, run `zelligent` from the test repo instead of creating a manual session. This starts a session with the sidebar layout embedded.
+
 ### Phase 3: Execute test steps
 
 For each test step in the plan:
@@ -166,11 +168,13 @@ Use this as the source of truth for navigation assertions (for example: after pr
 
 #### Zelligent plugin UI
 
-Opens as a floating pane on `Ctrl+Y`. Shows:
-- Title bar with the plugin WASM path
-- Worktree list (first item highlighted) or empty state with logo
-- Navigation: j/k (up/down), Enter (open), n (branch), i (new), d (remove), r (refresh), q (quit)
+The plugin runs as a persistent sidebar embedded in every tab (~24% width on the left side). Shows:
+- Header bar with repo name
+- Sidebar list with two-line rows (name + branch subtitle) or empty state with logo
+- Navigation: j/k (up/down), Enter (switch tab), n (branch picker), i (new branch), d (remove), r (refresh)
 - Version at bottom
+- Mouse: click to select, click again to switch, scroll to navigate
+- Note: q and Esc are no-ops in sidebar browse mode (closing the sidebar is destructive)
 
 ### Phase 4: Teardown (ALWAYS run, even if tests fail)
 
