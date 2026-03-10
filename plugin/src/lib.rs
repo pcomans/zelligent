@@ -89,6 +89,8 @@ pub struct State {
     pub sidebar_items: Vec<SidebarItem>,
     /// Agent status per tab name (sanitized branch name).
     pub agent_statuses: BTreeMap<String, AgentStatus>,
+    /// Last rendered row count (for mouse click mapping).
+    pub last_rows: usize,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -513,6 +515,57 @@ impl State {
         Action::None
     }
 
+    /// Calculate which sidebar item index maps to a given line in the rendered output.
+    /// Returns None if the line doesn't correspond to any item.
+    pub fn sidebar_index_at_line(&self, line: usize, rows: usize) -> Option<usize> {
+        // Layout: line 0 = header, line 1 = blank, then 2 lines per item
+        let lines_per_item = 2;
+        let max_items = rows.saturating_sub(5).max(1) / lines_per_item;
+        let start = if self.selected_index >= max_items {
+            self.selected_index - max_items + 1
+        } else {
+            0
+        };
+
+        if line < 2 {
+            return None; // header area
+        }
+        let item_offset = (line - 2) / lines_per_item;
+        let idx = start + item_offset;
+        if idx < self.sidebar_items.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    pub fn handle_mouse_browse(&mut self, mouse: &Mouse) -> Action {
+        match mouse {
+            Mouse::ScrollUp(_) => {
+                self.selected_index = wrap_navigate(self.selected_index, self.sidebar_items.len(), -1);
+            }
+            Mouse::ScrollDown(_) => {
+                self.selected_index = wrap_navigate(self.selected_index, self.sidebar_items.len(), 1);
+            }
+            Mouse::LeftClick(line, _col) => {
+                let line = (*line).max(0) as usize;
+                if let Some(idx) = self.sidebar_index_at_line(line, self.last_rows) {
+                    if idx == self.selected_index {
+                        // Click on already-selected item → switch to that tab
+                        if let Some(item) = self.sidebar_items.get(idx) {
+                            return Action::SwitchToTab(item.tab_name.clone());
+                        }
+                    } else {
+                        // Click on different item → select it
+                        self.selected_index = idx;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     pub fn handle_key_select_branch(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
             match key.bare_key {
@@ -765,6 +818,7 @@ impl ZellijPlugin for State {
 
         subscribe(&[
             EventType::Key,
+            EventType::Mouse,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
@@ -802,6 +856,12 @@ impl ZellijPlugin for State {
                 self.recompute_sidebar_items();
                 Action::None
             }
+            Event::Mouse(mouse) => {
+                match self.mode {
+                    Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
+                    _ => Action::None,
+                }
+            }
             Event::Key(key) => {
                 match self.mode {
                     Mode::Loading => Action::None,
@@ -825,6 +885,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
+        self.last_rows = rows;
         self.render_to(&mut std::io::stdout(), rows, cols);
     }
 }
@@ -1724,5 +1785,81 @@ mod tests {
         let action = s.handle_pipe(&pipe_msg("zelligent-status", &[("tab", "unknown-tab"), ("event", "Stop")]));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("unknown-tab"), None);
+    }
+
+    // --- Mouse handler tests ---
+
+    fn state_with_sidebar_items() -> State {
+        let mut s = State::default();
+        s.mode = Mode::BrowseWorktrees;
+        s.worktrees = vec![
+            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
+            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+            Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
+        ];
+        s.tabs = vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
+        ];
+        s.recompute_sidebar_items();
+        s.last_rows = 20;
+        s
+    }
+
+    #[test]
+    fn mouse_scroll_down_moves_selection() {
+        let mut s = state_with_sidebar_items();
+        s.selected_index = 0;
+        s.handle_mouse_browse(&Mouse::ScrollDown(0));
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_scroll_up_moves_selection() {
+        let mut s = state_with_sidebar_items();
+        s.selected_index = 2;
+        s.handle_mouse_browse(&Mouse::ScrollUp(0));
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_click_selects_item() {
+        let mut s = state_with_sidebar_items();
+        s.selected_index = 0;
+        // Line 2-3 = first item, line 4-5 = second item
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn mouse_click_already_selected_switches_tab() {
+        let mut s = state_with_sidebar_items();
+        s.selected_index = 1;
+        // Click on second item (already selected) → switch
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
+    }
+
+    #[test]
+    fn mouse_click_header_area_noop() {
+        let mut s = state_with_sidebar_items();
+        s.selected_index = 0;
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(0, 5));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn sidebar_index_at_line_maps_correctly() {
+        let s = state_with_sidebar_items();
+        assert_eq!(s.sidebar_index_at_line(0, 20), None); // header
+        assert_eq!(s.sidebar_index_at_line(1, 20), None); // blank
+        assert_eq!(s.sidebar_index_at_line(2, 20), Some(0)); // first item line 1
+        assert_eq!(s.sidebar_index_at_line(3, 20), Some(0)); // first item line 2
+        assert_eq!(s.sidebar_index_at_line(4, 20), Some(1)); // second item line 1
+        assert_eq!(s.sidebar_index_at_line(5, 20), Some(1)); // second item line 2
+        assert_eq!(s.sidebar_index_at_line(6, 20), Some(2)); // third item
     }
 }
