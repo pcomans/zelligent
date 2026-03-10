@@ -9,6 +9,8 @@ SCRIPT="$(cd "$(dirname "$0")" && pwd)/zelligent.sh"
 GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
+# Spawn now requires a resolvable plugin path; use the script path as a stable fake in tests.
+export ZELLIGENT_PLUGIN_SRC="${ZELLIGENT_PLUGIN_SRC:-$SCRIPT}"
 
 pass() { echo "  ✅ $1"; ((PASS++)); }
 fail() { echo "  ❌ $1"; ((FAIL++)); }
@@ -85,7 +87,9 @@ EXPECTED_CWD="$HOME/.zelligent/worktrees/$REPO_NAME/test-layout-branch"
 contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
-contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"
+contains "layout contains sidebar plugin" 'plugin location="file:'    "$out"
+excludes "layout uses left sidebar split (no top stack)" 'split_direction="vertical"' "$out"
+excludes "layout omits tab-bar"           'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 contains "new worktree: setup.sh runs as preamble" 'setup.sh'        "$out"
@@ -339,6 +343,32 @@ check "no args creates session" "0" "$code"
 contains "no args: prints session message" "session" "$out"
 rm -rf "$MOCK_NOARGS_BIN"
 
+# No args outside Zellij with plugin available: starts with zelligent layout
+MOCK_NOARGS_LAYOUT_BIN=$(mktemp -d)
+FAKE_NOARGS_WASM_DIR=$(mktemp -d)
+FAKE_NOARGS_WASM="$FAKE_NOARGS_WASM_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_NOARGS_WASM"
+cat > "$MOCK_NOARGS_LAYOUT_BIN/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "list-sessions" ]; then echo ""; exit 0; fi
+echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
+MOCK
+cat > "$MOCK_NOARGS_LAYOUT_BIN/zelligent" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_NOARGS_LAYOUT_BIN/zellij" "$MOCK_NOARGS_LAYOUT_BIN/zelligent"
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="$FAKE_NOARGS_WASM" PATH="$MOCK_NOARGS_LAYOUT_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+check "no args with plugin: exits 0" "0" "$code"
+contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
+contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
+contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
+contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
+excludes "no args with plugin: no vertical split stack" 'split_direction="vertical"' "$out"
+rm -rf "$MOCK_NOARGS_LAYOUT_BIN" "$FAKE_NOARGS_WASM_DIR"
+
 # ── Stale socket timeout ──────────────────────────────────────────────────────
 echo "Stale socket timeout:"
 
@@ -511,10 +541,9 @@ check "doctor exits 0" "0" "$code"
 check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
 CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
-contains "doctor adds keybinding" "zelligent-plugin.wasm" "$CONFIG_CONTENT"
-contains "doctor adds Ctrl y" "Ctrl y" "$CONFIG_CONTENT"
+not_contains "doctor does not add launcher keybinding" "Ctrl y" "$CONFIG_CONTENT"
 
-# doctor writes permissions with file: prefix matching the config keybinding
+# doctor writes permissions for the plugin path
 if [ "$(uname)" = "Darwin" ]; then
   PERM_FILE="$MOCK_DR_HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
 else
@@ -533,7 +562,7 @@ out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
-contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
+contains "doctor idempotent: keybinding skipped" "keybinding: skipped (persistent sidebar only)" "$out2"
 contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
@@ -541,7 +570,7 @@ check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
 rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
 
-# doctor with existing keybinds block in config: appends without corrupting
+# doctor with existing keybinds block in config: preserves existing keybinds
 MOCK_DR_BIN2=$(mktemp -d)
 MOCK_DR_HOME2=$(mktemp -d)
 FAKE_WASM_DIR2=$(mktemp -d)
@@ -567,7 +596,7 @@ out=$(HOME="$MOCK_DR_HOME2" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM2" \
 check "doctor with existing keybinds exits 0" "0" "$code"
 CONFIG_CONTENT2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
 contains "doctor preserves existing keybinds" "Ctrl x" "$CONFIG_CONTENT2"
-contains "doctor adds new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
+not_contains "doctor does not add new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
 
 rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2" "$FAKE_WASM_DIR2"
 
@@ -715,6 +744,7 @@ cleanup_test_branch
 contains "outside zellij (new): prints session message"          "Creating Zellij session"            "$out"
 contains "outside zellij (new): session named after repo"        "$REPO_NAME"                         "$out"
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
+contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
 
 # Outside Zellij, repo session already exists: add tab and attach
@@ -770,7 +800,7 @@ MOCK
 
   DUMP=$(ZELLIJ_SESSION_NAME="$TEST_SESSION" zellij action dump-layout 2>/dev/null)
   contains "tab appears in session layout" 'tab name="integration-test-branch"' "$DUMP"
-  contains "tab has tab-bar"    'plugin location="zellij:tab-bar"'    "$DUMP"
+  contains "tab has sidebar plugin" 'plugin location="file:' "$DUMP"
   contains "tab has status-bar" 'plugin location="zellij:status-bar"' "$DUMP"
 
   zellij kill-session "$TEST_SESSION" 2>/dev/null
