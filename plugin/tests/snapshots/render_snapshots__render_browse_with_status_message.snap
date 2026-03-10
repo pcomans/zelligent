@@ -4,9 +4,12 @@ expression: "render_to_string(&s, 20, 80)"
 ---
 [1m[36m  ──────────────────────────────────────────────────────────────────────────────[0m
 
-    [0m[7m feat-a [0m
-    [0m feat-b [0m
-    [0m feat-c [0m
+    [0m[7m feat-a                                                                     [0m
+    [2m[7m branch: feat-a                                                               [0m
+    [0m feat-b                                                                     
+    [2m branch: feat-b                                                               [0m
+    [0m feat-c                                                                     
+    [2m branch: feat-c                                                               [0m
 
   [32mSpawned worktree for feat-d[0m
 

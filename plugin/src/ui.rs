@@ -15,7 +15,7 @@ use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::{AgentStatus, Mode, SidebarItem, Worktree};
+use crate::{AgentStatus, Mode, SidebarItem};
 
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
@@ -36,6 +36,10 @@ pub fn visible_width(s: &str) -> usize {
 pub fn clip_to_width(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
+    }
+    // Check if the string already fits
+    if visible_width(s) <= max_width {
+        return s.to_string();
     }
     let mut width = 0;
     let mut result = String::new();
@@ -155,45 +159,6 @@ pub fn render_sidebar_list(
     }
 }
 
-/// Render worktree list (legacy, used when sidebar_items are empty).
-pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_statuses: &BTreeMap<String, AgentStatus>, selected: usize, rows: usize) {
-    if worktrees.is_empty() {
-        writeln!(w).unwrap();
-        writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
-        writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
-        writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
-        writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
-        writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
-        writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
-        writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
-        writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
-        writeln!(w).unwrap();
-        writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
-        writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
-        return;
-    }
-
-    let max_visible = rows.saturating_sub(5).max(1); // header + footer + margins
-    let start = if selected >= max_visible {
-        selected - max_visible + 1
-    } else {
-        0
-    };
-
-    writeln!(w).unwrap();
-    for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
-        let cursor = if idx == selected { INVERSE } else { "" };
-        let tab_name = sanitize_tab_name(&wt.branch);
-        let status = agent_statuses.get(&tab_name).unwrap_or(&AgentStatus::Idle);
-        let ind = status_indicator(status);
-        let sc = status_color(status);
-        if wt.dir != wt.branch {
-            writeln!(w, "  {sc}{ind}{RESET}{cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
-        } else {
-            writeln!(w, "  {sc}{ind}{RESET}{cursor} {dir} {RESET}", dir = wt.dir).unwrap();
-        }
-    }
-}
 
 pub fn render_branch_list(w: &mut impl Write, branches: &[String], selected: usize, rows: usize) {
     if branches.is_empty() {
