@@ -144,6 +144,24 @@ Send keys to window `view` to send input directly to Zellij:
 - `d` — remove
 - `r` — refresh
 
+### High-Resolution Proof Capture
+
+When generating "proofs" or visual confirmation for users, use a 2.2x width terminal (220 columns) to ensure the layout (especially two-line sidebar items and lazygit) is fully visible without truncation.
+
+```bash
+# Optimal proof dimensions
+tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo
+```
+
+### Direct CLI Fallback (Non-MCP)
+
+If `mcp__tmux` tools are unavailable, use direct `run_shell_command` calls with the `zt-driver-test` socket:
+
+1. **Setup**: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo`
+2. **Interact**: `tmux -L zt-driver-test send-keys -t zt-driver:view "..." Enter`
+3. **Capture**: `tmux -L zt-driver-test capture-pane -t zt-driver:view -p`
+4. **Teardown**: `tmux -L zt-driver-test kill-server`
+
 #### Selection assertions
 
 Since capture-pane gives plain text, check for the expected item appearing on a row that has visual selection markers or is listed first. For exact selection state, read the content carefully — the selected row uses inverse video which may appear differently in tmux captures.
