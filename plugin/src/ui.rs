@@ -214,13 +214,19 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
     match mode {
         Mode::Loading => {}
         Mode::BrowseWorktrees => {
-            writeln!(
-                w,
-                "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
-                 {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
-                 {DIM}r{RESET} refresh"
-            )
-            .unwrap();
+            // Two-line footer for narrow sidebar widths
+            if cols >= 55 {
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
+                     {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
+                     {DIM}r{RESET} refresh"
+                )
+                .unwrap();
+            } else {
+                writeln!(w, "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open").unwrap();
+                writeln!(w, "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} refresh").unwrap();
+            }
         }
         Mode::SelectBranch => {
             writeln!(
