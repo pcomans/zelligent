@@ -141,23 +141,26 @@ pub fn render_sidebar_list(
         let sc = status_color(status);
 
         // Line 1: status indicator + display name with Powerline arrow
-        let name_width = content_width.saturating_sub(4); // spacing for ind and arrows
+        let name_width = content_width.saturating_sub(4);
         let name = fit_text(&item.display_name, name_width);
+        let is_user_tab = item.matched_branch.is_none();
+        let ind_str = if is_user_tab { "  " } else { status_indicator(status) };
         
         if is_active {
             if is_selected {
-                // High contrast active/selected: background starts at indicator
-                write!(w, "  {BG_CYAN}{FG_BLACK}{sc}{ind} {name} {RESET}{CYAN}{RESET}").unwrap();
+                // High contrast active/selected
+                write!(w, "  {BG_CYAN}{FG_BLACK}{ind_str}{name} {RESET}{CYAN}{RESET}").unwrap();
             } else {
-                // Active but not focused: just bold/cyan
-                write!(w, "  {BOLD}{CYAN}  {ind}{name} {RESET}{CYAN}{RESET}").unwrap();
+                // Active but not focused: Cyan text with solid caret
+                write!(w, "  {BOLD}{CYAN}{ind_str}{name} {RESET}{CYAN}{RESET}").unwrap();
             }
         } else if is_selected {
-            // Selected but not active: inverted starting at indicator
-            write!(w, "  {INVERSE}{ind}{name} {RESET}{INVERSE}{RESET}").unwrap();
+            // Selected but not active: Inverted background with solid caret
+            write!(w, "  {INVERSE}{ind_str}{name} {RESET}{RESET}").unwrap();
         } else {
             // Idle
-            write!(w, "  {sc}{ind}{RESET} {name} ").unwrap();
+            let sc = status_color(status);
+            write!(w, "  {sc}{ind_str}{RESET}{name} ").unwrap();
         }
         writeln!(w).unwrap();
 
