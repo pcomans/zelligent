@@ -52,7 +52,9 @@ Review the generated `.snap` files in `plugin/tests/snapshots/` before committin
 
 **Integration tests (require Zellij):** headless session creation via `zellij attach --create-background`, layout verification via `dump-layout`.
 
-**Manual testing required:** visual appearance, agent command launching, end-to-end spawn/remove from a live Zellij session. See [docs/design-docs/zellij-behaviors.md](docs/design-docs/zellij-behaviors.md) for testing patterns.
+**UI harness tests (require tmux MCP):** visual layout, sidebar rendering, keyboard navigation. Plans live in `tests/harness/plans/`. Run by asking Claude to execute a plan — it delegates to the `test-driver` subagent which wraps Zellij in tmux and reads terminal content via `capture-pane`. See [tests/harness/README.md](tests/harness/README.md).
+
+**Manual testing required:** agent command launching, end-to-end spawn/remove from a live Zellij session. See [docs/design-docs/zellij-behaviors.md](docs/design-docs/zellij-behaviors.md) for testing patterns.
 
 ## Push gate
 

@@ -6,9 +6,10 @@ fixture: setup-empty-repo.sh
 
 Verifies that the persistent sidebar renders correctly in the layout.
 
-## Test 1: Sidebar is visible on session start
-- Action: Start a zelligent session (`cd /tmp/zelligent-test-repo && zelligent`)
-- Expected: The terminal shows a split layout with a narrow pane on the left (~24% width) containing the zelligent plugin. The sidebar should show the Zelligent ASCII logo (empty state) and hints: "n pick an existing branch", "i type a new branch name".
+## Test 1: Sidebar is visible and in browse mode
+- Action: Open a new tab with the zelligent sidebar layout (`zellij action new-tab --layout FILE` from within the test-harness session)
+- Expected: The terminal shows a split layout with a narrow pane on the left (~24% width) containing the zelligent plugin. The plugin renders in browse mode — listing the session's existing tabs (including "test-harness") as sidebar entries — with footer hints "↑/k up ↓/j down Enter open". No empty-state logo is expected here because the session already has tabs.
+- Note: The empty-state logo only appears when zelligent starts a brand-new single-tab session with no existing tabs. That path cannot be tested via the harness (which always adds a tab to an existing session).
 
 ## Test 2: No tab bar is present
 - Action: Read the full terminal buffer
