@@ -150,11 +150,11 @@ pub fn render_sidebar_list(
                 write!(w, "  {BG_CYAN}{FG_BLACK}{sc}{ind} {name} {RESET}{CYAN}{RESET}").unwrap();
             } else {
                 // Active but not focused: just bold/cyan
-                write!(w, "  {BOLD}{CYAN}{sc}{ind} {name} {RESET}{CYAN}{RESET}").unwrap();
+                write!(w, "  {BOLD}{CYAN}  {ind}{name} {RESET}{CYAN}{RESET}").unwrap();
             }
         } else if is_selected {
             // Selected but not active: inverted starting at indicator
-            write!(w, "  {INVERSE}{sc}{ind} {name} {RESET}{DIM}{RESET}").unwrap();
+            write!(w, "  {INVERSE}{ind}{name} {RESET}{INVERSE}{RESET}").unwrap();
         } else {
             // Idle
             write!(w, "  {sc}{ind}{RESET} {name} ").unwrap();
@@ -162,22 +162,15 @@ pub fn render_sidebar_list(
         writeln!(w).unwrap();
 
         // Line 2: subtitle (branch or "user tab")
+        // Line 2 is NEVER highlighted, just colored to match the state
         let subtitle_text = match &item.matched_branch {
             Some(branch) => format!("branch: {branch}"),
             None => "user tab".to_string(),
         };
-        // Pad subtitle to match Line 1 width exactly (sc + ind + name + 2 padding spaces)
-        let subtitle_width = name_width + 5;
-        let subtitle = fit_text(&subtitle_text, subtitle_width);
+        let subtitle = fit_text(&subtitle_text, content_width);
         
-        if is_selected {
-            if is_active {
-                writeln!(w, "  {BG_CYAN}{FG_BLACK}   {subtitle}{RESET}").unwrap();
-            } else {
-                writeln!(w, "  {INVERSE}   {subtitle}{RESET}").unwrap();
-            }
-        } else if is_active {
-            writeln!(w, "  {CYAN}   {subtitle}{RESET}").unwrap();
+        if is_active {
+            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
         } else {
             writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
         }
