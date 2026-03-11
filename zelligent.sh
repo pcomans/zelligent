@@ -345,7 +345,7 @@ if [ -z "$1" ]; then
       cat > "$LAYOUT_STARTUP" <<EOF
 layout {
     default_tab_template {
-        pane split_direction="horizontal" {
+        pane split_direction="Vertical" {
             pane size="24%" {
                 plugin location="file:$PLUGIN_PATH_STARTUP_KDL" {
                     zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
@@ -581,7 +581,7 @@ EOF
 # Full tab content for `new-tab --layout` (sidebar + agent/lazygit + status-bar)
 pane_content() {
   cat <<EOF
-    pane split_direction="horizontal" {
+    pane split_direction="Vertical" {
         pane size="24%" {
             plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
                 zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
@@ -600,7 +600,7 @@ EOF
 session_default_tab_template() {
   cat <<EOF
     default_tab_template {
-        pane split_direction="horizontal" {
+        pane split_direction="Vertical" {
             pane size="24%" {
                 plugin location="file:$PLUGIN_PATH_LAYOUT_KDL" {
                     zelligent_path "$ZELLIGENT_PATH_CMD_KDL"
