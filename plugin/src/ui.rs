@@ -147,16 +147,20 @@ pub fn render_sidebar_list(
         if is_active {
             // Option 2: Active Tab has the solid caret on the right
             if is_selected {
-                writeln!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}{CYAN}{RESET}").unwrap();
+                // Focused and Active: High contrast Zellij style
+                write!(w, "  {sc}{ind}{RESET}{BG_CYAN}{FG_BLACK} {name} {RESET}{CYAN}{RESET}").unwrap();
             } else {
-                writeln!(w, "  {sc}{ind}{RESET}{BOLD}{CYAN} {name} {RESET}{CYAN}{RESET}").unwrap();
+                // Active but not focused: Cyan text with solid caret
+                write!(w, "  {sc}{ind}{RESET}{BOLD}{CYAN} {name} {RESET}{CYAN}{RESET}").unwrap();
             }
         } else if is_selected {
-            // Selected but not active: use the thin caret or just highlight
-            writeln!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}{DIM}{RESET}").unwrap();
+            // Selected but not active: Inverted background with thin caret
+            write!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}{DIM}{RESET}").unwrap();
         } else {
-            writeln!(w, "  {sc}{ind}{RESET} {name} ").unwrap();
+            // Idle
+            write!(w, "  {sc}{ind}{RESET} {name} ").unwrap();
         }
+        writeln!(w).unwrap();
 
         // Line 2: subtitle (branch or "user tab")
         let subtitle_text = match &item.matched_branch {
@@ -166,7 +170,11 @@ pub fn render_sidebar_list(
         let subtitle = fit_text(&subtitle_text, content_width);
         
         if is_selected {
-            writeln!(w, "    {DIM}{INVERSE} {subtitle} {RESET}").unwrap();
+            if is_active {
+                writeln!(w, "    {BG_CYAN}{FG_BLACK} {subtitle} {RESET}").unwrap();
+            } else {
+                writeln!(w, "    {DIM}{INVERSE} {subtitle} {RESET}").unwrap();
+            }
         } else if is_active {
             writeln!(w, "    {CYAN} {subtitle} {RESET}").unwrap();
         } else {
