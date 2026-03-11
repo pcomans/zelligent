@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "zelligent-plugin"
-version = "0.0.0-dev"
+version = "0.1.14"
 dependencies = [
  "insta",
  "unicode-width 0.2.2",
