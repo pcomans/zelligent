@@ -97,6 +97,7 @@ pub fn render_sidebar_list(
     w: &mut impl Write,
     items: &[SidebarItem],
     agent_statuses: &BTreeMap<String, AgentStatus>,
+    active_tab_name: Option<&str>,
     selected: usize,
     rows: usize,
     cols: usize,
@@ -131,28 +132,43 @@ pub fn render_sidebar_list(
     writeln!(w).unwrap();
     for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
         let is_selected = idx == selected;
+        let is_active = active_tab_name.map_or(false, |name| name == item.tab_name);
+        
         let status = agent_statuses
             .get(&item.tab_name)
             .unwrap_or(&AgentStatus::Idle);
         let ind = status_indicator(status);
         let sc = status_color(status);
 
-        // Line 1: status indicator + display name
-        let name = fit_text(&item.display_name, content_width.saturating_sub(2));
-        if is_selected {
-            writeln!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}").unwrap();
+        // Line 1: status indicator + display name with Powerline arrow
+        let name_width = content_width.saturating_sub(4); // spacing for ind and arrows
+        let name = fit_text(&item.display_name, name_width);
+        
+        if is_active {
+            // Option 2: Active Tab has the solid caret on the right
+            if is_selected {
+                writeln!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}{CYAN}{RESET}").unwrap();
+            } else {
+                writeln!(w, "  {sc}{ind}{RESET}{BOLD}{CYAN} {name} {RESET}{CYAN}{RESET}").unwrap();
+            }
+        } else if is_selected {
+            // Selected but not active: use the thin caret or just highlight
+            writeln!(w, "  {sc}{ind}{RESET}{INVERSE} {name} {RESET}{DIM}{RESET}").unwrap();
         } else {
-            writeln!(w, "  {sc}{ind}{RESET} {name} ", ).unwrap();
+            writeln!(w, "  {sc}{ind}{RESET} {name} ").unwrap();
         }
 
         // Line 2: subtitle (branch or "user tab")
-        let subtitle = match &item.matched_branch {
+        let subtitle_text = match &item.matched_branch {
             Some(branch) => format!("branch: {branch}"),
             None => "user tab".to_string(),
         };
-        let subtitle = fit_text(&subtitle, content_width);
+        let subtitle = fit_text(&subtitle_text, content_width);
+        
         if is_selected {
             writeln!(w, "    {DIM}{INVERSE} {subtitle} {RESET}").unwrap();
+        } else if is_active {
+            writeln!(w, "    {CYAN} {subtitle} {RESET}").unwrap();
         } else {
             writeln!(w, "    {DIM} {subtitle} {RESET}").unwrap();
         }

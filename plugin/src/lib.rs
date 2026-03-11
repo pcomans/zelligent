@@ -713,7 +713,8 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows, cols);
+                let active_tab_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str());
+                ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, active_tab_name, self.selected_index, rows, cols);
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
