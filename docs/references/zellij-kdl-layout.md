@@ -7,6 +7,32 @@ For general layout syntax, see the official Zellij documentation:
 
 This doc covers **zelligent-specific layout rules** not found in official docs.
 
+## `split_direction` is counterintuitive — always verify visually
+
+`split_direction="Vertical"` creates a **left/right** (side-by-side) split. `split_direction="Horizontal"` creates a **top/bottom** split. This is the opposite of what many developers expect.
+
+**Rule:** To get a sidebar on the left, use `split_direction="Vertical"`, not `Horizontal`.
+
+```kdl
+// CORRECT: sidebar on left, content on right
+pane split_direction="Vertical" {
+    pane size="24%" { plugin location="file:..." }
+    pane { /* content */ }
+}
+
+// WRONG: sidebar on top, content below
+pane split_direction="Horizontal" {
+    pane size="24%" { plugin location="file:..." }
+    pane { /* content */ }
+}
+```
+
+The authoritative reference is Zellij's built-in `strider` layout, which uses `split_direction="Vertical"` for its left file-browser panel. When in doubt, check `~/.config/zellij/layouts/strider.kdl` or run `zellij action dump-layout` on a strider tab.
+
+**QA tip:** A `dump-layout` integration test that asserts `split_direction="vertical"` (and the absence of `split_direction="horizontal"`) will catch this class of bug automatically. Note: `dump-layout` normalizes the value to lowercase regardless of how it was written in the source KDL.
+
+---
+
 ## `new-tab` layouts must be flat
 
 When opening a tab via `zellij action new-tab --layout FILE`, the layout must be a flat pane list wrapped in `layout { }`. No `tab { }` wrapper.
