@@ -123,7 +123,52 @@ resolve_layout_source() {
 validate_layout_source() {
   local layout_source="$1"
   local placeholder_count
-  placeholder_count=$(perl -0ne 'my $n = () = /\Q{{zelligent_sidebar}}\E/g; print $n' "$layout_source")
+  placeholder_count=$(perl -0ne '
+    my $content = $_;
+    my $needle = "{{zelligent_sidebar}}";
+    my $count = 0;
+    my $pos = 0;
+    my $len = length($content);
+
+    while ($pos < $len) {
+      my $char = substr($content, $pos, 1);
+      if ($char eq q{"}) {
+        $pos++;
+        while ($pos < $len) {
+          my $string_char = substr($content, $pos, 1);
+          if ($string_char eq q{\\}) {
+            $pos += 2;
+            next;
+          }
+          $pos++;
+          last if $string_char eq q{"};
+        }
+        next;
+      }
+      if (substr($content, $pos, 2) eq "//") {
+        my $newline = index($content, "\n", $pos + 2);
+        $pos = $newline >= 0 ? $newline + 1 : $len;
+        next;
+      }
+      if (substr($content, $pos, 2) eq "/*") {
+        my $end = index($content, "*/", $pos + 2);
+        if ($end < 0) {
+          print STDERR "Error: unterminated block comment in layout file.\n";
+          exit 1;
+        }
+        $pos = $end + 2;
+        next;
+      }
+      if (substr($content, $pos, length($needle)) eq $needle) {
+        $count++;
+        $pos += length($needle);
+        next;
+      }
+      $pos++;
+    }
+
+    print $count;
+  ' "$layout_source")
   if [ "$placeholder_count" -ne 1 ]; then
     echo "Error: layout '$layout_source' must contain {{zelligent_sidebar}} exactly once." >&2
     if [ "$layout_source" = "$ZELLIGENT_USER_DIR/layout.kdl" ]; then
@@ -165,10 +210,85 @@ render_layout_template() {
   ZELLIGENT_RENDER_CWD="$cwd_value" \
   ZELLIGENT_RENDER_AGENT_CMD="$agent_cmd_value" \
   ZELLIGENT_RENDER_SIDEBAR="$sidebar_value" \
-    perl -0pe '
-      s/\Q{{cwd}}\E/$ENV{ZELLIGENT_RENDER_CWD}/g;
-      s/\Q{{agent_cmd}}\E/$ENV{ZELLIGENT_RENDER_AGENT_CMD}/g;
-      s/\Q{{zelligent_sidebar}}\E/$ENV{ZELLIGENT_RENDER_SIDEBAR}/g;
+    perl -0ne '
+      my $content = $_;
+      my $cwd = $ENV{ZELLIGENT_RENDER_CWD};
+      my $agent_cmd = $ENV{ZELLIGENT_RENDER_AGENT_CMD};
+      my $sidebar = $ENV{ZELLIGENT_RENDER_SIDEBAR};
+      my $out = "";
+      my $pos = 0;
+      my $len = length($content);
+
+      while ($pos < $len) {
+        if (substr($content, $pos, 2) eq "//") {
+          my $newline = index($content, "\n", $pos + 2);
+          if ($newline < 0) {
+            $out .= substr($content, $pos);
+            last;
+          }
+          $out .= substr($content, $pos, $newline + 1 - $pos);
+          $pos = $newline + 1;
+          next;
+        }
+        if (substr($content, $pos, 2) eq "/*") {
+          my $end = index($content, "*/", $pos + 2);
+          if ($end < 0) {
+            print STDERR "Error: unterminated block comment in layout file.\n";
+            exit 1;
+          }
+          $out .= substr($content, $pos, $end + 2 - $pos);
+          $pos = $end + 2;
+          next;
+        }
+        if (substr($content, $pos, 7) eq "{{cwd}}") {
+          $out .= $cwd;
+          $pos += 7;
+          next;
+        }
+        if (substr($content, $pos, 13) eq "{{agent_cmd}}") {
+          $out .= $agent_cmd;
+          $pos += 13;
+          next;
+        }
+        if (substr($content, $pos, 21) eq "{{zelligent_sidebar}}") {
+          $out .= $sidebar;
+          $pos += 21;
+          next;
+        }
+        if (substr($content, $pos, 1) eq q{"}) {
+          $out .= q{"};
+          $pos++;
+          while ($pos < $len) {
+            if (substr($content, $pos, 7) eq "{{cwd}}") {
+              $out .= $cwd;
+              $pos += 7;
+              next;
+            }
+            if (substr($content, $pos, 13) eq "{{agent_cmd}}") {
+              $out .= $agent_cmd;
+              $pos += 13;
+              next;
+            }
+
+            my $string_char = substr($content, $pos, 1);
+            $out .= $string_char;
+            if ($string_char eq q{\\} && $pos + 1 < $len) {
+              $pos++;
+              $out .= substr($content, $pos, 1);
+            } elsif ($string_char eq q{"}) {
+              $pos++;
+              last;
+            }
+            $pos++;
+          }
+          next;
+        }
+
+        $out .= substr($content, $pos, 1);
+        $pos++;
+      }
+
+      print $out;
     ' "$template_path" > "$output_path"
 }
 
