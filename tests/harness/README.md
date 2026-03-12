@@ -11,7 +11,8 @@ tests/harness/
 │   └── with-worktrees.md
 ├── fixtures/       # Setup scripts (one per scenario)
 │   ├── setup-empty-repo.sh
-│   └── setup-with-worktrees.sh
+│   ├── setup-with-worktrees.sh
+│   └── teardown.sh
 └── README.md
 ```
 

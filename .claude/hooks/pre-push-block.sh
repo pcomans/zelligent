@@ -21,7 +21,14 @@ case "$COMMAND" in
 esac
 
 # Warn if plugin source files were modified (non-blocking)
-if git diff --name-only HEAD~1 2>/dev/null | grep -q '^plugin/src/'; then
+# Use full push range if upstream exists, otherwise last commit only
+if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
+  DIFF_RANGE='@{u}..HEAD'
+else
+  DIFF_RANGE='HEAD~1..HEAD'
+fi
+
+if git diff --name-only "$DIFF_RANGE" 2>/dev/null | grep -q '^plugin/src/'; then
   cat >&2 <<'WARN'
 Plugin code changed. Before pushing, verify:
   - UI rendering in ui.rs remains a pure function of State (no side effects)
