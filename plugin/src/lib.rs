@@ -698,16 +698,25 @@ impl State {
         match self.mode {
             Mode::Loading => {
                 ui::render_header(w, "loading...", cols);
-                writeln!(w).unwrap();
-                if self.status_is_error {
-                    ui::render_status(w, &self.status_message, self.status_is_error);
-                } else {
+                if self.session_name.is_none() {
                     writeln!(w, "  Waiting for permissions...").unwrap();
                 }
+                // Pad to bottom
+                for _ in 0..rows.saturating_sub(6) {
+                    writeln!(w).unwrap();
+                }
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::NotGitRepo => {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
+                
+                let used_lines = 11;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
+
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
@@ -715,17 +724,42 @@ impl State {
                 ui::render_header(w, &self.repo_name, cols);
                 let active_tab_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str());
                 ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, active_tab_name, self.selected_index, rows, cols);
+                
+                let list_lines = (self.sidebar_items.len() * 2).min(rows.saturating_sub(7));
+                let status_lines = if self.status_message.is_empty() { 0 } else { 2 };
+                let footer_lines = if cols >= 55 { 3 } else { 4 };
+                let used_lines = 2 + list_lines + status_lines + footer_lines;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
+
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
+                
+                let list_lines = self.filtered_branches.len().min(rows.saturating_sub(7));
+                let used_lines = 4 + list_lines + 4;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
+
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::InputBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_input(w, &self.input_buffer);
+                
+                let used_lines = 4 + 3 + 4;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
+
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
@@ -734,6 +768,13 @@ impl State {
                 if let Some(wt) = self.worktrees.get(self.selected_index) {
                     ui::render_confirm(w, &wt.branch);
                 }
+                
+                let used_lines = 2 + 4 + 4;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
         }
     }
