@@ -1,7 +1,7 @@
 ---
 name: test-driver
 description: Drives UI test plans against a Zellij terminal session running inside tmux. Use when asked to execute a test plan, validate plugin behavior, or run UI acceptance tests against the zelligent plugin.
-model: haiku
+model: sonnet
 tools:
   - Bash
   - Read
