@@ -108,9 +108,12 @@ tmux capture-pane -t <pane-id> -p [-S -<N>]
 # capture with history (e.g. last 500 lines)
 tmux capture-pane -t <pane-id> -p -S -500
 
-# capture alternate screen (e.g. vim/less)
+# capture with ANSI color codes preserved — required when reading TUI state
+# (e.g. to detect which item is selected/highlighted via escape sequences like \e[7m)
 tmux capture-pane -t <pane-id> -p -e -J
 ```
+
+> Use `-e -J` whenever you need to verify visual state (selections, focus, colors). Plain `-p` strips all ANSI codes, making it impossible to distinguish selected from unselected items.
 
 ## Execute a command and reliably capture its exit code
 
@@ -189,6 +192,8 @@ tmux_click() {
 ```
 
 > Mouse events only reach applications that have enabled mouse reporting (e.g. vim, less, ncurses TUIs, Zellij plugin panes). If the application hasn't enabled mouse mode, use keyboard navigation instead.
+
+> **Coordinates are terminal-absolute.** For split-pane TUIs (e.g. Zellij with a sidebar + main pane), pass the full terminal row/col — the application translates internally. Do not subtract anything for pane borders or pane position. Row 1 = top of terminal, col 1 = left edge. The pane border itself occupies row 1 (and col 1) of the pane's screen area; the first clickable content row is row 2.
 
 ## Working with isolated sockets
 
