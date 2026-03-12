@@ -1,6 +1,6 @@
 # UI Test Harness
 
-Agent-driven UI tests for the zelligent Zellij plugin using tmux MCP.
+Agent-driven UI tests for the zelligent Zellij plugin using a tmux-based harness and the tmux skill.
 
 ## Structure
 
@@ -25,6 +25,7 @@ tests/harness/
 1. Each **test plan** is a markdown file with test steps and a `fixture` reference
 2. Each **fixture** is a shell script that creates the test repo state
 3. The **test-driver** subagent (`.claude/agents/test-driver.md`) reads the plan, runs the fixture, wraps Zellij in a tmux session, executes all test steps by reading `capture-pane` output, and reports results
+4. The **tmux skill** (`.claude/skills/tmux/SKILL.md`) is available for manual proofs, inspection, and ad hoc UI interaction outside the automated test-driver flow
 
 ### tmux harness architecture
 
@@ -35,7 +36,7 @@ tmux session: zt-driver  (isolated socket: zt-driver-test)
                        (zelligent spawn, zellij action, etc.)
 ```
 
-The test driver uses `ZELLIJ=1 ZELLIJ_SESSION_NAME=test-harness zelligent spawn <branch>` from the ctrl window to open sidebar tabs into the running Zellij session. Terminal content is read with `mcp__tmux__capture-pane`.
+The test driver uses `ZELLIJ=1 ZELLIJ_SESSION_NAME=test-harness zelligent spawn <branch>` from the ctrl window to open sidebar tabs into the running Zellij session. Terminal content is read with `capture-pane`.
 
 ## Running a test plan
 
@@ -73,7 +74,7 @@ Fixture scripts must:
 - Print `REPO_DIR=/tmp/zelligent-test-repo` to stdout
 - Be idempotent (clean up before setting up)
 
-The `teardown.sh` script stops the Zellij web server (legacy, kept for compatibility) and cleans up any auth tokens.
+The `teardown.sh` script kills the isolated tmux socket, stops the test Zellij session, and removes the temporary repo/worktrees.
 
 ## Limitations
 

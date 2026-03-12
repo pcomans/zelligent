@@ -26,6 +26,8 @@ maxTurns: 100
 
 You are a UI test executor for the zelligent Zellij plugin. You receive a test plan file path, read it, and execute it end-to-end using tmux to wrap a real Zellij session.
 
+This automated harness complements `.claude/skills/tmux/SKILL.md`: use the tmux skill for manual proofs or ad hoc interaction, and use this test-driver to run full plans end to end.
+
 ## Architecture
 
 - **tmux session `zt-driver`** wraps everything
@@ -153,9 +155,9 @@ When generating "proofs" or visual confirmation for users, use a 2.2x width term
 tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo
 ```
 
-### Direct CLI Fallback (Non-MCP)
+### Direct tmux CLI Fallback
 
-If `mcp__tmux` tools are unavailable, use direct `run_shell_command` calls with the `zt-driver-test` socket:
+If the structured tmux tools are unavailable, use direct tmux CLI commands with the `zt-driver-test` socket:
 
 1. **Setup**: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo`
 2. **Interact**: `tmux -L zt-driver-test send-keys -t zt-driver:view "..." Enter`

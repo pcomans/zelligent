@@ -2,7 +2,7 @@
 # Fixture: Empty git repository with no worktrees
 # When opened via new-tab in an existing session, the plugin shows browse mode
 # listing session tabs. The empty-state logo only appears in a fresh zelligent
-# session started outside Zellij (not testable via the browser harness).
+# session started outside Zellij (not testable via the tmux harness).
 set -euo pipefail
 
 REPO_DIR="/tmp/zelligent-test-repo"
