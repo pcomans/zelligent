@@ -138,6 +138,7 @@ excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 contains "new worktree: setup.sh runs as preamble" 'setup.sh'        "$out"
 contains "new worktree: agent starts via exec"     'exec claude'     "$out"
 excludes "new worktree: no invalid KDL \\$ escape" '"\$'             "$out"
+contains "new worktree: setup failure prompt keeps literal \$?" "Setup failed (exit '\$?'). Press Enter to close." "$out"
 
 # Test: existing worktree should NOT include setup.sh preamble
 # Re-create the worktree so it already exists, then run the script again
@@ -263,6 +264,20 @@ out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN
 check "layout validation: missing sidebar placeholder exits non-zero" "1" "$code"
 contains "layout validation: missing sidebar placeholder prints error" "must contain {{zelligent_sidebar}} exactly once" "$out"
 cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-missing
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+layout {
+    // {{zelligent_sidebar}}
+    pane {
+        pane command="bash"
+    }
+}
+KDL
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-invalid-comment-only claude 2>&1); code=$?
+check "layout validation: commented sidebar placeholder exits non-zero" "1" "$code"
+contains "layout validation: commented sidebar placeholder prints error" "must contain {{zelligent_sidebar}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-comment-only
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 layout {
