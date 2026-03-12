@@ -137,8 +137,6 @@ pub fn render_sidebar_list(
         let status = agent_statuses
             .get(&item.tab_name)
             .unwrap_or(&AgentStatus::Idle);
-        let ind = status_indicator(status);
-        let sc = status_color(status);
 
         // Line 1: status indicator + display name with Powerline arrow
         let name_width = content_width.saturating_sub(4);
