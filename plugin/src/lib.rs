@@ -252,7 +252,6 @@ impl State {
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
-                close_self();
             }
             Action::Refresh => {
                 self.fire_list_worktrees();
@@ -490,7 +489,7 @@ impl State {
                     return Action::Refresh;
                 }
                 BareKey::Char('q') | BareKey::Esc => {
-                    return Action::Close;
+                    return Action::None;
                 }
                 _ => {}
             }
@@ -628,7 +627,7 @@ impl State {
                         self.status_is_error = true;
                     }
                 }
-                BareKey::Char('q') | BareKey::Esc => return Action::Close,
+                BareKey::Char('q') | BareKey::Esc => return Action::None,
                 _ => {}
             }
         }
@@ -1048,15 +1047,15 @@ mod tests {
     }
 
     #[test]
-    fn browse_q_returns_close() {
+    fn browse_q_is_noop() {
         let mut s = state_with_worktrees();
-        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::Close);
+        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::None);
     }
 
     #[test]
-    fn browse_esc_returns_close() {
+    fn browse_esc_is_noop() {
         let mut s = state_with_worktrees();
-        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::Close);
+        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::None);
     }
 
     // --- SelectBranch key handler tests ---
@@ -1609,17 +1608,17 @@ mod tests {
     }
 
     #[test]
-    fn not_git_repo_q_returns_close() {
+    fn not_git_repo_q_is_noop() {
         let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
         let action = s.handle_key_not_git_repo(&key(BareKey::Char('q')));
-        assert_eq!(action, Action::Close);
+        assert_eq!(action, Action::None);
     }
 
     #[test]
-    fn not_git_repo_esc_returns_close() {
+    fn not_git_repo_esc_is_noop() {
         let mut s = State { mode: Mode::NotGitRepo, ..Default::default() };
         let action = s.handle_key_not_git_repo(&key(BareKey::Esc));
-        assert_eq!(action, Action::Close);
+        assert_eq!(action, Action::None);
     }
 
     // --- handle_pipe tests ---

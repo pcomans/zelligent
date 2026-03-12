@@ -38,6 +38,8 @@ SHARE_DIR="$HOME/.local/share/zelligent"
 mkdir -p "$SHARE_DIR"
 cp "plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
 echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
+cp "default-layout.kdl" "$SHARE_DIR/default-layout.kdl"
+echo "Installed default layout to $SHARE_DIR/default-layout.kdl"
 
 # Install Claude Code plugin (marketplace directory) for `zelligent doctor`
 PLUGIN_SRC="claude-plugin"

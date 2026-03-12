@@ -116,7 +116,7 @@ pub fn render_not_git_repo(w: &mut impl Write, cwd: &str) {
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}d{RESET}  save layout to disk").unwrap();
     writeln!(w, "  {DIM}x{RESET}  nuke session & start fresh").unwrap();
-    writeln!(w, "  {DIM}q{RESET}  close plugin").unwrap();
+    writeln!(w, "  {DIM}q/Esc{RESET}  ignored (persistent sidebar)").unwrap();
 }
 
 pub fn render_confirm(w: &mut impl Write, branch: &str) {
@@ -135,7 +135,7 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
                 w,
                 "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
                  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
-                 {DIM}r{RESET} refresh  {DIM}q{RESET} quit"
+                 {DIM}r{RESET} refresh"
             )
             .unwrap();
         }

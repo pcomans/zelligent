@@ -25,7 +25,9 @@ When in doubt, follow these rules.
 - `dump-layout` normalizes `split_direction` to **lowercase**. Test assertions must use lowercase.
 - `kill_sessions(&[&name])` terminates the plugin's own process. Nothing after it runs.
 - WASM plugins CAN read host env vars via `std::env::var()` (Zellij calls `builder.inherit_env()`).
-- KDL layout templates: use `{{cwd}}` and `{{agent_cmd}}` placeholders in `.zelligent/layout.kdl`.
+- KDL layout templates are full `layout { ... }` files, not fragments.
+- `.zelligent/layout.kdl` must contain `{{zelligent_sidebar}}` exactly once.
+- `{{cwd}}` and `{{agent_cmd}}` are plain text placeholders. `{{agent_cmd}}` is a shell fragment intended for `bash -c`.
 
 ## Build
 

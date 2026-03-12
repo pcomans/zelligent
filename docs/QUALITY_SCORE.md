@@ -2,15 +2,15 @@
 
 Quick-reference grading of each project area. Reviewed periodically to track known gaps.
 
-**Last reviewed:** 2026-03-11
+**Last reviewed:** 2026-03-12
 
 ## CLI (`zelligent.sh`)
 
 | Area | Status | Gap |
 |------|--------|-----|
 | Test coverage | 🟢 | Comprehensive test.sh with 50+ assertions covering all subcommands |
-| Error handling | 🟢 | Validates args, non-git dirs, missing dependencies |
-| Documentation | 🟢 | Well-documented in ARCHITECTURE.md and design docs |
+| Error handling | 🟢 | Validates args, missing layout/sidebar assets, non-git dirs, and invalid custom layouts |
+| Documentation | 🟢 | Layout contract and sidebar behavior are documented in ARCHITECTURE.md and references |
 
 ## Plugin (`plugin/`)
 
@@ -24,9 +24,9 @@ Quick-reference grading of each project area. Reviewed periodically to track kno
 
 | Area | Status | Gap |
 |------|--------|-----|
-| Coverage | 🟢 | Design docs for all major subsystems |
-| Freshness | 🟢 | Audited 2026-03-11: 7/9 docs fully accurate, 2 have minor stale line refs |
-| Index completeness | 🟢 | All design docs indexed in design-docs/index.md |
+| Coverage | 🟢 | Design docs cover session layout, tab behavior, resurrection, and notifications |
+| Freshness | 🟢 | Sidebar/layout docs refreshed for the persistent-sidebar model on 2026-03-12 |
+| Index completeness | 🟢 | All current design docs are indexed in design-docs/index.md |
 
 ## CI/CD
 
@@ -40,5 +40,5 @@ Quick-reference grading of each project area. Reviewed periodically to track kno
 
 | Area | Status | Gap |
 |------|--------|-----|
-| Setup | 🟢 | `zelligent doctor` handles everything |
+| Setup | 🟢 | `zelligent doctor` installs permissions, config defaults, and the canonical user layout |
 | Build | 🟡 | Requires PATH workaround for Homebrew Rust (documented but manual) |
