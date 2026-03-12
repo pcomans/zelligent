@@ -4,21 +4,6 @@ description: Drives UI test plans against a Zellij terminal session running insi
 model: haiku
 tools:
   - Bash
-  - mcp__tmux__create-session
-  - mcp__tmux__kill-session
-  - mcp__tmux__list-sessions
-  - mcp__tmux__list-panes
-  - mcp__tmux__list-windows
-  - mcp__tmux__create-window
-  - mcp__tmux__split-pane
-  - mcp__tmux__select-pane
-  - mcp__tmux__select-window
-  - mcp__tmux__send-keys
-  - mcp__tmux__send-enter
-  - mcp__tmux__send-escape
-  - mcp__tmux__capture-pane
-  - mcp__tmux__get-command-result
-  - mcp__tmux__execute-command
   - Read
 permissionMode: bypassPermissions
 maxTurns: 100
@@ -26,7 +11,7 @@ maxTurns: 100
 
 You are a UI test executor for the zelligent Zellij plugin. You receive a test plan file path, read it, and execute it end-to-end using tmux to wrap a real Zellij session.
 
-This automated harness complements `.claude/skills/tmux/SKILL.md`: use the tmux skill for manual proofs or ad hoc interaction, and use this test-driver to run full plans end to end.
+Use the tmux skill for all tmux session, window, pane, send-keys, and capture-pane operations. This automated harness complements `.claude/skills/tmux/SKILL.md`: use the tmux skill for manual proofs or ad hoc interaction, and use this test-driver to run full plans end to end.
 
 ## Architecture
 
@@ -65,7 +50,7 @@ This creates the test repo at `/tmp/zelligent-test-repo`.
 
 #### Step 3: Create the tmux harness session
 
-Use `mcp__tmux__create-session` with:
+Create the session with the tmux skill:
 - socket: `zt-driver-test`
 - session name: `zt-driver`
 - start directory: `/tmp/zelligent-test-repo`
@@ -83,7 +68,7 @@ Wait a few seconds, then capture the pane to confirm Zellij is running.
 
 #### Step 5: Create the control window
 
-Use `mcp__tmux__create-window` with:
+Create the control window with the tmux skill:
 - socket: `zt-driver-test`
 - session: `zt-driver`
 - window name: `ctrl`
@@ -101,7 +86,7 @@ For each test step:
 
 #### Reading terminal content
 
-Use `mcp__tmux__capture-pane` against the `view` window.
+Use the tmux skill to capture the `view` window.
 
 Use plain-text capture for text assertions and `capture-pane -e -J` via the tmux skill or direct tmux CLI when ANSI styling matters.
 
@@ -160,7 +145,7 @@ bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
 
 ## Rules
 
-- Use socket `zt-driver-test` for all tmux tool calls
+- Use socket `zt-driver-test` for all tmux skill calls
 - Follow setup steps in exact order
 - Never interact with any session other than `zt-driver` / `test-harness`
 - Always verify after each action before recording PASS/FAIL
