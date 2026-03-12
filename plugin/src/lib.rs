@@ -518,7 +518,7 @@ impl State {
     /// Calculate which sidebar item index maps to a given line in the rendered output.
     /// Returns None if the line doesn't correspond to any item.
     pub fn sidebar_index_at_line(&self, line: usize, rows: usize) -> Option<usize> {
-        // Layout: line 0 = header, line 1 = blank, then 2 lines per item
+        // Layout: line 0 = header, then 2 lines per item (starting at line 1)
         let lines_per_item = 2;
         let max_items = rows.saturating_sub(5).max(1) / lines_per_item;
         let start = if self.selected_index >= max_items {
@@ -527,10 +527,10 @@ impl State {
             0
         };
 
-        if line < 2 {
+        if line < 1 {
             return None; // header area
         }
-        let item_offset = (line - 2) / lines_per_item;
+        let item_offset = (line - 1) / lines_per_item;
         let idx = start + item_offset;
         if idx < self.sidebar_items.len() {
             Some(idx)
@@ -1855,11 +1855,10 @@ mod tests {
     fn sidebar_index_at_line_maps_correctly() {
         let s = state_with_sidebar_items();
         assert_eq!(s.sidebar_index_at_line(0, 20), None); // header
-        assert_eq!(s.sidebar_index_at_line(1, 20), None); // blank
-        assert_eq!(s.sidebar_index_at_line(2, 20), Some(0)); // first item line 1
-        assert_eq!(s.sidebar_index_at_line(3, 20), Some(0)); // first item line 2
-        assert_eq!(s.sidebar_index_at_line(4, 20), Some(1)); // second item line 1
-        assert_eq!(s.sidebar_index_at_line(5, 20), Some(1)); // second item line 2
-        assert_eq!(s.sidebar_index_at_line(6, 20), Some(2)); // third item
+        assert_eq!(s.sidebar_index_at_line(1, 20), Some(0)); // first item line 1
+        assert_eq!(s.sidebar_index_at_line(2, 20), Some(0)); // first item line 2
+        assert_eq!(s.sidebar_index_at_line(3, 20), Some(1)); // second item line 1
+        assert_eq!(s.sidebar_index_at_line(4, 20), Some(1)); // second item line 2
+        assert_eq!(s.sidebar_index_at_line(5, 20), Some(2)); // third item
     }
 }
