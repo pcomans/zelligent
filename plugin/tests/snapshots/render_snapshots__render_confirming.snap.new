@@ -1,14 +1,13 @@
 ---
 source: tests/render_snapshots.rs
-expression: after_bs
+assertion_line: 102
+expression: "render_to_string(&s, 20, 80)"
 ---
 [1m[36m  ──────────────────────────────────────────────────────────────────────────────[0m
 
-  [1mNew branch name:[0m
+  [33m[1mRemove worktree for 'feat-b'?[0m
 
-  > fi[7m [0m
-
-
+  [2my[0m confirm   [2mn/Esc[0m cancel
 
 
 
@@ -21,5 +20,7 @@ expression: after_bs
 
 
 
-  [2mEnter[0m create  [2mEsc[0m back
+
+
+
   [2mVERSION                                                             [0m
