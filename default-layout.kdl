@@ -1,0 +1,14 @@
+layout {
+    pane split_direction="Vertical" {
+        {{zelligent_sidebar}}
+        pane {
+            pane command="bash" cwd="{{cwd}}" size="70%" {
+                args "-c" "{{agent_cmd}}"
+            }
+            pane command="lazygit" cwd="{{cwd}}" size="30%"
+        }
+    }
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}

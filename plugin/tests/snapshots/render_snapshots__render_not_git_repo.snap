@@ -9,7 +9,7 @@ expression: "render_to_string(&s, 20, 80)"
 
   [2md[0m  save layout to disk
   [2mx[0m  nuke session & start fresh
-  [2mq[0m  close plugin
+  [2mq/Esc[0m  ignored (persistent sidebar)
 
   [31m/tmp/foo is not a git repo: fatal: not a git repository[0m
 

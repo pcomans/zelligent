@@ -25,7 +25,7 @@ The `serialization_interval` config controls how frequently Zellij snapshots the
 
 **Root cause chain:**
 
-1. Plugin launched via Ctrl-Y keybinding has no `cwd` property in keybinding config
+1. Sidebar plugin pane has no explicit `cwd` property in the layout config
 2. `PluginConfig.initial_cwd` = `None`
 3. At runtime, `FillPluginCwd` resolves cwd from the focused pane (works correctly)
 4. But layout serialization (`plugin_map.rs:242`) reads the static `plugin_config.initial_cwd` = `None`
@@ -56,7 +56,7 @@ When the plugin gets a wrong cwd, it enters `NotGitRepo` mode. This mode offers 
 
 - `d` — dump the session layout to disk (for debugging)
 - `x` — nuke the session (`kill_sessions`, terminates the plugin)
-- `q` / `Esc` — close the plugin
+- `q` / `Esc` — ignored (persistent sidebar)
 
 ### Key Zellij source locations
 

@@ -2,38 +2,45 @@
 
 ## What zelligent is
 
-Zelligent spawns AI coding agents into isolated git worktrees, each in its own Zellij tab with a side-by-side lazygit pane. It manages the full lifecycle: creating worktrees, opening tabs, and cleaning up.
+Zelligent runs AI coding agents in isolated git worktrees, each in its own Zellij tab. A zelligent-managed session always has a persistent sidebar on the left for browsing, spawning, and removing worktrees.
 
 ## UX principles
 
-- **One repo = one Zellij session.** Session is named after the repo directory.
-- **One branch = one worktree = one tab.** Each agent gets an isolated copy of the code.
-- **Tabs are named after branches.** `feature/my-thing` becomes tab `feature-my-thing` (slashes replaced with dashes).
-- **Agent + lazygit side by side.** Default layout: 70% agent pane (left), 30% lazygit (right), with tab-bar and status-bar chrome.
-- **Ctrl-Y for the plugin.** Floating UI to browse worktrees, spawn new ones, or switch tabs without leaving Zellij.
-- **Minimal setup.** `zelligent doctor` configures everything. `zelligent` with no args creates or attaches to the session.
+- **One repo = one Zellij session.** Session name is derived from the repo directory.
+- **One branch = one worktree = one tab.** Each agent gets its own isolated checkout.
+- **Sidebar is mandatory.** If the sidebar plugin cannot be loaded, zelligent fails instead of silently dropping to plain Zellij.
+- **Layouts come from files, not script heredocs.** Runtime layout precedence is repo `.zelligent/layout.kdl`, then `~/.zelligent/layout.kdl`, then hard failure.
+- **Repo layout owns the body, zelligent owns the sidebar.** Custom layouts can change the rest of the tab, but must include `{{zelligent_sidebar}}` exactly once.
+- **No hidden launch modes.** Plain `zelligent` and `zelligent spawn` share the same layout rendering pipeline; only placeholder values differ by context.
+- **Manual tabs keep the frame.** New tabs created directly in Zellij inside a zelligent-managed session must inherit the sidebar frame. Full body parity is best-effort if Zellij limits `default_tab_template`.
+- **Minimal global setup.** `zelligent doctor` installs permissions, config defaults, and the default layout. It does not add a plugin keybinding.
 
 ## Conventions
 
-### Session name format
+### Session and tab names
 
-Branch names are sanitized for Zellij session/tab names:
+Branch names are sanitized for Zellij tab names:
 - Replace `/` with `-`
 - Strip characters outside `[a-zA-Z0-9_-]`
-- Example: `feature/my-branch` -> tab named `feature-my-branch`
+- Example: `feature/my-branch` -> `feature-my-branch`
 
-### Layout format
+### Layout contract
 
-Default layout: agent pane (70%) + lazygit (30%) with tab-bar and status-bar chrome. Overridable via `.zelligent/layout.kdl` with `{{cwd}}` and `{{agent_cmd}}` template variables. See [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md) for format rules and gotchas.
+`.zelligent/layout.kdl` is a full layout file with three supported placeholders:
+- `{{zelligent_sidebar}}` required exactly once
+- `{{cwd}}` optional
+- `{{agent_cmd}}` optional
 
-### Agent command
+`{{cwd}}` resolves to:
+- repo root for plain `zelligent`
+- spawned worktree path for `zelligent spawn`
 
-`zelligent spawn <branch> [agent-cmd]` defaults to `$SHELL` if no agent command is given.
+`{{agent_cmd}}` resolves to a shell command fragment intended for `bash -c`, not just a raw binary name.
 
 ### Worktree storage
 
-All worktrees live under `~/.zelligent/worktrees/<repo-name>/<branch-name>`. This keeps them out of the main repo directory.
+All spawned worktrees live under `~/.zelligent/worktrees/<repo-name>/<branch-name>`.
 
 ### Hooks
 
-Repos can provide `.zelligent/setup.sh` and `.zelligent/teardown.sh` scripts that run during spawn/remove. `zelligent init` creates stubs.
+Repos can provide `.zelligent/setup.sh` and `.zelligent/teardown.sh`. `zelligent init` creates stub versions of those scripts.
