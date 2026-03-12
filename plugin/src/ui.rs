@@ -129,7 +129,6 @@ pub fn render_sidebar_list(
 
     let content_width = cols.saturating_sub(4); // 2 left margin + 2 right
 
-    writeln!(w).unwrap();
     for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
         let is_selected = idx == selected;
         let is_active = active_tab_name.map_or(false, |name| name == item.tab_name);
