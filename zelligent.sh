@@ -49,57 +49,43 @@ zellij_list_sessions() {
   fi
 }
 
-# Resolve the zelligent WASM plugin path, honoring explicit overrides first.
-resolve_plugin_path() {
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    [ -f "$ZELLIGENT_PLUGIN_SRC" ] || return 1
-    printf '%s\n' "$ZELLIGENT_PLUGIN_SRC"
+resolve_shared_asset_path() {
+  local override_var="$1"
+  local asset_name="$2"
+  local override_path zelligent_prefix bundled_asset dev_asset
+
+  override_path="${!override_var}"
+  if [ -n "$override_path" ]; then
+    [ -f "$override_path" ] || return 1
+    printf '%s\n' "$override_path"
     return 0
   fi
 
-  local zelligent_prefix homebrew_plugin dev_plugin
   zelligent_prefix=$(resolve_install_prefix)
   if [ -n "$zelligent_prefix" ]; then
-    homebrew_plugin="$zelligent_prefix/share/zelligent/zelligent-plugin.wasm"
-    if [ -f "$homebrew_plugin" ]; then
-      printf '%s\n' "$homebrew_plugin"
+    bundled_asset="$zelligent_prefix/share/zelligent/$asset_name"
+    if [ -f "$bundled_asset" ]; then
+      printf '%s\n' "$bundled_asset"
       return 0
     fi
   fi
 
-  dev_plugin="$ZELLIGENT_SHARE_DIR_DEV/zelligent-plugin.wasm"
-  if [ -f "$dev_plugin" ]; then
-    printf '%s\n' "$dev_plugin"
+  dev_asset="$ZELLIGENT_SHARE_DIR_DEV/$asset_name"
+  if [ -f "$dev_asset" ]; then
+    printf '%s\n' "$dev_asset"
     return 0
   fi
 
   return 1
 }
 
+# Resolve the zelligent WASM plugin path, honoring explicit overrides first.
+resolve_plugin_path() {
+  resolve_shared_asset_path ZELLIGENT_PLUGIN_SRC zelligent-plugin.wasm
+}
+
 resolve_default_layout_path() {
-  if [ -n "$ZELLIGENT_DEFAULT_LAYOUT_SRC" ]; then
-    [ -f "$ZELLIGENT_DEFAULT_LAYOUT_SRC" ] || return 1
-    printf '%s\n' "$ZELLIGENT_DEFAULT_LAYOUT_SRC"
-    return 0
-  fi
-
-  local zelligent_prefix homebrew_layout dev_layout
-  zelligent_prefix=$(resolve_install_prefix)
-  if [ -n "$zelligent_prefix" ]; then
-    homebrew_layout="$zelligent_prefix/share/zelligent/default-layout.kdl"
-    if [ -f "$homebrew_layout" ]; then
-      printf '%s\n' "$homebrew_layout"
-      return 0
-    fi
-  fi
-
-  dev_layout="$ZELLIGENT_SHARE_DIR_DEV/default-layout.kdl"
-  if [ -f "$dev_layout" ]; then
-    printf '%s\n' "$dev_layout"
-    return 0
-  fi
-
-  return 1
+  resolve_shared_asset_path ZELLIGENT_DEFAULT_LAYOUT_SRC default-layout.kdl
 }
 
 resolve_layout_source() {
@@ -120,12 +106,12 @@ resolve_layout_source() {
   return 1
 }
 
-validate_layout_source() {
+count_layout_placeholder() {
   local layout_source="$1"
-  local placeholder_count
-  placeholder_count=$(perl -0ne '
+  local placeholder="$2"
+  ZELLIGENT_COUNT_NEEDLE="$placeholder" perl -0ne '
     my $content = $_;
-    my $needle = "{{zelligent_sidebar}}";
+    my $needle = $ENV{ZELLIGENT_COUNT_NEEDLE};
     my $count = 0;
     my $pos = 0;
     my $len = length($content);
@@ -168,9 +154,18 @@ validate_layout_source() {
     }
 
     print $count;
-  ' "$layout_source")
-  if [ "$placeholder_count" -ne 1 ]; then
-    echo "Error: layout '$layout_source' must contain {{zelligent_sidebar}} exactly once." >&2
+  ' "$layout_source"
+}
+
+validate_layout_source() {
+  local layout_source="$1"
+  local sidebar_count children_count
+
+  sidebar_count=$(count_layout_placeholder "$layout_source" "{{zelligent_sidebar}}")
+  children_count=$(count_layout_placeholder "$layout_source" "{{zelligent_children}}")
+
+  if [ "$sidebar_count" -ne 1 ] || [ "$children_count" -ne 1 ]; then
+    echo "Error: layout '$layout_source' must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once." >&2
     if [ "$layout_source" = "$ZELLIGENT_USER_DIR/layout.kdl" ]; then
       echo "Run 'zelligent doctor' to recreate the default user layout or fix the file manually." >&2
     fi
@@ -178,7 +173,7 @@ validate_layout_source() {
   fi
 }
 
-sidebar_pane_content() {
+sidebar_plugin_content() {
   local plugin_path="$1"
   local raw_agent_cmd="$2"
   local plugin_path_kdl zelligent_path_cmd zelligent_path_cmd_kdl raw_agent_cmd_kdl
@@ -189,32 +184,50 @@ sidebar_pane_content() {
   raw_agent_cmd_kdl=$(escape_kdl_string "$raw_agent_cmd")
 
   cat <<EOF
-pane size="24%" {
-    plugin location="file:$plugin_path_kdl" {
-        zelligent_path "$zelligent_path_cmd_kdl"
-        agent_cmd "$raw_agent_cmd_kdl"
-    }
+plugin location="file:$plugin_path_kdl" {
+    zelligent_path "$zelligent_path_cmd_kdl"
+    agent_cmd "$raw_agent_cmd_kdl"
 }
 EOF
 }
 
-render_layout_template() {
+default_tab_children_content() {
+  local cwd_value="$1"
+  local agent_cmd_kdl="$2"
+  local cwd_kdl
+
+  cwd_kdl=$(escape_kdl_string "$cwd_value")
+
+  cat <<EOF
+pane {
+    pane command="bash" cwd="$cwd_kdl" size="70%" {
+        args "-lc" "$agent_cmd_kdl"
+    }
+    pane command="lazygit" cwd="$cwd_kdl" size="30%"
+}
+EOF
+}
+
+render_layout_fragment() {
   local template_path="$1"
   local output_path="$2"
   local cwd_value="$3"
   local agent_cmd_value="$4"
   local sidebar_value="$5"
+  local children_value="$6"
 
   validate_layout_source "$template_path"
 
-  ZELLIGENT_RENDER_CWD="$cwd_value" \
+  ZELLIGENT_RENDER_CWD="$(escape_kdl_string "$cwd_value")" \
   ZELLIGENT_RENDER_AGENT_CMD="$agent_cmd_value" \
   ZELLIGENT_RENDER_SIDEBAR="$sidebar_value" \
+  ZELLIGENT_RENDER_CHILDREN="$children_value" \
     perl -0ne '
       my $content = $_;
       my $cwd = $ENV{ZELLIGENT_RENDER_CWD};
       my $agent_cmd = $ENV{ZELLIGENT_RENDER_AGENT_CMD};
       my $sidebar = $ENV{ZELLIGENT_RENDER_SIDEBAR};
+      my $children = $ENV{ZELLIGENT_RENDER_CHILDREN};
       my $out = "";
       my $pos = 0;
       my $len = length($content);
@@ -255,6 +268,11 @@ render_layout_template() {
           $pos += 21;
           next;
         }
+        if (substr($content, $pos, 22) eq "{{zelligent_children}}") {
+          $out .= $children;
+          $pos += 22;
+          next;
+        }
         if (substr($content, $pos, 1) eq q{"}) {
           $out .= q{"};
           $pos++;
@@ -292,110 +310,6 @@ render_layout_template() {
     ' "$template_path" > "$output_path"
 }
 
-extract_layout_body() {
-  local layout_file="$1"
-  perl -0ne '
-    my $content = $_;
-
-    sub skip_ws_and_comments {
-      my ($text_ref, $pos_ref) = @_;
-      my $len = length($$text_ref);
-      while ($$pos_ref < $len) {
-        if (substr($$text_ref, $$pos_ref) =~ /\A\s+/s) {
-          $$pos_ref += length($&);
-          next;
-        }
-        if (substr($$text_ref, $$pos_ref, 2) eq "//") {
-          my $newline = index($$text_ref, "\n", $$pos_ref + 2);
-          $$pos_ref = $newline >= 0 ? $newline + 1 : $len;
-          next;
-        }
-        if (substr($$text_ref, $$pos_ref, 2) eq "/*") {
-          my $end = index($$text_ref, "*/", $$pos_ref + 2);
-          if ($end < 0) {
-            print STDERR "Error: unterminated block comment in layout file.\n";
-            exit 1;
-          }
-          $$pos_ref = $end + 2;
-          next;
-        }
-        last;
-      }
-    }
-
-    my $pos = 0;
-    skip_ws_and_comments(\$content, \$pos);
-    if (substr($content, $pos) !~ /\Alayout\b/) {
-      print STDERR "Error: layout must be a full layout { ... } document.\n";
-      exit 1;
-    }
-    $pos += length("layout");
-    skip_ws_and_comments(\$content, \$pos);
-
-    if (substr($content, $pos, 1) ne "{") {
-      print STDERR "Error: layout must be a full layout { ... } document.\n";
-      exit 1;
-    }
-    $pos++;
-
-    my $body_start = $pos;
-    my $depth = 1;
-    my $len = length($content);
-    while ($pos < $len) {
-      my $char = substr($content, $pos, 1);
-      if ($char eq q{"}) {
-        $pos++;
-        while ($pos < $len) {
-          my $string_char = substr($content, $pos, 1);
-          if ($string_char eq q{\\}) {
-            $pos += 2;
-            next;
-          }
-          $pos++;
-          last if $string_char eq q{"};
-        }
-        next;
-      }
-      if (substr($content, $pos, 2) eq "//") {
-        my $newline = index($content, "\n", $pos + 2);
-        $pos = $newline >= 0 ? $newline + 1 : $len;
-        next;
-      }
-      if (substr($content, $pos, 2) eq "/*") {
-        my $end = index($content, "*/", $pos + 2);
-        if ($end < 0) {
-          print STDERR "Error: unterminated block comment in layout file.\n";
-          exit 1;
-        }
-        $pos = $end + 2;
-        next;
-      }
-      if ($char eq "{") {
-        $depth++;
-        $pos++;
-        next;
-      }
-      if ($char eq "}") {
-        $depth--;
-        if ($depth == 0) {
-          print substr($content, $body_start, $pos - $body_start);
-          $pos++;
-          skip_ws_and_comments(\$content, \$pos);
-          if ($pos == $len) {
-            exit 0;
-          }
-          print STDERR "Error: layout must be a full layout { ... } document.\n";
-          exit 1;
-        }
-      }
-      $pos++;
-    }
-
-    print STDERR "Error: layout must be a full layout { ... } document.\n";
-    exit 1;
-  ' "$layout_file"
-}
-
 build_agent_command_value() {
   local raw_agent_cmd="$1"
   local session_name="$2"
@@ -413,24 +327,36 @@ build_agent_command_value() {
   escape_kdl_string "$command"
 }
 
-session_default_tab_template() {
-  local plugin_path="$1"
-  local raw_agent_cmd="$2"
-  local sidebar_content
+write_fragment_layout() {
+  local output_path="$1"
+  local fragment_path="$2"
 
-  sidebar_content=$(sidebar_pane_content "$plugin_path" "$raw_agent_cmd")
+  {
+    echo "layout {"
+    sed 's/^/    /' "$fragment_path"
+    echo "}"
+  } > "$output_path"
+}
 
-  cat <<EOF
-    default_tab_template {
-        pane split_direction="Vertical" {
-$(printf '%s\n' "$sidebar_content" | sed 's/^/            /')
-            children
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-EOF
+write_session_layout() {
+  local output_path="$1"
+  local default_fragment_path="$2"
+  local initial_fragment_path="$3"
+  local tab_name="$4"
+  local tab_name_kdl
+
+  tab_name_kdl=$(escape_kdl_string "$tab_name")
+
+  {
+    echo "layout {"
+    echo "    default_tab_template {"
+    sed 's/^/        /' "$default_fragment_path"
+    echo "    }"
+    echo "    tab name=\"$tab_name_kdl\" {"
+    sed 's/^/        /' "$initial_fragment_path"
+    echo "    }"
+    echo "}"
+  } > "$output_path"
 }
 
 # --- Commands that do not require a git repo ---
@@ -742,24 +668,18 @@ if [ -z "$1" ]; then
     fi
 
     mkdir -p "$ZELLIGENT_USER_DIR/tmp"
-    RENDERED_STARTUP_LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-rendered-XXXXXX")
+    RENDERED_STARTUP_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-fragment-XXXXXX")
+    RENDERED_STARTUP_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-template-XXXXXX")
     STARTUP_LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-session-XXXXXX")
-    trap 'rm -f "$RENDERED_STARTUP_LAYOUT" "$STARTUP_LAYOUT"' EXIT
+    trap 'rm -f "$RENDERED_STARTUP_FRAGMENT" "$RENDERED_STARTUP_TEMPLATE" "$STARTUP_LAYOUT"' EXIT
 
     STARTUP_AGENT_CMD="$SHELL"
     STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
-    STARTUP_SIDEBAR=$(sidebar_pane_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD")
-    render_layout_template "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_LAYOUT" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR"
-    STARTUP_BODY=$(extract_layout_body "$RENDERED_STARTUP_LAYOUT")
-
-    {
-      echo "layout {"
-      session_default_tab_template "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD"
-      echo "    tab name=\"$REPO_NAME\" {"
-      printf '%s\n' "$STARTUP_BODY" | sed 's/^/        /'
-      echo "    }"
-      echo "}"
-    } > "$STARTUP_LAYOUT"
+    STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD")
+    STARTUP_CHILDREN=$(default_tab_children_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER")
+    render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_FRAGMENT" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "$STARTUP_CHILDREN"
+    render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_TEMPLATE" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "children"
+    write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_FRAGMENT" "$REPO_NAME"
 
     echo "Creating Zellij session '$REPO_NAME'..."
     zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
@@ -937,26 +857,22 @@ fi
 # Generate temp layout files
 mkdir -p "$ZELLIGENT_USER_DIR/tmp"
 LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-XXXXXX")
-RENDERED_TAB_LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-XXXXXX")
-trap 'rm -f "$LAYOUT" "$RENDERED_TAB_LAYOUT"' EXIT
+RENDERED_TAB_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-fragment-XXXXXX")
+RENDERED_SESSION_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-session-template-XXXXXX")
+trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE"' EXIT
 
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 AGENT_CMD_RENDER=$(build_agent_command_value "$AGENT_CMD" "$SESSION_NAME" "$REPO_ROOT" "$WORKTREE_PATH" "$SETUP_SCRIPT" "$NEW_WORKTREE")
-SIDEBAR_RENDER=$(sidebar_pane_content "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD")
-render_layout_template "$LAYOUT_SOURCE" "$RENDERED_TAB_LAYOUT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER"
+SESSION_AGENT_RENDER=$(build_agent_command_value "$AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
+SIDEBAR_RENDER=$(sidebar_plugin_content "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD")
+TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER")
+render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
+render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"
 
 if [ -n "$ZELLIJ" ]; then
-  cp "$RENDERED_TAB_LAYOUT" "$LAYOUT"
+  write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
 else
-  INNER=$(extract_layout_body "$RENDERED_TAB_LAYOUT")
-  {
-    echo "layout {"
-    session_default_tab_template "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD"
-    echo "    tab name=\"$SESSION_NAME\" {"
-    printf '%s\n' "$INNER" | sed 's/^/        /'
-    echo "    }"
-    echo "}"
-  } > "$LAYOUT"
+  write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME"
 fi
 
 # Inside Zellij: open as a new tab in the current session.

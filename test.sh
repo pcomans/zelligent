@@ -5,6 +5,8 @@
 
 PASS=0
 FAIL=0
+CLEANUP_WORKTREE_PATHS=()
+CLEANUP_WORKTREE_BRANCHES=()
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/zelligent.sh"
 GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
@@ -33,7 +35,27 @@ restore_test_layout() {
 
 restore_setup() { :; }
 
+register_cleanup_worktree() {
+  local worktree_path="$1" branch="$2"
+  CLEANUP_WORKTREE_PATHS+=("$worktree_path")
+  CLEANUP_WORKTREE_BRANCHES+=("$branch")
+}
+
+register_managed_cleanup() {
+  local home_dir="$1" branch="$2"
+  register_cleanup_worktree "$home_dir/.zelligent/worktrees/$REPO_NAME/$branch" "$branch"
+}
+
+cleanup_registered_worktrees() {
+  local i
+  for i in "${!CLEANUP_WORKTREE_PATHS[@]}"; do
+    git -C "$REPO_ROOT" worktree remove --force "${CLEANUP_WORKTREE_PATHS[$i]}" &>/dev/null || true
+    git -C "$REPO_ROOT" branch -D "${CLEANUP_WORKTREE_BRANCHES[$i]}" &>/dev/null || true
+  done
+}
+
 cleanup_test_artifacts() {
+  cleanup_registered_worktrees
   restore_setup
   restore_test_layout
 }
@@ -119,6 +141,7 @@ MOCK
 chmod +x "$MOCK_BIN_LAYOUT/zellij" "$MOCK_BIN_LAYOUT/lazygit"
 
 # Run the script inside-Zellij mode so it calls new-tab and emits the layout
+register_managed_cleanup "$HOME" test-layout-branch
 out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-layout-branch claude 2>&1)
 # Cleanup worktree/branch created by the script
@@ -142,6 +165,7 @@ contains "new worktree: setup failure prompt keeps literal \$?" "Setup failed (e
 
 # Test: existing worktree should NOT include setup.sh preamble
 # Re-create the worktree so it already exists, then run the script again
+register_managed_cleanup "$HOME" test-layout-branch
 git -C "$REPO_ROOT" worktree add -b test-layout-branch \
   "$HOME/.zelligent/worktrees/$REPO_NAME/test-layout-branch" HEAD &>/dev/null
 out_existing=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
@@ -162,6 +186,7 @@ restore_setup() {
   fi
 }
 mv "$SETUP_SH" "$SETUP_SH_BAK"
+register_managed_cleanup "$HOME" test-no-setup-branch
 out_no_setup=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-no-setup-branch claude 2>&1)
 restore_setup
@@ -173,6 +198,7 @@ contains "no setup.sh: uses direct command"  'exec claude' "$out_no_setup"
 excludes "no setup.sh: no setup preamble"    '.zelligent/setup.sh'    "$out_no_setup"
 
 # Test: multi-word AGENT_CMD with arguments
+register_managed_cleanup "$HOME" test-multi-cmd-branch
 out_multi=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-multi-cmd-branch 'claude "pls fix the bug" --model claude-sonnet-4-6' 2>&1)
 git -C "$REPO_ROOT" worktree remove --force \
@@ -204,46 +230,49 @@ chmod +x "$MOCK_BIN_LAYOUT_SOURCE/zellij" "$MOCK_BIN_LAYOUT_SOURCE/lazygit"
 LAYOUT_TEST_HOME=$(mktemp -d)
 mkdir -p "$LAYOUT_TEST_HOME/.zelligent"
 cat > "$LAYOUT_TEST_HOME/.zelligent/layout.kdl" <<'KDL'
-layout {
-    // user-layout-marker
-    pane split_direction="Vertical" {
+// user-layout-marker
+pane split_direction="Vertical" {
+    pane size="31%" {
         {{zelligent_sidebar}}
-        pane {
-            pane command="bash" cwd="{{cwd}}" size="70%" {
-                args "-lc" "{{agent_cmd}}"
-            }
-        }
     }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
 }
 KDL
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
-layout {
-    // repo-layout-marker
-    pane split_direction="Vertical" {
+// repo-layout-marker
+pane split_direction="Vertical" {
+    pane size="30%" {
         {{zelligent_sidebar}}
-        pane {
-            pane command="bash" cwd="{{cwd}}" size="70%" {
-                args "-lc" "{{agent_cmd}}"
-            }
-        }
     }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
 }
 KDL
 
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-precedence-repo
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
   "$SCRIPT" spawn test-layout-precedence-repo claude 2>&1)
 cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-precedence-repo
 contains "layout precedence: repo layout wins" "repo-layout-marker" "$out"
+contains "layout precedence: repo fragment controls sidebar width" 'size="30%"' "$out"
 not_contains "layout precedence: repo layout hides user layout" "user-layout-marker" "$out"
 
 rm -f "$TEST_REPO_LAYOUT"
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-precedence-user
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
   "$SCRIPT" spawn test-layout-precedence-user claude 2>&1)
 cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-precedence-user
 contains "layout precedence: user layout used when repo layout missing" "user-layout-marker" "$out"
+contains "layout precedence: user fragment controls sidebar width" 'size="31%"' "$out"
 
 rm -f "$LAYOUT_TEST_HOME/.zelligent/layout.kdl"
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-missing
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
   "$SCRIPT" spawn test-layout-missing claude 2>&1); code=$?
 check "layout precedence: missing layout exits non-zero" "1" "$code"
@@ -252,46 +281,60 @@ cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-missing
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 // repo-layout-leading-comment
-layout {
-    pane {
-        pane command="bash"
-    }
+pane {
+    {{zelligent_children}}
 }
 // repo-layout-trailing-comment
 KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-missing
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
   "$SCRIPT" spawn test-layout-invalid-missing claude 2>&1); code=$?
 check "layout validation: missing sidebar placeholder exits non-zero" "1" "$code"
-contains "layout validation: missing sidebar placeholder prints error" "must contain {{zelligent_sidebar}} exactly once" "$out"
+contains "layout validation: missing sidebar placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
 cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-missing
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
-layout {
+pane {
     // {{zelligent_sidebar}}
-    pane {
-        pane command="bash"
-    }
+    {{zelligent_children}}
 }
 KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-comment-only
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
   "$SCRIPT" spawn test-layout-invalid-comment-only claude 2>&1); code=$?
 check "layout validation: commented sidebar placeholder exits non-zero" "1" "$code"
-contains "layout validation: commented sidebar placeholder prints error" "must contain {{zelligent_sidebar}} exactly once" "$out"
+contains "layout validation: commented sidebar placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
 cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-comment-only
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
-layout {
-    pane split_direction="Vertical" {
+pane split_direction="Vertical" {
+    pane size="24%" {
         {{zelligent_sidebar}}
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-duplicate
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-invalid-duplicate claude 2>&1); code=$?
+check "layout validation: duplicate sidebar placeholder exits non-zero" "1" "$code"
+contains "layout validation: duplicate sidebar placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-duplicate
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+pane split_direction="Vertical" {
+    pane size="24%" {
         {{zelligent_sidebar}}
     }
 }
 KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-missing-children
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
-  "$SCRIPT" spawn test-layout-invalid-duplicate claude 2>&1); code=$?
-check "layout validation: duplicate sidebar placeholder exits non-zero" "1" "$code"
-contains "layout validation: duplicate sidebar placeholder prints error" "must contain {{zelligent_sidebar}} exactly once" "$out"
-cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-duplicate
+  "$SCRIPT" spawn test-layout-invalid-missing-children claude 2>&1); code=$?
+check "layout validation: missing children placeholder exits non-zero" "1" "$code"
+contains "layout validation: missing children placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-missing-children
 
 cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 rm -rf "$LAYOUT_TEST_HOME" "$MOCK_BIN_LAYOUT_SOURCE"
@@ -312,6 +355,7 @@ cat > "$MOCK_BIN_QUOTE/lazygit" <<'MOCK'
 MOCK
 chmod +x "$MOCK_BIN_QUOTE/zellij" "$MOCK_BIN_QUOTE/lazygit"
 
+register_managed_cleanup "$HOME" test-quoted-branch
 out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_QUOTE:$PATH" \
   "$SCRIPT" spawn test-quoted-branch 'claude -p "Sag Hallo auf Deutsch"' 2>&1)
 git -C "$REPO_ROOT" worktree remove --force \
@@ -395,6 +439,7 @@ prompt_test_cleanup() {
 mv "$SETUP_SH" "$SETUP_SH_BAK" 2>/dev/null || true
 
 # Test 1: positional prompt (interactive mode with initial prompt)
+register_managed_cleanup "$HOME" test-prompt-branch
 out_prompt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-prompt-branch 'claude "fix the login bug"' 2>&1)
 PROMPT_ARGS=$(cat "$PROMPT_LOG")
@@ -403,6 +448,7 @@ prompt_test_cleanup test-prompt-branch
 
 # Test 2: -p flag (non-interactive)
 > "$PROMPT_LOG"
+register_managed_cleanup "$HOME" test-pflag-branch
 out_pflag=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-pflag-branch 'claude -p "run all tests and fix failures"' 2>&1)
 PROMPT_ARGS=$(cat "$PROMPT_LOG")
@@ -412,6 +458,7 @@ prompt_test_cleanup test-pflag-branch
 
 # Test 3: prompt with --model flag
 > "$PROMPT_LOG"
+register_managed_cleanup "$HOME" test-model-prompt-branch
 out_model=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-model-prompt-branch 'claude --model claude-sonnet-4-6 "refactor the auth module"' 2>&1)
 PROMPT_ARGS=$(cat "$PROMPT_LOG")
@@ -422,6 +469,7 @@ prompt_test_cleanup test-model-prompt-branch
 
 # Test 4: bare claude (no prompt) — should still work, no args logged
 > "$PROMPT_LOG"
+register_managed_cleanup "$HOME" test-bare-branch
 out_bare=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-bare-branch claude 2>&1)
 BARE_ARGS=$(cat "$PROMPT_LOG")
@@ -547,6 +595,7 @@ contains "stale socket: prints timeout warning" "timed out" "$out"
 contains "stale socket: creates session anyway" "Creating Zellij session" "$out"
 
 # Spawn outside Zellij with hanging zellij: should time out and create new session
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" TMPDIR="/tmp/fake-zellij-$$" \
   PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1); code=$?
 cleanup_stale() {
@@ -730,11 +779,12 @@ check "doctor idempotent: layout unchanged" "$LAYOUT_BEFORE" "$LAYOUT_AFTER"
 
 # doctor with drifted user layout: reports overwrite command but does not rewrite
 cat > "$MOCK_DR_HOME/.zelligent/layout.kdl" <<'KDL'
-layout {
-    // drifted-layout
-    pane {
-        pane command="bash"
+// drifted-layout
+pane split_direction="Vertical" {
+    pane size="40%" {
+        {{zelligent_sidebar}}
     }
+    {{zelligent_children}}
 }
 KDL
 DRIFTED_LAYOUT_BEFORE=$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")
@@ -822,6 +872,7 @@ echo "Install script contract:"
 DEV_INSTALL_CONTENT=$(cat "$REPO_ROOT/dev-install.sh")
 contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
 contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
+contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 
 # ── Query subcommands ────────────────────────────────────────────────────────
 echo "Query subcommands:"
@@ -851,6 +902,7 @@ check "list-worktrees exits 0" "0" "$code"
 TEST_WT_BRANCH="test-mismatched-branch-$$"
 TEST_WT_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/different-dirname-$$"
 mkdir -p "$HOME/.zelligent/worktrees/$REPO_NAME"
+register_cleanup_worktree "$TEST_WT_DIR" "$TEST_WT_BRANCH"
 git -C "$REPO_ROOT" worktree add -b "$TEST_WT_BRANCH" "$TEST_WT_DIR" HEAD &>/dev/null
 
 out=$("$SCRIPT" list-worktrees 2>&1); code=$?
@@ -878,6 +930,7 @@ contains "remove nonexistent branch: prints error" "no worktree found" "$out"
 # remove refuses to act on non-zelligent-managed worktree (safety check)
 TEST_WT_UNMANAGED_BRANCH="test-unmanaged-$$"
 TEST_WT_UNMANAGED_DIR=$(mktemp -d)
+register_cleanup_worktree "$TEST_WT_UNMANAGED_DIR" "$TEST_WT_UNMANAGED_BRANCH"
 git -C "$REPO_ROOT" worktree add -b "$TEST_WT_UNMANAGED_BRANCH" "$TEST_WT_UNMANAGED_DIR" HEAD &>/dev/null
 out=$("$SCRIPT" remove "$TEST_WT_UNMANAGED_BRANCH" 2>&1); code=$?
 check "remove unmanaged worktree exits non-zero" "1" "$code"
@@ -917,6 +970,7 @@ cleanup_test_branch() {
 }
 
 # Inside Zellij: new-tab, no tab wrapper in layout
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "inside zellij: prints tab message"        "Opening tab"       "$out"
@@ -924,6 +978,7 @@ contains "inside zellij: calls action new-tab"      "action new-tab"    "$out"
 excludes "inside zellij: layout has no tab wrapper" 'tab name='         "$out"
 
 # Outside Zellij, no existing repo session: create session named after repo
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "outside zellij (new): prints session message"          "Creating Zellij session"            "$out"
@@ -934,22 +989,20 @@ contains "outside zellij (new): layout has tab wrapper"          'tab name="some
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 // leading comment before outer layout
-layout {
-    pane split_direction="Vertical" {
+pane split_direction="Vertical" {
+    pane size="33%" {
         {{zelligent_sidebar}}
-        pane {
-            pane command="bash" cwd="{{cwd}}" size="70%" {
-                args "-lc" "{{agent_cmd}}"
-            }
-        }
     }
+    {{zelligent_children}}
 }
 // trailing comment after outer layout
 KDL
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "outside zellij (new): commented layout still parses" "zellij --new-session-with-layout" "$out"
 contains "outside zellij (new): commented layout keeps tab wrapper" 'tab name="some-branch"' "$out"
+count_equals "outside zellij (new): custom sidebar width reaches initial tab and default template" 'size="33%"' 2 "$out"
 cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 
 # Outside Zellij, repo session already exists: add tab and attach
@@ -967,6 +1020,7 @@ cat > "$MOCK_BIN2/lazygit" <<'MOCK'
 MOCK
 chmod +x "$MOCK_BIN2/zellij" "$MOCK_BIN2/lazygit"
 
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN2:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "outside zellij (existing): attaches to repo session" "Attaching to session '$REPO_NAME'" "$out"
@@ -993,6 +1047,7 @@ MOCK
 
   # Call the script in inside-Zellij mode; it will call `zellij action new-tab`
   # targeting the background test session via ZELLIJ_SESSION_NAME
+  register_managed_cleanup "$HOME" integration-test-branch
   int_out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME="$TEST_SESSION" PATH="$MOCK_BIN_INT:$PATH" \
     "$SCRIPT" spawn integration-test-branch 2>&1)
   int_code=$?
