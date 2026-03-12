@@ -9,8 +9,8 @@ Zelligent spawns AI coding agents into isolated git worktrees, each in its own Z
 - **One repo = one Zellij session.** Session is named after the repo directory.
 - **One branch = one worktree = one tab.** Each agent gets an isolated copy of the code.
 - **Tabs are named after branches.** `feature/my-thing` becomes tab `feature-my-thing` (slashes replaced with dashes).
-- **Agent + lazygit side by side.** Default layout: 70% agent pane (left), 30% lazygit (right), with tab-bar and status-bar chrome.
-- **Ctrl-Y for the plugin.** Floating UI to browse worktrees, spawn new ones, or switch tabs without leaving Zellij.
+- **Sidebar + agent + lazygit.** Default layout: persistent sidebar (24% left) + agent pane (top) + lazygit (bottom 30%) + status-bar. No tab-bar — the sidebar replaces it.
+- **Persistent sidebar.** The plugin is embedded in every tab's layout, always visible. Navigate worktrees, spawn new ones, or switch tabs without a keybinding.
 - **Minimal setup.** `zelligent doctor` configures everything. `zelligent` with no args creates or attaches to the session.
 
 ## Conventions
@@ -24,7 +24,7 @@ Branch names are sanitized for Zellij session/tab names:
 
 ### Layout format
 
-Default layout: agent pane (70%) + lazygit (30%) with tab-bar and status-bar chrome. Overridable via `.zelligent/layout.kdl` with `{{cwd}}` and `{{agent_cmd}}` template variables. See [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md) for format rules and gotchas.
+Default layout: sidebar plugin (24%) + agent pane (top) / lazygit (bottom 30%) + status-bar. The sidebar is embedded via `default_tab_template` so manual tabs also inherit it. No tab-bar. See [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md) for format rules and gotchas.
 
 ### Agent command
 
