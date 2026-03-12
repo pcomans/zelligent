@@ -31,6 +31,15 @@ restore_test_layout() {
   fi
 }
 
+restore_setup() { :; }
+
+cleanup_test_artifacts() {
+  restore_setup
+  restore_test_layout
+}
+
+trap cleanup_test_artifacts EXIT INT TERM
+
 check() {
   local desc="$1" expected="$2" actual="$3"
   if [ "$actual" = "$expected" ]; then
@@ -151,7 +160,6 @@ restore_setup() {
     mv "$SETUP_SH_BAK" "$SETUP_SH"
   fi
 }
-trap restore_setup EXIT INT TERM
 mv "$SETUP_SH" "$SETUP_SH_BAK"
 out_no_setup=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-no-setup-branch claude 2>&1)
@@ -242,11 +250,13 @@ contains "layout precedence: missing layout prints error" "no layout found" "$ou
 cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-missing
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
+// repo-layout-leading-comment
 layout {
     pane {
         pane command="bash"
     }
 }
+// repo-layout-trailing-comment
 KDL
 out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
   "$SCRIPT" spawn test-layout-invalid-missing claude 2>&1); code=$?
@@ -368,7 +378,6 @@ prompt_test_cleanup() {
 
 # Move setup.sh aside so tests don't invoke the repo's real one (e.g. sleep)
 mv "$SETUP_SH" "$SETUP_SH_BAK" 2>/dev/null || true
-trap restore_setup EXIT INT TERM
 
 # Test 1: positional prompt (interactive mode with initial prompt)
 out_prompt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
@@ -907,6 +916,26 @@ contains "outside zellij (new): session named after repo"        "$REPO_NAME"   
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
 contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+// leading comment before outer layout
+layout {
+    pane split_direction="Vertical" {
+        {{zelligent_sidebar}}
+        pane {
+            pane command="bash" cwd="{{cwd}}" size="70%" {
+                args "-lc" "{{agent_cmd}}"
+            }
+        }
+    }
+}
+// trailing comment after outer layout
+KDL
+out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
+cleanup_test_branch
+contains "outside zellij (new): commented layout still parses" "zellij --new-session-with-layout" "$out"
+contains "outside zellij (new): commented layout keeps tab wrapper" 'tab name="some-branch"' "$out"
+cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 
 # Outside Zellij, repo session already exists: add tab and attach
 MOCK_BIN2=$(mktemp -d)
