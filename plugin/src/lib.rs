@@ -648,8 +648,8 @@ impl State {
                 if self.session_name.is_none() {
                     writeln!(w, "  Waiting for permissions...").unwrap();
                 }
-                // Pad to bottom
-                for _ in 0..rows.saturating_sub(6) {
+                // Pad to bottom: total rows - header(1) - msg(1) - footer(2)
+                for _ in 0..rows.saturating_sub(4) {
                     writeln!(w).unwrap();
                 }
                 ui::render_footer(w, &self.mode, VERSION, cols);
@@ -658,7 +658,8 @@ impl State {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
                 
-                let used_lines = 11;
+                // msg is ~7 lines
+                let used_lines = 1 + 7 + 2; 
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
                     writeln!(w).unwrap();
@@ -672,10 +673,17 @@ impl State {
                 let active_tab_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str());
                 ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, active_tab_name, self.selected_index, rows, cols);
                 
-                let list_lines = (self.sidebar_items.len() * 2).min(rows.saturating_sub(7));
-                let status_lines = if self.status_message.is_empty() { 0 } else { 2 };
-                let footer_lines = if cols >= 55 { 3 } else { 4 };
-                let used_lines = 2 + list_lines + status_lines + footer_lines;
+                // header(1) + list(calculated) + status(0-2) + footer(2-3)
+                // list height is blank(1) + 2 lines per visible item
+                let lines_per_item = 2;
+                let max_items = rows.saturating_sub(7).max(1) / lines_per_item;
+                let visible_items = self.sidebar_items.len().min(max_items);
+                let list_height = 1 + (visible_items * lines_per_item);
+                
+                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                let footer_height = if cols >= 55 { 3 } else { 4 };
+                
+                let used_lines = 1 + list_height + status_height + footer_height;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
                     writeln!(w).unwrap();
@@ -688,8 +696,12 @@ impl State {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
                 
-                let list_lines = self.filtered_branches.len().min(rows.saturating_sub(7));
-                let used_lines = 4 + list_lines + 4;
+                // header(1) + list(title(3) + visible) + footer(2)
+                let max_visible = rows.saturating_sub(7).max(1);
+                let visible_branches = self.filtered_branches.len().min(max_visible);
+                let list_height = 3 + visible_branches;
+                
+                let used_lines = 1 + list_height + 2;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
                     writeln!(w).unwrap();
@@ -701,7 +713,8 @@ impl State {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_input(w, &self.input_buffer);
                 
-                let used_lines = 4 + 3 + 4;
+                // header(1) + input(3) + footer(3)
+                let used_lines = 1 + 3 + 3;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
                     writeln!(w).unwrap();
@@ -712,11 +725,12 @@ impl State {
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
-                if let Some(wt) = self.worktrees.get(self.selected_index) {
-                    ui::render_confirm(w, &wt.branch);
+                if let Some(item) = self.sidebar_items.get(self.selected_index) {
+                    ui::render_confirm(w, &item.tab_name);
                 }
                 
-                let used_lines = 2 + 4 + 4;
+                // header(1) + confirm(3) + footer(2)
+                let used_lines = 1 + 3 + 2;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
                     writeln!(w).unwrap();
