@@ -813,6 +813,11 @@ MOCK
   contains "tab appears in session layout" 'tab name="integration-test-branch"' "$DUMP"
   contains "tab has sidebar plugin" 'plugin location="file:' "$DUMP"
   contains "tab has status-bar" 'plugin location="zellij:status-bar"' "$DUMP"
+  # L1: sidebar must be a vertical (left/right) split — "vertical" means side-by-side,
+  # "horizontal" means top/bottom. Getting this wrong renders the sidebar as a top bar.
+  # Note: dump-layout normalizes split_direction values to lowercase.
+  contains "L1: dump-layout shows vertical split (sidebar on left)" 'split_direction="vertical"' "$DUMP"
+  not_contains "L1: dump-layout has no horizontal split (no top bar)" 'split_direction="horizontal"' "$DUMP"
 
   zellij kill-session "$TEST_SESSION" 2>/dev/null
 fi
