@@ -1,6 +1,6 @@
 # UI Test Harness
 
-Agent-driven UI tests for the zelligent Zellij plugin using Chrome DevTools MCP.
+Agent-driven UI tests for the zelligent Zellij plugin using a tmux-based harness and the tmux skill.
 
 ## Structure
 
@@ -11,7 +11,8 @@ tests/harness/
 │   └── with-worktrees.md
 ├── fixtures/       # Setup scripts (one per scenario)
 │   ├── setup-empty-repo.sh
-│   └── setup-with-worktrees.sh
+│   ├── setup-with-worktrees.sh
+│   └── teardown.sh
 └── README.md
 ```
 
@@ -19,7 +20,16 @@ tests/harness/
 
 1. Each **test plan** is a markdown file with test steps and a `fixture` reference
 2. Each **fixture** is a shell script that creates the test repo state
-3. The **test-driver** subagent (`.claude/agents/test-driver.md`) reads the plan, runs the fixture, bootstraps a Zellij web session, executes all test steps via Chrome DevTools MCP, and reports results
+3. The **test-driver** subagent (`.claude/agents/test-driver.md`) reads the plan, runs the fixture, wraps Zellij in a tmux session, executes all test steps by reading `capture-pane` output, and reports results
+4. The **tmux skill** (`.claude/skills/tmux/SKILL.md`) is available for manual proofs, inspection, and ad hoc UI interaction outside the automated test-driver flow
+
+### tmux harness architecture
+
+```
+tmux session: zt-driver  (isolated socket: zt-driver-test)
+├── window 0 "view"  — runs `zellij --session test-harness`  (read via capture-pane)
+└── window 1 "ctrl"  — runs shell commands to drive the test
+```
 
 ## Running a test plan
 
@@ -29,9 +39,9 @@ Ask Claude to run a specific test plan:
 Run the test plan at tests/harness/plans/with-worktrees.md
 ```
 
-Claude delegates to the `test-driver` subagent (Sonnet), which handles everything autonomously.
+Claude delegates to the `test-driver` subagent, which handles everything autonomously.
 
-**Important:** Test plans must run sequentially, not in parallel. They share the same Zellij web port (8083) and test repo path (`/tmp/zelligent-test-repo`), so concurrent runs will conflict.
+**Important:** Test plans must run sequentially, not in parallel. They share the same tmux socket (`zt-driver-test`), Zellij session name (`test-harness`), and test repo path (`/tmp/zelligent-test-repo`), so concurrent runs will conflict.
 
 ## Writing a new test plan
 
@@ -46,8 +56,8 @@ fixture: setup-my-scenario.sh
 # My Test Scenario
 
 ## Test 1: Something works
-- Action: Press Ctrl+Y
-- Expected: The plugin opens
+- Action: Press a key or run a shell command described in the plan
+- Expected: The resulting UI state matches the plan
 ```
 
 ## Fixture scripts
@@ -56,3 +66,5 @@ Fixture scripts must:
 - Create the test repo at `/tmp/zelligent-test-repo`
 - Print `REPO_DIR=/tmp/zelligent-test-repo` to stdout
 - Be idempotent (clean up before setting up)
+
+The `teardown.sh` script kills the isolated tmux socket, stops the test Zellij session, and removes the temporary repo/worktrees.
