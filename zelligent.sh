@@ -175,10 +175,102 @@ render_layout_template() {
 extract_layout_body() {
   local layout_file="$1"
   perl -0ne '
-    if (/^\s*layout\s*\{(.*)\}\s*$/s) {
-      print $1;
-      exit 0;
+    my $content = $_;
+
+    sub skip_ws_and_comments {
+      my ($text_ref, $pos_ref) = @_;
+      my $len = length($$text_ref);
+      while ($$pos_ref < $len) {
+        if (substr($$text_ref, $$pos_ref) =~ /\A\s+/s) {
+          $$pos_ref += length($&);
+          next;
+        }
+        if (substr($$text_ref, $$pos_ref, 2) eq "//") {
+          my $newline = index($$text_ref, "\n", $$pos_ref + 2);
+          $$pos_ref = $newline >= 0 ? $newline + 1 : $len;
+          next;
+        }
+        if (substr($$text_ref, $$pos_ref, 2) eq "/*") {
+          my $end = index($$text_ref, "*/", $$pos_ref + 2);
+          if ($end < 0) {
+            print STDERR "Error: unterminated block comment in layout file.\n";
+            exit 1;
+          }
+          $$pos_ref = $end + 2;
+          next;
+        }
+        last;
+      }
     }
+
+    my $pos = 0;
+    skip_ws_and_comments(\$content, \$pos);
+    if (substr($content, $pos) !~ /\Alayout\b/) {
+      print STDERR "Error: layout must be a full layout { ... } document.\n";
+      exit 1;
+    }
+    $pos += length("layout");
+    skip_ws_and_comments(\$content, \$pos);
+
+    if (substr($content, $pos, 1) ne "{") {
+      print STDERR "Error: layout must be a full layout { ... } document.\n";
+      exit 1;
+    }
+    $pos++;
+
+    my $body_start = $pos;
+    my $depth = 1;
+    my $len = length($content);
+    while ($pos < $len) {
+      my $char = substr($content, $pos, 1);
+      if ($char eq q{"}) {
+        $pos++;
+        while ($pos < $len) {
+          my $string_char = substr($content, $pos, 1);
+          if ($string_char eq q{\\}) {
+            $pos += 2;
+            next;
+          }
+          $pos++;
+          last if $string_char eq q{"};
+        }
+        next;
+      }
+      if (substr($content, $pos, 2) eq "//") {
+        my $newline = index($content, "\n", $pos + 2);
+        $pos = $newline >= 0 ? $newline + 1 : $len;
+        next;
+      }
+      if (substr($content, $pos, 2) eq "/*") {
+        my $end = index($content, "*/", $pos + 2);
+        if ($end < 0) {
+          print STDERR "Error: unterminated block comment in layout file.\n";
+          exit 1;
+        }
+        $pos = $end + 2;
+        next;
+      }
+      if ($char eq "{") {
+        $depth++;
+        $pos++;
+        next;
+      }
+      if ($char eq "}") {
+        $depth--;
+        if ($depth == 0) {
+          print substr($content, $body_start, $pos - $body_start);
+          $pos++;
+          skip_ws_and_comments(\$content, \$pos);
+          if ($pos == $len) {
+            exit 0;
+          }
+          print STDERR "Error: layout must be a full layout { ... } document.\n";
+          exit 1;
+        }
+      }
+      $pos++;
+    }
+
     print STDERR "Error: layout must be a full layout { ... } document.\n";
     exit 1;
   ' "$layout_file"
@@ -550,7 +642,8 @@ if [ -z "$1" ]; then
     } > "$STARTUP_LAYOUT"
 
     echo "Creating Zellij session '$REPO_NAME'..."
-    exec zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
+    zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
+    exit $?
   fi
 fi
 
