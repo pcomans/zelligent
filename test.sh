@@ -1071,6 +1071,16 @@ MOCK
   zellij kill-session "$TEST_SESSION" 2>/dev/null
 fi
 
+# ── Doc index completeness ─────────────────────────────────────────────────
+echo "Doc index completeness:"
+
+INDEX_CONTENT=$(cat "$REPO_ROOT/docs/design-docs/index.md")
+for doc in "$REPO_ROOT"/docs/design-docs/*.md; do
+  docname=$(basename "$doc")
+  [ "$docname" = "index.md" ] && continue
+  contains "index references $docname" "$docname" "$INDEX_CONTENT"
+done
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

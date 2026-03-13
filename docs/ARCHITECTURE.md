@@ -54,6 +54,12 @@ User presses Ctrl-Y inside Zellij
 
 See [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for API details. Plugins run in a WASI sandbox but inherit the host environment (`std::env::var()` works). External operations go through Zellij's plugin API (`RunCommand`, events, pipes).
 
+## Glossary
+
+- **Harness tests** (`tests/harness/`): UI acceptance tests driven by a tmux session + Chrome DevTools MCP. Run manually via the `test-driver` agent, not in CI.
+- **Test harness** (general): the overall scaffolding that lets agents validate their own work — `test.sh`, CI jobs, lints, snapshot tests.
+- **Agent** (zelligent context): a Claude Code instance running in an isolated git worktree tab, not the zelligent plugin itself.
+
 ## Claude Code Plugin (`claude-plugin/`)
 
 A Claude Code plugin installed by `zelligent doctor`. Provides hooks that send agent status events to the Zellij plugin via `zellij pipe`. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md) for the full pipeline.
