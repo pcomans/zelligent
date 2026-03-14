@@ -7,7 +7,7 @@ fixture: setup-with-worktrees.sh
 Verifies the destructive and non-destructive sidebar behaviors that snapshots cannot prove in a live session.
 
 ## Test 1: Start zelligent and seed managed tabs
-- Action: Start the repo-under-test `zelligent.sh` in the `view` window, then use the `ctrl` window to spawn `feature-a` and `feature-b` into the live session
+- Action: Start the repo-under-test `zelligent.sh` in the `view` window, dismiss the built-in Zellij tip pane if needed, launch the zelligent plugin directly via `zellij action launch-or-focus-plugin`, then use the `ctrl` window to spawn `feature-a` and `feature-b` into the live session
 - Expected: The persistent sidebar is visible and contains rows for the repo tab, `feature-a`, and `feature-b`
 
 ## Test 2: Add a user tab

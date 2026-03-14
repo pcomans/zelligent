@@ -8,7 +8,7 @@ Verifies managed worktree tabs can be opened and navigated in the persistent sid
 The fixture creates worktrees for `feature-a`, `feature-b`, and `feature-c`.
 
 ## Test 1: Start zelligent
-- Action: In the `view` window, start the repo-under-test `zelligent.sh`
+- Action: In the `view` window, start the repo-under-test `zelligent.sh`, dismiss the built-in Zellij tip pane if needed, then launch the zelligent plugin directly via `zellij action launch-or-focus-plugin`
 - Expected: Zellij starts with the persistent left sidebar visible
 
 ## Test 2: Open managed worktree tabs
