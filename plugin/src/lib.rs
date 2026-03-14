@@ -717,32 +717,58 @@ impl State {
         match self.mode {
             Mode::Loading => {
                 ui::render_header(w, "loading...", cols);
-                writeln!(w).unwrap();
                 if self.status_is_error {
                     ui::render_status(w, &self.status_message, self.status_is_error);
                 } else {
+                    writeln!(w).unwrap();
                     writeln!(w, "  Waiting for permissions...").unwrap();
                 }
+                for _ in 0..rows.saturating_sub(5) {
+                    writeln!(w).unwrap();
+                }
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::NotGitRepo => {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
+                let used_lines = 1 + 7 + 2 + 2;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                if self.should_render_empty_state() {
+                let list_height = if self.should_render_empty_state() {
                     ui::render_empty_state(w);
+                    12
                 } else {
                     ui::render_sidebar_list(
                         w,
                         &self.sidebar_items,
                         &self.agent_statuses,
+                        self.active_tab_name(),
                         self.selected_index,
                         rows,
                         cols,
                     );
+                    if self.sidebar_items.is_empty() {
+                        2
+                    } else {
+                        let lines_per_item = 2;
+                        let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
+                        let visible_items = self.sidebar_items.len().min(max_items);
+                        1 + (visible_items * lines_per_item)
+                    }
+                };
+                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                let footer_height = if cols >= 55 { 3 } else { 4 };
+                let used_lines = 1 + list_height + status_height + footer_height;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
                 }
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
@@ -750,19 +776,48 @@ impl State {
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
+                let list_height = if self.filtered_branches.is_empty() {
+                    2
+                } else {
+                    let max_visible = rows.saturating_sub(7).max(1);
+                    let visible_branches = self.filtered_branches.len().min(max_visible);
+                    3 + visible_branches
+                };
+                let used_lines = 1 + list_height + 3;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::InputBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_input(w, &self.input_buffer);
+                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                let used_lines = 1 + 4 + status_height + 3;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
+                let confirm_height = if self.selected_sidebar_branch().is_some() {
+                    4
+                } else {
+                    0
+                };
                 if let Some(branch) = self.selected_sidebar_branch() {
                     ui::render_confirm(w, branch);
                 }
+                let used_lines = 1 + confirm_height + 2;
+                let padding = rows.saturating_sub(used_lines);
+                for _ in 0..padding {
+                    writeln!(w).unwrap();
+                }
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
         }
     }
