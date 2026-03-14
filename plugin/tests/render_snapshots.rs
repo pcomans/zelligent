@@ -103,22 +103,25 @@ fn render_confirming() {
 }
 
 #[test]
-fn render_worktree_list_scrolling() {
-    let s = State {
+fn render_sidebar_list_scrolling() {
+    let mut s = State {
         mode: Mode::BrowseWorktrees,
         worktrees: (0..20)
             .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
             .collect(),
+        tabs: (0..20)
+            .map(|i| common::make_tab_info(&format!("branch-{i}"), i == 15))
+            .collect(),
         selected_index: 15,
         ..Default::default()
     };
-    // Small viewport forces scrolling
+    s.recompute_sidebar_items();
     insta::assert_snapshot!(render_to_string(&s, 10, 80));
 }
 
 #[test]
 fn render_browse_mixed_dir_branch_names() {
-    let s = State {
+    let mut s = State {
         mode: Mode::BrowseWorktrees,
         repo_name: "myrepo".into(),
         worktrees: vec![
@@ -128,6 +131,20 @@ fn render_browse_mixed_dir_branch_names() {
         ],
         ..Default::default()
     };
+    s.tabs = vec![
+        common::make_tab_info("plugin-snapshot-tests", true),
+        common::make_tab_info("competition", false),
+        common::make_tab_info("feat-ding-dong", false),
+    ];
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_sidebar_with_user_tab() {
+    let mut s = state_with_worktrees();
+    s.tabs.push(common::make_tab_info("notes", false));
+    s.recompute_sidebar_items();
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
