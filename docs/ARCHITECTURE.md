@@ -8,15 +8,15 @@ A Bash script installed as `zelligent`. Handles:
 
 - **Session management** — creates/attaches Zellij sessions named after the git repo (`basename` of repo root)
 - **Worktree lifecycle** — `spawn` creates git worktrees under `~/.zelligent/worktrees/<repo>/`, `remove` cleans them up
-- **Layout generation** — builds KDL layout files for Zellij tabs (agent pane + lazygit pane + chrome)
-- **Doctor** — `zelligent doctor` sets up Zellij config, keybindings, plugin permissions, and Claude Code plugin
+- **Layout generation** — builds fragment-based KDL layouts for Zellij tabs (persistent sidebar + main tab body + status bar)
+- **Doctor** — `zelligent doctor` sets up Zellij config, plugin permissions, the default user layout, and the Claude Code plugin
 - **Nuke** — `zelligent nuke` force-deletes the session, its server processes, and resurrection cache
 
 The CLI resolves the main repo root even when run from a worktree (`git rev-parse --git-common-dir`).
 
 ## Zellij WASM Plugin (`plugin/`)
 
-A Rust plugin compiled to `wasm32-wasip1`. Provides a floating UI inside Zellij (launched via Ctrl-Y keybinding). Handles:
+A Rust plugin compiled to `wasm32-wasip1`. Provides the persistent sidebar UI embedded in zelligent-managed layouts. Handles:
 
 - **Worktree browsing** — lists worktrees, lets you switch tabs or spawn/remove worktrees
 - **Branch selection** — browse existing branches or type a new branch name
@@ -41,11 +41,11 @@ A Rust plugin compiled to `wasm32-wasip1`. Provides a floating UI inside Zellij 
 ```
 User runs `zelligent spawn feature/foo claude`
   -> CLI creates git worktree at ~/.zelligent/worktrees/<repo>/feature/foo
-  -> CLI generates KDL layout (agent pane + lazygit pane)
+  -> CLI renders the layout fragment into a tab layout with sidebar + tab body
   -> CLI calls `zellij action new-tab --layout <file> --name feature-foo`
 
-User presses Ctrl-Y inside Zellij
-  -> Zellij launches the WASM plugin as a floating pane
+User starts `zelligent` or opens a zelligent-managed tab
+  -> Zellij loads the WASM plugin as the left sidebar pane in the rendered layout
   -> Plugin calls `zelligent list-worktrees` and `zelligent list-branches` via RunCommand
   -> Plugin calls `zelligent spawn/remove` via RunCommand when user selects an action
 ```
@@ -56,7 +56,7 @@ See [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for API d
 
 ## Glossary
 
-- **Harness tests** (`tests/harness/`): UI acceptance tests driven by a tmux session + Chrome DevTools MCP. Run manually via the `test-driver` agent, not in CI.
+- **Harness tests** (`tests/harness/`): UI acceptance tests driven by a tmux session and the `test-driver` agent. Run manually, not in CI.
 - **Test harness** (general): the overall scaffolding that lets agents validate their own work — `test.sh`, CI jobs, lints, snapshot tests.
 - **Agent** (zelligent context): a Claude Code instance running in an isolated git worktree tab, not the zelligent plugin itself.
 
