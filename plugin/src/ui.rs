@@ -11,7 +11,7 @@ pub const YELLOW: &str = "\x1b[33m";
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use crate::{AgentStatus, Mode, SidebarItem, Worktree};
+use crate::{AgentStatus, Mode, SidebarItem};
 
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
@@ -36,34 +36,6 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     let title = format!(" zelligent: {} ", repo_name);
     let pad = cols.saturating_sub(title.len());
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
-}
-
-pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_statuses: &BTreeMap<String, AgentStatus>, selected: usize, rows: usize) {
-    if worktrees.is_empty() {
-        render_empty_state(w);
-        return;
-    }
-
-    let max_visible = rows.saturating_sub(5).max(1); // header + footer + margins
-    let start = if selected >= max_visible {
-        selected - max_visible + 1
-    } else {
-        0
-    };
-
-    writeln!(w).unwrap();
-    for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
-        let cursor = if idx == selected { INVERSE } else { "" };
-        let tab_name = sanitize_tab_name(&wt.branch);
-        let indicator = status_indicator(
-            agent_statuses.get(&tab_name).unwrap_or(&AgentStatus::Idle),
-        );
-        if wt.dir != wt.branch {
-            writeln!(w, "  {indicator}{cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
-        } else {
-            writeln!(w, "  {indicator}{cursor} {dir} {RESET}", dir = wt.dir).unwrap();
-        }
-    }
 }
 
 pub fn render_empty_state(w: &mut impl Write) {
