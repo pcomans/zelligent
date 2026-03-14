@@ -5,6 +5,27 @@
 set -e
 
 ZELLIJ_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/zellij"
+ZELLIGENT_SHARE_DIR_DEV="$HOME/.local/share/zelligent"
+ZELLIGENT_USER_DIR="$HOME/.zelligent"
+
+escape_kdl_string() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  printf '%s' "$value"
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+resolve_install_prefix() {
+  local zelligent_bin
+  zelligent_bin=$(command -v zelligent 2>/dev/null || true)
+  if [ -n "$zelligent_bin" ]; then
+    dirname "$(dirname "$zelligent_bin")"
+  fi
+}
 
 # Wrapper with 3s timeout to avoid hanging on stale Zellij sockets
 zellij_list_sessions() {
@@ -26,6 +47,316 @@ zellij_list_sessions() {
     fi
     return 1
   fi
+}
+
+resolve_shared_asset_path() {
+  local override_var="$1"
+  local asset_name="$2"
+  local override_path zelligent_prefix bundled_asset dev_asset
+
+  override_path="${!override_var}"
+  if [ -n "$override_path" ]; then
+    [ -f "$override_path" ] || return 1
+    printf '%s\n' "$override_path"
+    return 0
+  fi
+
+  zelligent_prefix=$(resolve_install_prefix)
+  if [ -n "$zelligent_prefix" ]; then
+    bundled_asset="$zelligent_prefix/share/zelligent/$asset_name"
+    if [ -f "$bundled_asset" ]; then
+      printf '%s\n' "$bundled_asset"
+      return 0
+    fi
+  fi
+
+  dev_asset="$ZELLIGENT_SHARE_DIR_DEV/$asset_name"
+  if [ -f "$dev_asset" ]; then
+    printf '%s\n' "$dev_asset"
+    return 0
+  fi
+
+  return 1
+}
+
+# Resolve the zelligent WASM plugin path, honoring explicit overrides first.
+resolve_plugin_path() {
+  resolve_shared_asset_path ZELLIGENT_PLUGIN_SRC zelligent-plugin.wasm
+}
+
+resolve_default_layout_path() {
+  resolve_shared_asset_path ZELLIGENT_DEFAULT_LAYOUT_SRC default-layout.kdl
+}
+
+resolve_layout_source() {
+  local repo_layout user_layout
+  repo_layout="$REPO_ROOT/.zelligent/layout.kdl"
+  user_layout="$ZELLIGENT_USER_DIR/layout.kdl"
+
+  if [ -f "$repo_layout" ]; then
+    printf '%s\n' "$repo_layout"
+    return 0
+  fi
+
+  if [ -f "$user_layout" ]; then
+    printf '%s\n' "$user_layout"
+    return 0
+  fi
+
+  return 1
+}
+
+count_layout_placeholder() {
+  local layout_source="$1"
+  local placeholder="$2"
+  ZELLIGENT_COUNT_NEEDLE="$placeholder" perl -0ne '
+    my $content = $_;
+    my $needle = $ENV{ZELLIGENT_COUNT_NEEDLE};
+    my $count = 0;
+    my $pos = 0;
+    my $len = length($content);
+
+    while ($pos < $len) {
+      my $char = substr($content, $pos, 1);
+      if ($char eq q{"}) {
+        $pos++;
+        while ($pos < $len) {
+          my $string_char = substr($content, $pos, 1);
+          if ($string_char eq q{\\}) {
+            $pos += 2;
+            next;
+          }
+          $pos++;
+          last if $string_char eq q{"};
+        }
+        next;
+      }
+      if (substr($content, $pos, 2) eq "//") {
+        my $newline = index($content, "\n", $pos + 2);
+        $pos = $newline >= 0 ? $newline + 1 : $len;
+        next;
+      }
+      if (substr($content, $pos, 2) eq "/*") {
+        my $end = index($content, "*/", $pos + 2);
+        if ($end < 0) {
+          print STDERR "Error: unterminated block comment in layout file.\n";
+          exit 1;
+        }
+        $pos = $end + 2;
+        next;
+      }
+      if (substr($content, $pos, length($needle)) eq $needle) {
+        $count++;
+        $pos += length($needle);
+        next;
+      }
+      $pos++;
+    }
+
+    print $count;
+  ' "$layout_source"
+}
+
+validate_layout_source() {
+  local layout_source="$1"
+  local sidebar_count children_count
+
+  sidebar_count=$(count_layout_placeholder "$layout_source" "{{zelligent_sidebar}}")
+  children_count=$(count_layout_placeholder "$layout_source" "{{zelligent_children}}")
+
+  if [ "$sidebar_count" -ne 1 ] || [ "$children_count" -ne 1 ]; then
+    echo "Error: layout '$layout_source' must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once." >&2
+    if [ "$layout_source" = "$ZELLIGENT_USER_DIR/layout.kdl" ]; then
+      echo "Run 'zelligent doctor' to recreate the default user layout or fix the file manually." >&2
+    fi
+    return 1
+  fi
+}
+
+sidebar_plugin_content() {
+  local plugin_path="$1"
+  local raw_agent_cmd="$2"
+  local plugin_path_kdl zelligent_path_cmd zelligent_path_cmd_kdl raw_agent_cmd_kdl
+
+  plugin_path_kdl=$(escape_kdl_string "$plugin_path")
+  zelligent_path_cmd=$(command -v zelligent 2>/dev/null || echo "$0")
+  zelligent_path_cmd_kdl=$(escape_kdl_string "$zelligent_path_cmd")
+  raw_agent_cmd_kdl=$(escape_kdl_string "$raw_agent_cmd")
+
+  cat <<EOF
+plugin location="file:$plugin_path_kdl" {
+    zelligent_path "$zelligent_path_cmd_kdl"
+    agent_cmd "$raw_agent_cmd_kdl"
+}
+EOF
+}
+
+default_tab_children_content() {
+  local cwd_value="$1"
+  local agent_cmd_kdl="$2"
+  local cwd_kdl
+
+  cwd_kdl=$(escape_kdl_string "$cwd_value")
+
+  cat <<EOF
+pane {
+    pane command="bash" cwd="$cwd_kdl" size="70%" {
+        args "-lc" "$agent_cmd_kdl"
+    }
+    pane command="lazygit" cwd="$cwd_kdl" size="30%"
+}
+EOF
+}
+
+render_layout_fragment() {
+  local template_path="$1"
+  local output_path="$2"
+  local cwd_value="$3"
+  local agent_cmd_value="$4"
+  local sidebar_value="$5"
+  local children_value="$6"
+
+  validate_layout_source "$template_path"
+
+  ZELLIGENT_RENDER_CWD="$(escape_kdl_string "$cwd_value")" \
+  ZELLIGENT_RENDER_AGENT_CMD="$agent_cmd_value" \
+  ZELLIGENT_RENDER_SIDEBAR="$sidebar_value" \
+  ZELLIGENT_RENDER_CHILDREN="$children_value" \
+    perl -0ne '
+      my $content = $_;
+      my $cwd = $ENV{ZELLIGENT_RENDER_CWD};
+      my $agent_cmd = $ENV{ZELLIGENT_RENDER_AGENT_CMD};
+      my $sidebar = $ENV{ZELLIGENT_RENDER_SIDEBAR};
+      my $children = $ENV{ZELLIGENT_RENDER_CHILDREN};
+      my $out = "";
+      my $pos = 0;
+      my $len = length($content);
+
+      while ($pos < $len) {
+        if (substr($content, $pos, 2) eq "//") {
+          my $newline = index($content, "\n", $pos + 2);
+          if ($newline < 0) {
+            $out .= substr($content, $pos);
+            last;
+          }
+          $out .= substr($content, $pos, $newline + 1 - $pos);
+          $pos = $newline + 1;
+          next;
+        }
+        if (substr($content, $pos, 2) eq "/*") {
+          my $end = index($content, "*/", $pos + 2);
+          if ($end < 0) {
+            print STDERR "Error: unterminated block comment in layout file.\n";
+            exit 1;
+          }
+          $out .= substr($content, $pos, $end + 2 - $pos);
+          $pos = $end + 2;
+          next;
+        }
+        if (substr($content, $pos, 7) eq "{{cwd}}") {
+          $out .= $cwd;
+          $pos += 7;
+          next;
+        }
+        if (substr($content, $pos, 13) eq "{{agent_cmd}}") {
+          $out .= $agent_cmd;
+          $pos += 13;
+          next;
+        }
+        if (substr($content, $pos, 21) eq "{{zelligent_sidebar}}") {
+          $out .= $sidebar;
+          $pos += 21;
+          next;
+        }
+        if (substr($content, $pos, 22) eq "{{zelligent_children}}") {
+          $out .= $children;
+          $pos += 22;
+          next;
+        }
+        if (substr($content, $pos, 1) eq q{"}) {
+          $out .= q{"};
+          $pos++;
+          while ($pos < $len) {
+            if (substr($content, $pos, 7) eq "{{cwd}}") {
+              $out .= $cwd;
+              $pos += 7;
+              next;
+            }
+            if (substr($content, $pos, 13) eq "{{agent_cmd}}") {
+              $out .= $agent_cmd;
+              $pos += 13;
+              next;
+            }
+
+            my $string_char = substr($content, $pos, 1);
+            $out .= $string_char;
+            if ($string_char eq q{\\} && $pos + 1 < $len) {
+              $pos++;
+              $out .= substr($content, $pos, 1);
+            } elsif ($string_char eq q{"}) {
+              $pos++;
+              last;
+            }
+            $pos++;
+          }
+          next;
+        }
+
+        $out .= substr($content, $pos, 1);
+        $pos++;
+      }
+
+      print $out;
+    ' "$template_path" > "$output_path"
+}
+
+build_agent_command_value() {
+  local raw_agent_cmd="$1"
+  local session_name="$2"
+  local repo_root="$3"
+  local worktree_path="$4"
+  local setup_script="$5"
+  local is_new_worktree="$6"
+  local command
+
+  command="export ZELLIGENT_TAB_NAME=$(shell_quote "$session_name"); "
+  if [ "$is_new_worktree" = "true" ] && [ -f "$setup_script" ]; then
+    command="${command}bash $(shell_quote "$setup_script") $(shell_quote "$repo_root") $(shell_quote "$worktree_path") || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; "
+  fi
+  command="${command}exec $raw_agent_cmd"
+  escape_kdl_string "$command"
+}
+
+write_fragment_layout() {
+  local output_path="$1"
+  local fragment_path="$2"
+
+  {
+    echo "layout {"
+    sed 's/^/    /' "$fragment_path"
+    echo "}"
+  } > "$output_path"
+}
+
+write_session_layout() {
+  local output_path="$1"
+  local default_fragment_path="$2"
+  local initial_fragment_path="$3"
+  local tab_name="$4"
+  local tab_name_kdl
+
+  tab_name_kdl=$(escape_kdl_string "$tab_name")
+
+  {
+    echo "layout {"
+    echo "    default_tab_template {"
+    sed 's/^/        /' "$default_fragment_path"
+    echo "    }"
+    echo "    tab name=\"$tab_name_kdl\" {"
+    sed 's/^/        /' "$initial_fragment_path"
+    echo "    }"
+    echo "}"
+  } > "$output_path"
 }
 
 # --- Commands that do not require a git repo ---
@@ -68,24 +399,17 @@ if [ "$1" = "doctor" ]; then
   # 2. Find the Zellij plugin
   PLUGIN_PATH=""
   PLUGIN_MODE=""
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
-    if [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-      echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
-      ERRORS=1
-    else
-      PLUGIN_PATH="$ZELLIGENT_PLUGIN_SRC"
+  if PLUGIN_PATH=$(resolve_plugin_path); then
+    if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
       PLUGIN_MODE="custom"
-    fi
-  else
-    HOMEBREW_PLUGIN="$ZELLIGENT_PREFIX/share/zelligent/zelligent-plugin.wasm"
-    DEV_PLUGIN="$HOME/.local/share/zelligent/zelligent-plugin.wasm"
-    if [ -f "$HOMEBREW_PLUGIN" ]; then
-      PLUGIN_PATH="$HOMEBREW_PLUGIN"
-      PLUGIN_MODE="homebrew"
-    elif [ -f "$DEV_PLUGIN" ]; then
-      PLUGIN_PATH="$DEV_PLUGIN"
+    elif [ "$PLUGIN_PATH" = "$HOME/.local/share/zelligent/zelligent-plugin.wasm" ]; then
       PLUGIN_MODE="dev"
+    else
+      PLUGIN_MODE="homebrew"
     fi
+  elif [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+    echo "  plugin: source not found ($ZELLIGENT_PLUGIN_SRC)"
+    ERRORS=1
   fi
 
   if [ -z "$PLUGIN_PATH" ]; then
@@ -108,29 +432,24 @@ if [ "$1" = "doctor" ]; then
     fi
   fi
 
+  DEFAULT_LAYOUT_PATH=""
+  if DEFAULT_LAYOUT_PATH=$(resolve_default_layout_path); then
+    echo "  default layout: ok ($DEFAULT_LAYOUT_PATH)"
+  elif [ -n "$ZELLIGENT_DEFAULT_LAYOUT_SRC" ]; then
+    echo "  default layout: source not found ($ZELLIGENT_DEFAULT_LAYOUT_SRC)"
+    ERRORS=1
+  else
+    echo "  default layout: not found"
+    echo "                 Install with: brew install pcomans/zelligent/zelligent"
+    echo "                 Or from source: bash dev-install.sh"
+    ERRORS=1
+  fi
+
   CONFIG="$ZELLIJ_CONFIG_HOME/config.kdl"
   mkdir -p "$(dirname "$CONFIG")"
   touch "$CONFIG"
 
-  if grep -v '^\s*//' "$CONFIG" | grep -qF 'zelligent-plugin.wasm'; then
-    echo "  keybinding: ok ($CONFIG)"
-  else
-    cat >> "$CONFIG" <<KDL
-
-keybinds {
-    shared_except "locked" {
-        bind "Ctrl y" {
-            LaunchOrFocusPlugin "file:$PLUGIN_PATH" {
-                floating true
-                move_to_focused_tab true
-                agent_cmd "$SHELL"
-            }
-        }
-    }
-}
-KDL
-    echo "  keybinding: added Ctrl-y to $CONFIG"
-  fi
+  echo "  keybinding: skipped (persistent sidebar only)"
 
   if [ "$(uname)" = "Darwin" ]; then
     if grep -v '^\s*//' "$CONFIG" | grep -qF 'copy_command'; then
@@ -226,6 +545,20 @@ PERMS
     fi
   fi
 
+  USER_LAYOUT_PATH="$ZELLIGENT_USER_DIR/layout.kdl"
+  mkdir -p "$ZELLIGENT_USER_DIR"
+  if [ -n "$DEFAULT_LAYOUT_PATH" ]; then
+    if [ ! -f "$USER_LAYOUT_PATH" ]; then
+      cp "$DEFAULT_LAYOUT_PATH" "$USER_LAYOUT_PATH"
+      echo "  layout: created $USER_LAYOUT_PATH"
+    elif cmp -s "$DEFAULT_LAYOUT_PATH" "$USER_LAYOUT_PATH"; then
+      echo "  layout: ok"
+    else
+      echo "  layout: custom user layout differs from shipped default"
+      echo "          Overwrite with: cp \"$DEFAULT_LAYOUT_PATH\" \"$USER_LAYOUT_PATH\""
+    fi
+  fi
+
   if [ "$ERRORS" -ne 0 ]; then
     echo ""
     echo "Some checks failed. Fix the issues above and run 'zelligent doctor' again."
@@ -308,15 +641,6 @@ fi
 
 # No args: launch or attach to Zellij session for this repo
 if [ -z "$1" ]; then
-  # Check plugin is available
-  if [ -n "$ZELLIGENT_PLUGIN_SRC" ] && [ ! -f "$ZELLIGENT_PLUGIN_SRC" ]; then
-    echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
-    exit 1
-  elif [ -z "$ZELLIGENT_PLUGIN_SRC" ] && ! command -v zelligent &>/dev/null; then
-    echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
-    exit 1
-  fi
-
   if [ -n "$ZELLIJ" ]; then
     echo "Already inside a Zellij session. Use 'zelligent spawn <branch>' to open a worktree tab."
     exit 0
@@ -326,8 +650,40 @@ if [ -z "$1" ]; then
     echo "Attaching to session '$REPO_NAME'..."
     exec zellij attach "$REPO_NAME"
   else
+    PLUGIN_PATH_STARTUP=""
+    if ! PLUGIN_PATH_STARTUP=$(resolve_plugin_path); then
+      if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
+        echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
+      else
+        echo "Plugin not installed. Run 'zelligent doctor' to set up." >&2
+      fi
+      exit 1
+    fi
+
+    LAYOUT_SOURCE_STARTUP=""
+    if ! LAYOUT_SOURCE_STARTUP=$(resolve_layout_source); then
+      echo "Error: no layout found. Expected .zelligent/layout.kdl or $ZELLIGENT_USER_DIR/layout.kdl." >&2
+      echo "Run 'zelligent doctor' to create the default user layout." >&2
+      exit 1
+    fi
+
+    mkdir -p "$ZELLIGENT_USER_DIR/tmp"
+    RENDERED_STARTUP_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-fragment-XXXXXX")
+    RENDERED_STARTUP_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-template-XXXXXX")
+    STARTUP_LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-session-XXXXXX")
+    trap 'rm -f "$RENDERED_STARTUP_FRAGMENT" "$RENDERED_STARTUP_TEMPLATE" "$STARTUP_LAYOUT"' EXIT
+
+    STARTUP_AGENT_CMD="$SHELL"
+    STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
+    STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD")
+    STARTUP_CHILDREN=$(default_tab_children_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER")
+    render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_FRAGMENT" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "$STARTUP_CHILDREN"
+    render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_TEMPLATE" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "children"
+    write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_FRAGMENT" "$REPO_NAME"
+
     echo "Creating Zellij session '$REPO_NAME'..."
-    exec zellij --session "$REPO_NAME"
+    zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
+    exit $?
   fi
 fi
 
@@ -450,10 +806,6 @@ SESSION_NAME="${BRANCH_NAME//\//-}"
 # Strip any characters outside the safe set for session/tab names
 SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
 
-# Escape backslashes and double quotes for KDL string embedding
-AGENT_CMD_KDL="${AGENT_CMD//\\/\\\\}"
-AGENT_CMD_KDL="${AGENT_CMD_KDL//\"/\\\"}"
-
 # Detect default base branch
 if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
   BASE_BRANCH="${BASE_REF#refs/remotes/origin/}"
@@ -463,6 +815,23 @@ fi
 
 # Define the new centralized worktree path
 WORKTREE_PATH="$WORKTREES_DIR/$BRANCH_NAME"
+
+# Resolve plugin and selected layout source before mutating worktrees.
+if ! PLUGIN_PATH_LAYOUT=$(resolve_plugin_path); then
+  echo "Error: could not resolve the zelligent sidebar plugin." >&2
+  echo "Run 'zelligent doctor' or reinstall the plugin." >&2
+  exit 1
+fi
+
+if ! LAYOUT_SOURCE=$(resolve_layout_source); then
+  echo "Error: no layout found. Expected .zelligent/layout.kdl or $ZELLIGENT_USER_DIR/layout.kdl." >&2
+  echo "Run 'zelligent doctor' to create the default user layout." >&2
+  exit 1
+fi
+
+if ! validate_layout_source "$LAYOUT_SOURCE"; then
+  exit 1
+fi
 
 NEW_WORKTREE=false
 
@@ -485,59 +854,25 @@ else
 
 fi
 
-# Use repo-level layout if present, otherwise use built-in default
-if [ -f "$REPO_ROOT/.zelligent/layout.kdl" ]; then
-  LAYOUT_TEMPLATE="$REPO_ROOT/.zelligent/layout.kdl"
-else
-  LAYOUT_TEMPLATE=""
-fi
-
 # Generate temp layout files
-mkdir -p "$HOME/.zelligent/tmp"
-LAYOUT=$(mktemp "$HOME/.zelligent/tmp/layout-XXXXXX")
-trap 'rm -f "$LAYOUT"' EXIT
+mkdir -p "$ZELLIGENT_USER_DIR/tmp"
+LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-XXXXXX")
+RENDERED_TAB_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-fragment-XXXXXX")
+RENDERED_SESSION_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-session-template-XXXXXX")
+trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE"' EXIT
 
-# Build the agent pane command, prepending setup.sh for new worktrees
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
-if [ "$NEW_WORKTREE" = true ] && [ -f "$SETUP_SCRIPT" ]; then
-  AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"export ZELLIGENT_TAB_NAME='$SESSION_NAME'; bash \\\"\$1\\\" \\\"\$2\\\" \\\"\$3\\\" || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; exec $AGENT_CMD_KDL\" \"--\" \"$SETUP_SCRIPT\" \"$REPO_ROOT\" \"$WORKTREE_PATH\"
-        }"
-else
-  AGENT_PANE="pane command=\"bash\" cwd=\"$WORKTREE_PATH\" size=\"70%\" {
-            args \"-c\" \"export ZELLIGENT_TAB_NAME='$SESSION_NAME'; exec $AGENT_CMD_KDL\"
-        }"
-fi
+AGENT_CMD_RENDER=$(build_agent_command_value "$AGENT_CMD" "$SESSION_NAME" "$REPO_ROOT" "$WORKTREE_PATH" "$SETUP_SCRIPT" "$NEW_WORKTREE")
+SESSION_AGENT_RENDER=$(build_agent_command_value "$AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
+SIDEBAR_RENDER=$(sidebar_plugin_content "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD")
+TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER")
+render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
+render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"
 
-# Pane content shared by both layouts
-pane_content() {
-  cat <<EOF
-    pane size=1 borderless=true {
-        plugin location="zellij:tab-bar"
-    }
-    pane split_direction="vertical" {
-        $AGENT_PANE
-        pane command="lazygit" cwd="$WORKTREE_PATH" size="30%"
-    }
-    pane size=1 borderless=true {
-        plugin location="zellij:status-bar"
-    }
-EOF
-}
-
-if [ -n "$LAYOUT_TEMPLATE" ] && [ -n "$ZELLIJ" ]; then
-  # Inside Zellij with custom template: substitute vars, use as-is for new-tab
-  sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" > "$LAYOUT"
-elif [ -n "$LAYOUT_TEMPLATE" ]; then
-  # Outside Zellij with custom template: strip outer layout{} and wrap in a named tab
-  INNER=$(sed -e "s|{{cwd}}|$WORKTREE_PATH|g" -e "s|{{agent_cmd}}|$AGENT_CMD|g" "$LAYOUT_TEMPLATE" | sed '1d;$d')
-  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; echo "$INNER"; echo "    }"; echo "}"; } > "$LAYOUT"
-elif [ -n "$ZELLIJ" ]; then
-  # Tab layout: no tab wrapper (new-tab provides the tab context)
-  { echo "layout {"; pane_content; echo "}"; } > "$LAYOUT"
+if [ -n "$ZELLIJ" ]; then
+  write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
 else
-  # Session layout: wrap in a named tab
-  { echo "layout {"; echo "    tab name=\"$SESSION_NAME\" {"; pane_content; echo "    }"; echo "}"; } > "$LAYOUT"
+  write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME"
 fi
 
 # Inside Zellij: open as a new tab in the current session.
