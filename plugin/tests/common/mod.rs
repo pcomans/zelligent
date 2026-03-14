@@ -59,6 +59,12 @@ pub fn state_with_worktrees() -> State {
         Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
         Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
     ];
+    s.tabs = vec![
+        make_tab_info("feat-a", true),
+        make_tab_info("feat-b", false),
+        make_tab_info("feat-c", false),
+    ];
     s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
+    s.recompute_sidebar_items();
     s
 }

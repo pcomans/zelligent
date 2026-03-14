@@ -8,5 +8,5 @@ expression: "render_to_string(&s, 20, 80)"
   [32m✓ [0m feat-b [0m
      feat-c [0m
 
-  [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m open  [2mn[0m branch  [2mi[0m new  [2md[0m remove  [2mr[0m refresh  [2mq[0m quit
+  [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m open  [2mn[0m branch  [2mi[0m new  [2md[0m remove  [2mr[0m refresh
   [2mVERSION[0m

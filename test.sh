@@ -552,7 +552,7 @@ contains "no args with plugin: uses session layout" "--new-session-with-layout" 
 contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
-count_equals "no args with plugin: session layout has template + initial tab split" 'split_direction="Vertical"' 2 "$out"
+count_equals "no args with plugin: session layout has one shared sidebar split" 'split_direction="Vertical"' 1 "$out"
 contains "no args with plugin: startup honors SHELL" 'agent_cmd "/bin/zsh"' "$out"
 contains "no args with plugin: startup shell reaches layout args" 'exec /bin/zsh' "$out"
 
