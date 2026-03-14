@@ -11,9 +11,9 @@
 
 Zelligent runs AI coding agents in isolated git worktrees, each in its own [Zellij](https://zellij.dev) tab.
 
-You give it a branch name and an agent command. It creates a worktree, opens a new tab with the agent on the left and [lazygit](https://github.com/jesseduffield/lazygit) on the right. When you're done, it cleans up the worktree.
+You give it a branch name and an agent command. It creates a worktree, opens a new tab with a persistent sidebar on the left and an agent plus [lazygit](https://github.com/jesseduffield/lazygit) on the right. When you're done, it cleans up the worktree.
 
-Use the CLI to spawn worktrees, or press **`Ctrl-y`** inside Zellij to manage them from an interactive plugin UI.
+Use the CLI to spawn worktrees, or use the always-visible sidebar inside zelligent-managed tabs to switch, create, and remove worktrees.
 
 ## Quick start
 
@@ -29,7 +29,7 @@ Run the setup wizard:
 zelligent doctor
 ```
 
-This installs the Zellij plugin, adds the `Ctrl-y` keybinding to your Zellij config, and syncs the bundled Claude skill to `~/.claude/skills/zelligent-spawn-claude/SKILL.md` (Homebrew installs use a symlink to keep it updated across upgrades). It also sets up clipboard support on macOS. Safe to run more than once.
+This installs the Zellij plugin, creates `~/.zelligent/layout.kdl` if it is missing, configures plugin permissions and session serialization, and syncs the bundled Claude skill to `~/.claude/skills/zelligent-spawn-claude/SKILL.md` (Homebrew installs use a symlink to keep it updated across upgrades). It also sets up clipboard support on macOS. Safe to run more than once.
 
 Start a session:
 
@@ -52,7 +52,7 @@ On first launch, Zellij will ask you to grant the plugin permissions. Select `y`
 
 ## How it works
 
-Zelligent has two parts: a shell script that manages git worktrees and Zellij sessions, and a Rust plugin (compiled to WASM) that provides an interactive UI inside Zellij.
+Zelligent has two parts: a shell script that manages git worktrees and Zellij sessions, and a Rust plugin (compiled to WASM) that provides the embedded sidebar UI inside Zellij.
 
 ### The CLI
 
@@ -61,14 +61,14 @@ The `zelligent` command handles worktree creation, layout generation, and sessio
 When you run `zelligent spawn feature/auth claude`:
 
 1. It creates a git worktree at `~/.zelligent/worktrees/<repo>/<branch>/`, branched from your default branch (usually `main`)
-2. It generates a Zellij layout file (KDL format) with two panes: agent left, lazygit right
+2. It generates a Zellij layout file (KDL format) with an embedded left sidebar plus the main tab body
 3. If you're inside Zellij, it opens a new tab. If you're outside, it creates or attaches to the repo's session
 
 If the branch already exists, it reuses the existing worktree instead of creating a new one.
 
 ### The plugin
 
-Press `Ctrl-y` inside Zellij to open the plugin as a floating pane. It lists your active worktrees and lets you create, open, or remove them without leaving the terminal.
+The plugin is embedded as a persistent left sidebar in every zelligent-managed tab. It lists your active worktrees and lets you create, open, or remove them without leaving the terminal.
 
 | Key | Action |
 |---|---|
@@ -78,7 +78,6 @@ Press `Ctrl-y` inside Zellij to open the plugin as a floating pane. It lists you
 | `i` | Type a new branch name |
 | `d` then `y` | Remove the selected worktree |
 | `r` | Refresh |
-| `q` / `Esc` | Close |
 
 When you remove a worktree through the plugin, it also closes the corresponding tab.
 
@@ -135,20 +134,27 @@ rm -f "$WORKTREE_PATH/.env"
 
 ## Custom layout
 
-Create `.zelligent/layout.kdl` to override the default tab layout. Use `{{cwd}}` and `{{agent_cmd}}` as placeholders:
+Create `.zelligent/layout.kdl` to override the default tab layout. This file is a fragment, not a full `layout { ... }` document. Zelligent owns the outer wrappers and renders these placeholders:
+
+- `{{zelligent_sidebar}}` required exactly once
+- `{{zelligent_children}}` required exactly once
+- `{{cwd}}` optional
+- `{{agent_cmd}}` optional
+
+Example:
 
 ```kdl
-layout {
-    pane size=1 borderless=true {
-        plugin location="zellij:tab-bar"
+pane split_direction="Vertical" {
+    pane size="24%" {
+        {{zelligent_sidebar}}
     }
-    pane split_direction="vertical" {
+    pane {
         pane command="{{agent_cmd}}" cwd="{{cwd}}" size="70%"
         pane command="lazygit" cwd="{{cwd}}" size="30%"
     }
-    pane size=1 borderless=true {
-        plugin location="zellij:status-bar"
-    }
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
 }
 ```
 
