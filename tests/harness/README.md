@@ -103,6 +103,13 @@ Fixture scripts must:
 - Print `REPO_DIR=/tmp/zelligent-test-repo` to stdout
 - Be idempotent (clean up before setting up)
 
-The `teardown.sh` script kills the isolated tmux socket, stops the test Zellij
-session named by `HARNESS_SESSION_NAME`, and removes the temporary repo and
-worktrees.
+The `teardown.sh` script kills the isolated tmux socket, removes the known test
+Zellij sessions, clears stale session resurrection state, and removes the
+temporary repo and worktrees.
+
+## Harness Learnings
+
+- Test setup must be boring and deterministic. If teardown "usually" works, it is broken.
+- Treat session isolation as part of the test contract. If stale tabs or stale session state leak across runs, the result is invalid.
+- Prefer absolute paths when driving tmux on macOS. `/tmp` often resolves to `/private/tmp`, and getting that wrong creates fake failures.
+- Run harness setup serially. Parallel setup made failures harder to trust than the product itself.
