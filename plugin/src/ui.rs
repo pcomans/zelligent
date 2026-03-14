@@ -11,7 +11,7 @@ pub const YELLOW: &str = "\x1b[33m";
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use crate::{AgentStatus, Mode, Worktree};
+use crate::{AgentStatus, Mode, SidebarItem};
 
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
@@ -38,24 +38,35 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 
-pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_statuses: &BTreeMap<String, AgentStatus>, selected: usize, rows: usize) {
-    if worktrees.is_empty() {
+pub fn render_empty_state(w: &mut impl Write) {
+    writeln!(w).unwrap();
+    writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
+    writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
+    writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
+    writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
+    writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
+    writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
+    writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
+    writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
+    writeln!(w).unwrap();
+    writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
+    writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
+}
+
+pub fn render_sidebar_list(
+    w: &mut impl Write,
+    items: &[SidebarItem],
+    agent_statuses: &BTreeMap<String, AgentStatus>,
+    selected: usize,
+    rows: usize,
+) {
+    if items.is_empty() {
         writeln!(w).unwrap();
-        writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
-        writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
-        writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
-        writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
-        writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
-        writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
-        writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
-        writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
-        writeln!(w).unwrap();
-        writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
-        writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
+        writeln!(w, "  {DIM}Waiting for tabs...{RESET}").unwrap();
         return;
     }
 
-    let max_visible = rows.saturating_sub(5).max(1); // header + footer + margins
+    let max_visible = rows.saturating_sub(5).max(1);
     let start = if selected >= max_visible {
         selected - max_visible + 1
     } else {
@@ -63,16 +74,31 @@ pub fn render_worktree_list(w: &mut impl Write, worktrees: &[Worktree], agent_st
     };
 
     writeln!(w).unwrap();
-    for (idx, wt) in worktrees.iter().enumerate().skip(start).take(max_visible) {
+    for (idx, item) in items.iter().enumerate().skip(start).take(max_visible) {
         let cursor = if idx == selected { INVERSE } else { "" };
-        let tab_name = sanitize_tab_name(&wt.branch);
         let indicator = status_indicator(
-            agent_statuses.get(&tab_name).unwrap_or(&AgentStatus::Idle),
+            agent_statuses.get(&item.tab_name).unwrap_or(&AgentStatus::Idle),
         );
-        if wt.dir != wt.branch {
-            writeln!(w, "  {indicator}{cursor} {dir} {RESET}  {DIM}({branch}){RESET}", dir = wt.dir, branch = wt.branch).unwrap();
-        } else {
-            writeln!(w, "  {indicator}{cursor} {dir} {RESET}", dir = wt.dir).unwrap();
+        match item.matched_branch.as_deref() {
+            Some(branch) if branch != item.display_name => {
+                writeln!(
+                    w,
+                    "  {indicator}{cursor} {name} {RESET}  {DIM}({branch}){RESET}",
+                    name = item.display_name,
+                )
+                .unwrap();
+            }
+            Some(_) => {
+                writeln!(w, "  {indicator}{cursor} {name} {RESET}", name = item.display_name).unwrap();
+            }
+            None => {
+                writeln!(
+                    w,
+                    "  {indicator}{cursor} {name} {RESET}  {DIM}(user tab){RESET}",
+                    name = item.display_name,
+                )
+                .unwrap();
+            }
         }
     }
 }
@@ -135,7 +161,7 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
                 w,
                 "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
                  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
-                 {DIM}r{RESET} refresh  {DIM}q{RESET} quit"
+                 {DIM}r{RESET} refresh"
             )
             .unwrap();
         }

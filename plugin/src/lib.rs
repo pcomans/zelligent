@@ -40,6 +40,13 @@ pub struct Worktree {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarItem {
+    pub tab_name: String,
+    pub display_name: String,
+    pub matched_branch: Option<String>,
+}
+
 /// Actions returned by key/event handlers, executed by the plugin shell.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -78,10 +85,8 @@ pub struct State {
     pub initial_cwd: PathBuf,
     pub session_name: Option<String>,
     pub tabs: Vec<TabInfo>,
-    /// Flipped to `true` after the first successful worktree list load.
-    /// Auto-selection of the active tab's worktree only happens before this
-    /// so that subsequent refreshes do not override the user's cursor position.
-    pub has_loaded: bool,
+    /// Sidebar items derived from tabs plus worktree metadata.
+    pub sidebar_items: Vec<SidebarItem>,
     /// Agent status per tab name (sanitized branch name).
     pub agent_statuses: BTreeMap<String, AgentStatus>,
 }
@@ -165,6 +170,32 @@ pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
 }
 
 impl State {
+    fn sidebar_item_key(item: &SidebarItem) -> String {
+        match &item.matched_branch {
+            Some(branch) => format!("branch:{branch}"),
+            None => format!("tab:{}", item.tab_name),
+        }
+    }
+
+    fn active_tab_name(&self) -> Option<&str> {
+        self.tabs.iter().find(|tab| tab.active).map(|tab| tab.name.as_str())
+    }
+
+    fn select_active_sidebar_item(&mut self) -> bool {
+        let Some(active_tab_name) = self.active_tab_name() else {
+            return false;
+        };
+        let Some(idx) = self
+            .sidebar_items
+            .iter()
+            .position(|item| item.tab_name == active_tab_name)
+        else {
+            return false;
+        };
+        self.selected_index = idx;
+        true
+    }
+
     fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("cmd_type".to_string(), cmd_type.to_string());
@@ -252,7 +283,6 @@ impl State {
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
-                close_self();
             }
             Action::Refresh => {
                 self.fire_list_worktrees();
@@ -340,31 +370,64 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
-        if !self.has_loaded && self.tabs.iter().any(|t| t.active) {
-            // On the very first load where tab state is known, jump to the
-            // worktree for the active tab so the cursor starts in a meaningful
-            // position. If tabs haven't arrived yet we leave has_loaded = false
-            // so the TabUpdate handler can retry once they do.
-            self.has_loaded = true;
-            if let Some(idx) = self.find_worktree_for_active_tab() {
+        self.recompute_sidebar_items();
+    }
+
+    pub fn recompute_sidebar_items(&mut self) {
+        let previous_item_key = self
+            .sidebar_items
+            .get(self.selected_index)
+            .map(Self::sidebar_item_key);
+
+        let mut items: Vec<SidebarItem> = self
+            .tabs
+            .iter()
+            .map(|tab| SidebarItem {
+                tab_name: tab.name.clone(),
+                display_name: tab.name.clone(),
+                matched_branch: self
+                    .worktrees
+                    .iter()
+                    .find(|wt| Self::tab_name_for_branch(&wt.branch) == tab.name)
+                    .map(|wt| wt.branch.clone()),
+            })
+            .collect();
+
+        for wt in &self.worktrees {
+            let tab_name = Self::tab_name_for_branch(&wt.branch);
+            if items.iter().any(|item| item.tab_name == tab_name) {
+                continue;
+            }
+            items.push(SidebarItem {
+                tab_name,
+                display_name: if wt.dir != wt.branch {
+                    wt.dir.clone()
+                } else {
+                    wt.branch.clone()
+                },
+                matched_branch: Some(wt.branch.clone()),
+            });
+        }
+
+        self.sidebar_items = items;
+
+        if let Some(previous_item_key) = previous_item_key {
+            if let Some(idx) = self
+                .sidebar_items
+                .iter()
+                .position(|item| Self::sidebar_item_key(item) == previous_item_key)
+            {
                 self.selected_index = idx;
                 return;
             }
         }
-        // On refresh (or when no tab match was found), preserve the user's
-        // cursor position and only clamp if it went out of range.
-        if self.selected_index >= self.worktrees.len() && !self.worktrees.is_empty() {
-            self.selected_index = self.worktrees.len() - 1;
-        }
-    }
 
-    /// Return the index of the worktree whose tab name matches the active tab, if any.
-    /// Returns the first match; see `tab_name_for_branch` for the ambiguity caveat.
-    pub fn find_worktree_for_active_tab(&self) -> Option<usize> {
-        let active_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str())?;
-        self.worktrees
-            .iter()
-            .position(|wt| Self::tab_name_for_branch(&wt.branch) == active_name)
+        if !self.select_active_sidebar_item()
+            && self.selected_index >= self.sidebar_items.len()
+            && !self.sidebar_items.is_empty()
+        {
+            self.selected_index = self.sidebar_items.len() - 1;
+        }
     }
 
     pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
@@ -431,10 +494,6 @@ impl State {
     /// Convert a branch name to the corresponding Zellij tab name.
     /// Tab names use the branch with `/` replaced by `-` and non-`[A-Za-z0-9_-]`
     /// chars stripped (matching zelligent.sh).
-    ///
-    /// Note: this mapping is not injective — `feat/cool` and `feat-cool` both
-    /// produce `feat-cool`. In that case `find_worktree_for_active_tab` will
-    /// match the first worktree in the list, which may not be the intended one.
     pub fn tab_name_for_branch(branch: &str) -> String {
         ui::sanitize_tab_name(branch)
     }
@@ -443,6 +502,18 @@ impl State {
     pub fn has_tab_for_branch(&self, branch: &str) -> bool {
         let tab_name = Self::tab_name_for_branch(branch);
         self.tabs.iter().any(|t| t.name == tab_name)
+    }
+
+    fn selected_sidebar_branch(&self) -> Option<&str> {
+        self.sidebar_items
+            .get(self.selected_index)
+            .and_then(|item| item.matched_branch.as_deref())
+    }
+
+    fn should_render_empty_state(&self) -> bool {
+        self.worktrees.is_empty()
+            && self.sidebar_items.iter().all(|item| item.matched_branch.is_none())
+            && self.sidebar_items.len() <= 1
     }
 
     /// Switch to an existing tab for the branch, or spawn a new one.
@@ -458,16 +529,20 @@ impl State {
 
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
+            let browse_len = self.sidebar_items.len();
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), 1);
+                    self.selected_index = wrap_navigate(self.selected_index, browse_len, 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    self.selected_index = wrap_navigate(self.selected_index, self.worktrees.len(), -1);
+                    self.selected_index = wrap_navigate(self.selected_index, browse_len, -1);
                 }
                 BareKey::Enter => {
-                    if let Some(wt) = self.worktrees.get(self.selected_index) {
-                        return self.spawn_or_switch(wt.branch.clone());
+                    if let Some(item) = self.sidebar_items.get(self.selected_index) {
+                        if let Some(branch) = &item.matched_branch {
+                            return self.spawn_or_switch(branch.clone());
+                        }
+                        return Action::SwitchToTab(item.tab_name.clone());
                     }
                 }
                 BareKey::Char('n') => {
@@ -480,8 +555,13 @@ impl State {
                     self.input_buffer.clear();
                 }
                 BareKey::Char('d') => {
-                    if !self.worktrees.is_empty() {
-                        self.mode = Mode::Confirming;
+                    if !self.sidebar_items.is_empty() {
+                        if self.selected_sidebar_branch().is_some() {
+                            self.mode = Mode::Confirming;
+                        } else {
+                            self.status_message = "Only worktree tabs can be removed".to_string();
+                            self.status_is_error = true;
+                        }
                     }
                 }
                 BareKey::Char('r') => {
@@ -489,9 +569,7 @@ impl State {
                     self.status_is_error = false;
                     return Action::Refresh;
                 }
-                BareKey::Char('q') | BareKey::Esc => {
-                    return Action::Close;
-                }
+                BareKey::Char('q') | BareKey::Esc => {}
                 _ => {}
             }
         }
@@ -559,8 +637,8 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('y') => {
-                    if let Some(wt) = self.worktrees.get(self.selected_index) {
-                        let branch = wt.branch.clone();
+                    let branch = self.selected_sidebar_branch().map(ToOwned::to_owned);
+                    if let Some(branch) = branch {
                         self.status_message = format!("Removing '{branch}'...");
                         self.status_is_error = false;
                         return Action::Remove(branch);
@@ -654,7 +732,11 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_worktree_list(w, &self.worktrees, &self.agent_statuses, self.selected_index, rows);
+                if self.should_render_empty_state() {
+                    ui::render_empty_state(w);
+                } else {
+                    ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows);
+                }
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION);
             }
@@ -671,8 +753,8 @@ impl State {
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
-                if let Some(wt) = self.worktrees.get(self.selected_index) {
-                    ui::render_confirm(w, &wt.branch);
+                if let Some(branch) = self.selected_sidebar_branch() {
+                    ui::render_confirm(w, branch);
                 }
             }
         }
@@ -746,14 +828,7 @@ impl ZellijPlugin for State {
             }
             Event::TabUpdate(tab_info) => {
                 self.tabs = tab_info;
-                // If worktrees loaded before tabs arrived, do the initial
-                // auto-select now that we have tab state.
-                if !self.has_loaded && !self.worktrees.is_empty() {
-                    self.has_loaded = true;
-                    if let Some(idx) = self.find_worktree_for_active_tab() {
-                        self.selected_index = idx;
-                    }
-                }
+                self.recompute_sidebar_items();
                 Action::None
             }
             Event::Key(key) => {
@@ -807,6 +882,17 @@ mod tests {
             Worktree { dir: "feat-c".into(), branch: "feat-c".into() },
         ];
         s.branches = vec!["main".into(), "feat-a".into(), "feat-b".into(), "dev".into()];
+        s
+    }
+
+    fn state_with_sidebar() -> State {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
+        ];
+        s.recompute_sidebar_items();
         s
     }
 
@@ -939,7 +1025,7 @@ mod tests {
 
     #[test]
     fn browse_j_moves_down() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.handle_key_browse(&key(BareKey::Char('j')));
         assert_eq!(s.selected_index, 1);
         s.handle_key_browse(&key(BareKey::Down));
@@ -948,7 +1034,7 @@ mod tests {
 
     #[test]
     fn browse_j_wraps_around() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.selected_index = 2;
         s.handle_key_browse(&key(BareKey::Char('j')));
         assert_eq!(s.selected_index, 0);
@@ -956,7 +1042,7 @@ mod tests {
 
     #[test]
     fn browse_k_moves_up() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.selected_index = 2;
         s.handle_key_browse(&key(BareKey::Char('k')));
         assert_eq!(s.selected_index, 1);
@@ -966,7 +1052,7 @@ mod tests {
 
     #[test]
     fn browse_k_wraps_around() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.selected_index = 0;
         s.handle_key_browse(&key(BareKey::Char('k')));
         assert_eq!(s.selected_index, 2);
@@ -982,21 +1068,37 @@ mod tests {
     }
 
     #[test]
-    fn browse_enter_spawns_selected() {
-        let mut s = state_with_worktrees();
+    fn browse_enter_switches_selected_sidebar_tab() {
+        let mut s = state_with_sidebar();
         s.selected_index = 1;
         let action = s.handle_key_browse(&key(BareKey::Enter));
-        assert_eq!(action, Action::Spawn("feat-b".into()));
-        assert_eq!(s.status_message, "Spawning 'feat-b'...");
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
     }
 
     #[test]
     fn browse_enter_switches_to_existing_tab() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
-        s.selected_index = 0; // feat-a has a tab open
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            worktrees: vec![Worktree {
+                dir: "feature-cool".into(),
+                branch: "feature/cool".into(),
+            }],
+            tabs: vec![make_tab("feature-cool", true)],
+            ..Default::default()
+        };
+        s.recompute_sidebar_items();
         let action = s.handle_key_browse(&key(BareKey::Enter));
-        assert_eq!(action, Action::SwitchToTab("feat-a".into()));
+        assert_eq!(action, Action::SwitchToTab("feature-cool".into()));
+    }
+
+    #[test]
+    fn browse_enter_switches_to_selected_user_tab() {
+        let mut s = state_with_sidebar();
+        s.tabs.push(make_tab("notes", false));
+        s.recompute_sidebar_items();
+        s.selected_index = 3;
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::SwitchToTab("notes".into()));
     }
 
     #[test]
@@ -1007,8 +1109,32 @@ mod tests {
     }
 
     #[test]
+    fn browse_enter_noop_without_tab_state() {
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            worktrees: vec![Worktree { dir: "feat-a".into(), branch: "feat-a".into() }],
+            ..Default::default()
+        };
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn browse_enter_spawns_detached_worktree_item() {
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            worktrees: vec![Worktree { dir: "feat-a".into(), branch: "feat-a".into() }],
+            ..Default::default()
+        };
+        s.recompute_sidebar_items();
+        let action = s.handle_key_browse(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("feat-a".into()));
+        assert_eq!(s.status_message, "Spawning 'feat-a'...");
+    }
+
+    #[test]
     fn browse_n_switches_to_select_branch() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.selected_index = 2;
         s.handle_key_browse(&key(BareKey::Char('n')));
         assert_eq!(s.mode, Mode::SelectBranch);
@@ -1018,7 +1144,7 @@ mod tests {
 
     #[test]
     fn browse_i_switches_to_input_branch() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.input_buffer = "leftover".into();
         s.handle_key_browse(&key(BareKey::Char('i')));
         assert_eq!(s.mode, Mode::InputBranch);
@@ -1027,7 +1153,7 @@ mod tests {
 
     #[test]
     fn browse_d_switches_to_confirming() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.handle_key_browse(&key(BareKey::Char('d')));
         assert_eq!(s.mode, Mode::Confirming);
     }
@@ -1040,23 +1166,36 @@ mod tests {
     }
 
     #[test]
+    fn browse_d_rejects_user_tab() {
+        let mut s = state_with_sidebar();
+        s.tabs.push(make_tab("notes", false));
+        s.recompute_sidebar_items();
+        s.selected_index = 3;
+        let action = s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert!(s.status_is_error);
+        assert_eq!(s.status_message, "Only worktree tabs can be removed");
+    }
+
+    #[test]
     fn browse_r_returns_refresh() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         let action = s.handle_key_browse(&key(BareKey::Char('r')));
         assert_eq!(action, Action::Refresh);
         assert_eq!(s.status_message, "Refreshed");
     }
 
     #[test]
-    fn browse_q_returns_close() {
-        let mut s = state_with_worktrees();
-        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::Close);
+    fn browse_q_is_noop_in_sidebar_mode() {
+        let mut s = state_with_sidebar();
+        assert_eq!(s.handle_key_browse(&key(BareKey::Char('q'))), Action::None);
     }
 
     #[test]
-    fn browse_esc_returns_close() {
-        let mut s = state_with_worktrees();
-        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::Close);
+    fn browse_esc_is_noop_in_sidebar_mode() {
+        let mut s = state_with_sidebar();
+        assert_eq!(s.handle_key_browse(&key(BareKey::Esc)), Action::None);
     }
 
     // --- SelectBranch key handler tests ---
@@ -1190,7 +1329,7 @@ mod tests {
 
     #[test]
     fn confirm_y_removes() {
-        let mut s = state_with_worktrees();
+        let mut s = state_with_sidebar();
         s.mode = Mode::Confirming;
         s.selected_index = 1;
         let action = s.handle_key_confirming(&key(BareKey::Char('y')));
@@ -1419,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn list_worktrees_auto_selects_active_tab_on_initial_load() {
+    fn recompute_sidebar_selects_active_tab() {
         let mut s = State::default();
         s.tabs = vec![
             make_tab("feat-a", false),
@@ -1428,106 +1567,112 @@ mod tests {
         ];
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
         assert_eq!(s.selected_index, 1);
-        assert!(s.has_loaded);
+        assert_eq!(s.sidebar_items.len(), 3);
+        assert_eq!(s.sidebar_items[1].tab_name, "feat-b");
     }
 
     #[test]
-    fn list_worktrees_auto_selects_active_tab_with_slash_branch() {
+    fn recompute_sidebar_selects_active_tab_with_slash_branch() {
         let mut s = State::default();
-        s.tabs = vec![make_tab("feature-cool", true)];
+        s.tabs = vec![make_tab("main", false), make_tab("feature-cool", true)];
         s.handle_list_worktrees(Some(0), b"main\tmain\nfeature-cool\tfeature/cool\n", b"");
         assert_eq!(s.selected_index, 1);
+        assert_eq!(s.sidebar_items[1].matched_branch, Some("feature/cool".into()));
     }
 
     #[test]
-    fn list_worktrees_does_not_auto_select_on_refresh() {
-        let mut s = State::default();
-        s.has_loaded = true;
-        s.tabs = vec![make_tab("feat-a", true)];
-        s.selected_index = 2;
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
-        assert_eq!(s.selected_index, 2);
-    }
+    fn select_active_sidebar_item_uses_tab_identity_not_position() {
+        let mut s = State {
+            tabs: vec![make_tab("feat-a", false), make_tab("feat-b", true)],
+            sidebar_items: vec![
+                SidebarItem {
+                    tab_name: "feat-b".into(),
+                    display_name: "feat-b".into(),
+                    matched_branch: Some("feat-b".into()),
+                },
+                SidebarItem {
+                    tab_name: "feat-a".into(),
+                    display_name: "feat-a".into(),
+                    matched_branch: Some("feat-a".into()),
+                },
+            ],
+            ..Default::default()
+        };
 
-    #[test]
-    fn list_worktrees_defers_auto_select_when_tabs_not_yet_available() {
-        let mut s = State::default();
-        s.selected_index = 0;
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
-        assert!(!s.has_loaded);
+        assert!(s.select_active_sidebar_item());
         assert_eq!(s.selected_index, 0);
     }
 
     #[test]
-    fn tab_update_triggers_auto_select_when_worktrees_already_loaded() {
+    fn recompute_sidebar_preserves_cursor_by_name() {
         let mut s = State::default();
-        s.worktrees = vec![
-            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
-            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+        s.tabs = vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
         ];
-        let tabs = vec![make_tab("feat-a", false), make_tab("feat-b", true)];
-        s.tabs = tabs;
-        if !s.has_loaded && !s.worktrees.is_empty() {
-            s.has_loaded = true;
-            if let Some(idx) = s.find_worktree_for_active_tab() {
-                s.selected_index = idx;
-            }
-        }
-        assert!(s.has_loaded);
-        assert_eq!(s.selected_index, 1);
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n", b"");
+        s.selected_index = 2;
+        s.tabs = vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", true),
+            make_tab("feat-c", false),
+        ];
+        s.recompute_sidebar_items();
+        assert_eq!(s.selected_index, 2);
+        assert_eq!(s.sidebar_items[2].tab_name, "feat-c");
     }
 
     #[test]
-    fn list_worktrees_falls_back_to_clamp_when_no_tab_match() {
+    fn recompute_sidebar_builds_detached_items_without_tabs() {
         let mut s = State::default();
-        s.selected_index = 5;
-        s.tabs = vec![make_tab("unrelated", true)];
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
+        assert_eq!(s.sidebar_items.len(), 2);
+        assert_eq!(s.sidebar_items[0].tab_name, "feat-a");
+        assert_eq!(s.sidebar_items[1].tab_name, "feat-b");
         assert_eq!(s.selected_index, 0);
     }
 
     #[test]
-    fn list_worktrees_clamps_on_refresh_when_out_of_range() {
+    fn recompute_sidebar_includes_user_tab() {
         let mut s = State::default();
-        s.has_loaded = true;
-        s.selected_index = 5;
+        s.tabs = vec![make_tab("notes", true)];
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        assert_eq!(s.sidebar_items.len(), 2);
+        assert_eq!(s.sidebar_items[0].tab_name, "notes");
+        assert_eq!(s.sidebar_items[0].matched_branch, None);
+        assert_eq!(s.sidebar_items[1].tab_name, "feat-a");
+        assert_eq!(s.sidebar_items[1].matched_branch, Some("feat-a".into()));
+    }
+
+    #[test]
+    fn recompute_sidebar_includes_detached_worktrees() {
+        let mut s = State::default();
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeature-cool\tfeature/cool\n", b"");
+        assert_eq!(s.sidebar_items.len(), 2);
+        assert_eq!(s.sidebar_items[0].tab_name, "feat-a");
+        assert_eq!(s.sidebar_items[0].matched_branch, Some("feat-a".into()));
+        assert_eq!(s.sidebar_items[1].tab_name, "feature-cool");
+        assert_eq!(s.sidebar_items[1].matched_branch, Some("feature/cool".into()));
+    }
+
+    #[test]
+    fn recompute_sidebar_clamps_on_shrink() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("a", false), make_tab("b", true)];
+        s.recompute_sidebar_items();
+        s.selected_index = 1;
+        s.tabs = vec![make_tab("a", true)];
+        s.recompute_sidebar_items();
         assert_eq!(s.selected_index, 0);
     }
 
     #[test]
-    fn list_worktrees_ambiguous_tab_name_selects_first_match() {
+    fn recompute_sidebar_ambiguous_tab_name_matches_first_worktree() {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-cool", true)];
         s.handle_list_worktrees(Some(0), b"feat-cool\tfeat/cool\nfeat-cool\tfeat-cool\n", b"");
-        assert_eq!(s.selected_index, 0);
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_found() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-c", true)];
-        assert_eq!(s.find_worktree_for_active_tab(), Some(2));
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_no_match() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("unrelated", true)];
-        assert_eq!(s.find_worktree_for_active_tab(), None);
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_no_active_tab() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", false)];
-        assert_eq!(s.find_worktree_for_active_tab(), None);
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_empty_tabs() {
-        let s = state_with_worktrees();
-        assert_eq!(s.find_worktree_for_active_tab(), None);
+        assert_eq!(s.sidebar_items[0].matched_branch, Some("feat/cool".into()));
     }
 
     #[test]
