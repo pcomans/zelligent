@@ -68,3 +68,23 @@ Fixture scripts must:
 - Create the test repo at `/tmp/zelligent-test-repo`
 - Print `REPO_DIR=/tmp/zelligent-test-repo` to stdout
 - Be idempotent (clean up before setting up)
+
+## Harness Learnings
+
+These came from running the tmux harness against the persistent-sidebar stack.
+
+- Test setup must be boring and deterministic. If teardown "usually" works, it is broken. Treat fixture cleanup as part of the product quality bar, not as disposable test glue.
+- Treat session isolation as a first-class test requirement. If the Zellij session is not clean, the plan result is not trustworthy.
+- Clear `ZELLIJ` and `ZELLIJ_SESSION_NAME` before starting the repo-under-test `zelligent.sh` from tmux. If you do not, the shell can think it is already inside another Zellij session and attach to the wrong place.
+- Prefer absolute paths in tmux commands. On macOS, `/tmp` resolves to `/private/tmp`, and shell startup can ignore the expected working directory.
+- Run tmux setup commands sequentially. Parallel session/window creation was flaky during live runs and produced misleading setup failures.
+- `zelligent.sh nuke` may report success while stale resurrection state still exists. If the test session keeps coming back with old tabs, inspect and remove the Zellij cache entry at `~/Library/Caches/org.Zellij-Contributors.Zellij/<version>/session_info/zelligent-test-repo/` on macOS.
+- A contaminated harness session showed unrelated tabs such as `feature-d` in supposedly clean fixtures. Treat that as a harness/environment failure, not as a product result.
+- The live harness did verify one important behavior on the persistent-sidebar stack: deleting a pure user tab row is a no-op.
+
+## Open Tasks
+
+- Make the harness startup path explicitly open the zelligent plugin. The current plans assume the persistent sidebar appears after launching `zelligent.sh`, but the live session only shows the base Zellij tab and the built-in `About Zellij` pane.
+- Update the plans to verify preconditions before asserting sidebar behavior. If the plugin is not visible, fail fast with a setup error instead of pretending later keypress failures are product regressions.
+- Add one harness assertion that the `view` window starts in `/private/tmp/zelligent-test-repo` before running `zelligent.sh`. This catches the easy tmux cwd bug immediately.
+- Add one harness assertion that teardown removed both the live `zelligent-test-repo` processes and the `session_info` cache entry before the next plan starts.

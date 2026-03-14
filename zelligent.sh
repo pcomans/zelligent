@@ -258,6 +258,15 @@ WORKTREES_DIR="$WORKTREES_BASE/$REPO_NAME"
 
 # Handle nuke subcommand — delete the repo's Zellij session so it won't resurrect
 if [ "$1" = "nuke" ]; then
+  kill_matching_pids() {
+    local pattern="$1"
+    local pids
+    pids=$(ps -eo pid=,args= | grep -F "$pattern" | grep -v grep | awk '{print $1}' || true)
+    if [ -n "$pids" ]; then
+      kill -9 $pids 2>/dev/null || true
+    fi
+  }
+
   if [ -n "$ZELLIJ" ]; then
     echo "Error: cannot nuke from inside a Zellij session. Detach first." >&2
     exit 1
@@ -269,19 +278,16 @@ if [ "$1" = "nuke" ]; then
   # and keep re-serializing the session layout to the cache directory.
   zellij_version=$(zellij --version 2>/dev/null | awk '{print $2}')
   if [ -n "$zellij_version" ]; then
-    socket_path="${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME"
+    socket_base="${TMPDIR:-/tmp}"
+    socket_base="${socket_base%/}"
+    socket_path="$socket_base/zellij-$(id -u)/$zellij_version/$REPO_NAME"
     # Force-kill server processes for this session's socket.
     # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
     # Use grep -F instead of pkill -f to avoid regex metacharacter issues.
-    server_pids=$(ps -eo pid=,args= | grep -F "zellij --server $socket_path" | grep -v grep | awk '{print $1}' || true)
-    if [ -n "$server_pids" ]; then
-      kill -9 $server_pids 2>/dev/null || true
-    fi
+    kill_matching_pids "zellij --server $socket_path"
     # Kill client processes attached to this session
-    client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_NAME" | grep -v grep | awk '{print $1}' || true)
-    if [ -n "$client_pids" ]; then
-      kill -9 $client_pids 2>/dev/null || true
-    fi
+    kill_matching_pids "zellij attach $REPO_NAME"
+    kill_matching_pids "zellij --session $REPO_NAME"
   fi
   # Wait for processes to exit and finish any final serialization
   sleep 1
@@ -300,7 +306,7 @@ if [ "$1" = "nuke" ]; then
   fi
   # Clean up stale socket if still present
   if [ -n "$zellij_version" ]; then
-    rm -f "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
+    rm -f "$socket_base/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
   fi
   echo "Deleted session '$REPO_NAME'. Next 'zelligent' will start fresh."
   exit 0
