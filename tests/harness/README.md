@@ -74,7 +74,8 @@ Current plans:
 - `sidebar-layout-smoke.md`: PR 83 smoke test for startup, spawned tabs, and
   manual-tab inheritance
 - `empty-repo.md`: empty-state sidebar startup in a repo with no worktrees
-- `with-worktrees.md`: embedded sidebar in a repo with seeded worktrees
+- `with-worktrees.md`: embedded sidebar stability in a repo with seeded
+  worktrees
 
 ## Writing a new test plan
 
