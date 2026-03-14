@@ -482,6 +482,28 @@ impl State {
         Action::Spawn(branch)
     }
 
+    fn selected_worktree(&self) -> Option<&Worktree> {
+        if self.sidebar_items.is_empty() {
+            return self.worktrees.get(self.selected_index);
+        }
+
+        let branch = self
+            .sidebar_items
+            .get(self.selected_index)?
+            .matched_branch
+            .as_ref()?;
+
+        self.worktrees.iter().find(|wt| wt.branch == *branch)
+    }
+
+    fn selected_removable_worktree(&self) -> Option<&Worktree> {
+        let wt = self.selected_worktree()?;
+        if wt.branch == "main" {
+            return None;
+        }
+        Some(wt)
+    }
+
     pub fn handle_key_browse(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
             match key.bare_key {
@@ -511,7 +533,7 @@ impl State {
                     self.input_buffer.clear();
                 }
                 BareKey::Char('d') => {
-                    if !self.worktrees.is_empty() {
+                    if self.selected_removable_worktree().is_some() {
                         self.mode = Mode::Confirming;
                     }
                 }
@@ -590,7 +612,7 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('y') => {
-                    if let Some(wt) = self.worktrees.get(self.selected_index) {
+                    if let Some(wt) = self.selected_removable_worktree() {
                         let branch = wt.branch.clone();
                         self.status_message = format!("Removing '{branch}'...");
                         self.status_is_error = false;
@@ -702,8 +724,8 @@ impl State {
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
-                if let Some(wt) = self.worktrees.get(self.selected_index) {
-                    ui::render_confirm(w, &wt.branch);
+                if let Some(wt) = self.selected_removable_worktree() {
+                    ui::render_confirm(w, &wt.dir, &wt.branch);
                 }
             }
         }
@@ -1057,6 +1079,27 @@ mod tests {
     }
 
     #[test]
+    fn browse_d_noop_on_user_tab() {
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", true), make_tab("notes", false)];
+        s.recompute_sidebar_items();
+        s.selected_index = 1;
+        s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
+    fn browse_d_noop_on_main() {
+        let mut s = State::default();
+        s.mode = Mode::BrowseWorktrees;
+        s.worktrees = vec![Worktree { dir: "main".into(), branch: "main".into() }];
+        s.tabs = vec![make_tab("main", true)];
+        s.recompute_sidebar_items();
+        s.handle_key_browse(&key(BareKey::Char('d')));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+    }
+
+    #[test]
     fn browse_d_noop_on_empty() {
         let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
         s.handle_key_browse(&key(BareKey::Char('d')));
@@ -1220,6 +1263,29 @@ mod tests {
         let action = s.handle_key_confirming(&key(BareKey::Char('y')));
         assert_eq!(action, Action::Remove("feat-b".into()));
         assert_eq!(s.status_message, "Removing 'feat-b'...");
+    }
+
+    #[test]
+    fn confirm_y_noop_on_user_tab() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        s.tabs = vec![make_tab("feat-a", true), make_tab("notes", false)];
+        s.recompute_sidebar_items();
+        s.selected_index = 1;
+        let action = s.handle_key_confirming(&key(BareKey::Char('y')));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.mode, Mode::Confirming);
+    }
+
+    #[test]
+    fn confirm_y_noop_on_main() {
+        let mut s = State::default();
+        s.mode = Mode::Confirming;
+        s.worktrees = vec![Worktree { dir: "main".into(), branch: "main".into() }];
+        s.tabs = vec![make_tab("main", true)];
+        s.recompute_sidebar_items();
+        let action = s.handle_key_confirming(&key(BareKey::Char('y')));
+        assert_eq!(action, Action::None);
     }
 
     #[test]
