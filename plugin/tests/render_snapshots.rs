@@ -48,6 +48,21 @@ fn render_browse_empty() {
 }
 
 #[test]
+fn render_browse_without_tabs_uses_worktree_fallback() {
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        worktrees: vec![
+            Worktree { dir: "autonomy".into(), branch: "plugin-snapshot-tests".into() },
+            Worktree { dir: "competition".into(), branch: "competition".into() },
+        ],
+        selected_index: 1,
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
 fn render_browse_with_status_message() {
     let mut s = state_with_worktrees();
     s.status_message = "Spawned worktree for feat-d".into();
@@ -118,6 +133,23 @@ fn render_sidebar_list_scrolling() {
     s.recompute_sidebar_items();
     // Small viewport forces scrolling
     insta::assert_snapshot!(render_to_string(&s, 10, 80));
+}
+
+#[test]
+fn render_sidebar_list_short_pane_still_shows_one_item() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        worktrees: (0..3)
+            .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
+            .collect(),
+        tabs: (0..3)
+            .map(|i| make_tab_info(&format!("branch-{i}"), i == 2))
+            .collect(),
+        selected_index: 2,
+        ..Default::default()
+    };
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 5, 80));
 }
 
 #[test]
