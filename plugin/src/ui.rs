@@ -130,7 +130,10 @@ pub fn render_sidebar_list(
         let color = status_color(status);
         let title = fit_text(&item.display_name, title_width);
         let subtitle = match item.matched_branch.as_deref() {
-            Some(branch) => fit_text(&format!("branch: {branch}"), content_width),
+            Some(branch) if branch != item.display_name => {
+                fit_text(&format!("branch: {branch}"), content_width)
+            }
+            Some(_) => " ".repeat(content_width),
             None => fit_text("user tab", content_width),
         };
 
