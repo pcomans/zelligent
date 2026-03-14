@@ -78,6 +78,8 @@ A `.claude/hooks/pre-push-block.sh` hook blocks `git push` unless prefixed with 
 | KDL layout format | [docs/references/zellij-kdl-layout.md](docs/references/zellij-kdl-layout.md) |
 | All design docs | [docs/design-docs/index.md](docs/design-docs/index.md) |
 
+Design docs are implementation history and decision context. They may be superseded by newer code or reference docs, so treat them as historical unless they clearly describe the current contract.
+
 ## Key constraints
 
 - **Run `bash test.sh` before and after every change.** This is the single test command for the repo.
