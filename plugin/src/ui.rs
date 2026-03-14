@@ -72,7 +72,7 @@ fn status_indicator(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "  ",
         AgentStatus::Working => "● ",
-        AgentStatus::Awaiting => "● ",
+        AgentStatus::NeedsInput => "● ",
         AgentStatus::Done => "✓ ",
     }
 }
@@ -81,7 +81,7 @@ fn status_color(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "",
         AgentStatus::Working => GREEN,
-        AgentStatus::Awaiting => YELLOW,
+        AgentStatus::NeedsInput => YELLOW,
         AgentStatus::Done => GREEN,
     }
 }
