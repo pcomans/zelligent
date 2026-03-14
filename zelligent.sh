@@ -27,10 +27,46 @@ resolve_install_prefix() {
   fi
 }
 
+# Run a command with a hard timeout and kill its whole process group if it hangs.
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  perl -e '
+    use POSIX qw(setsid);
+
+    my $timeout = shift @ARGV;
+    my $pid = fork();
+    die "fork failed\n" unless defined $pid;
+
+    if ($pid == 0) {
+      setsid() or die "setsid failed\n";
+      exec @ARGV or die "exec failed: $!\n";
+    }
+
+    local $SIG{ALRM} = sub {
+      kill "TERM", -$pid;
+      select undef, undef, undef, 0.2;
+      kill "KILL", -$pid;
+      waitpid($pid, 0);
+      exit 142;
+    };
+
+    alarm $timeout;
+    waitpid($pid, 0);
+    alarm 0;
+
+    if ($? & 127) {
+      exit 128 + ($? & 127);
+    }
+    exit $? >> 8;
+  ' "$timeout_seconds" "$@"
+}
+
 # Wrapper with 3s timeout to avoid hanging on stale Zellij sockets
 zellij_list_sessions() {
   local output
-  if output=$(perl -e 'alarm 3; exec @ARGV' -- zellij list-sessions --no-formatting --short 2>/dev/null); then
+  if output=$(run_with_timeout 3 zellij list-sessions --no-formatting --short 2>/dev/null); then
     printf '%s\n' "$output"
   else
     local status=$?
@@ -341,7 +377,7 @@ write_fragment_layout() {
 write_session_layout() {
   local output_path="$1"
   local default_fragment_path="$2"
-  local initial_fragment_path="$3"
+  local initial_children_path="$3"
   local tab_name="$4"
   local tab_name_kdl
 
@@ -353,7 +389,7 @@ write_session_layout() {
     sed 's/^/        /' "$default_fragment_path"
     echo "    }"
     echo "    tab name=\"$tab_name_kdl\" {"
-    sed 's/^/        /' "$initial_fragment_path"
+    sed 's/^/        /' "$initial_children_path"
     echo "    }"
     echo "}"
   } > "$output_path"
@@ -668,18 +704,18 @@ if [ -z "$1" ]; then
     fi
 
     mkdir -p "$ZELLIGENT_USER_DIR/tmp"
-    RENDERED_STARTUP_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-fragment-XXXXXX")
     RENDERED_STARTUP_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-template-XXXXXX")
+    RENDERED_STARTUP_CHILDREN=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-children-XXXXXX")
     STARTUP_LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-session-XXXXXX")
-    trap 'rm -f "$RENDERED_STARTUP_FRAGMENT" "$RENDERED_STARTUP_TEMPLATE" "$STARTUP_LAYOUT"' EXIT
+    trap 'rm -f "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$STARTUP_LAYOUT"' EXIT
 
     STARTUP_AGENT_CMD="$SHELL"
     STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
     STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD")
     STARTUP_CHILDREN=$(default_tab_children_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER")
-    render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_FRAGMENT" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "$STARTUP_CHILDREN"
     render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_TEMPLATE" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "children"
-    write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_FRAGMENT" "$REPO_NAME"
+    printf '%s\n' "$STARTUP_CHILDREN" > "$RENDERED_STARTUP_CHILDREN"
+    write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$REPO_NAME"
 
     echo "Creating Zellij session '$REPO_NAME'..."
     zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
