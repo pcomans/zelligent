@@ -2,35 +2,31 @@
 fixture: setup-with-worktrees.sh
 ---
 
-# Worktree Navigation Test
+# Managed Tab Navigation Test
 
-Verifies the plugin correctly lists and navigates worktrees.
-The fixture creates 3 worktrees: feature-a, feature-b, feature-c.
+Verifies managed worktree tabs can be opened and navigated in the persistent sidebar.
+The fixture creates worktrees for `feature-a`, `feature-b`, and `feature-c`.
 
-## Test 1: Plugin opens and shows worktrees
-- Action: Press Ctrl+Y
-- Expected: The plugin shows a list containing "feature-a", "feature-b", "feature-c". The first item ("feature-a") is highlighted.
+## Test 1: Start zelligent
+- Action: In the `view` window, start the repo-under-test `zelligent.sh`
+- Expected: Zellij starts with the persistent left sidebar visible
 
-## Test 2: Navigate down with j
-- Action: Press j twice
-- Expected: The selection moves to "feature-c" (third item)
+## Test 2: Open managed worktree tabs
+- Action: In the `ctrl` window, run the repo-under-test `zelligent.sh spawn feature-a` and `zelligent.sh spawn feature-b` targeting the live session
+- Expected: The sidebar shows rows for `feature-a` and `feature-b` in addition to the repo tab
 
-## Test 3: Navigate up with k
-- Action: Press k once
-- Expected: The selection moves back to "feature-b" (second item)
+## Test 3: Navigate managed rows
+- Action: Send `j` and `k` in the `view` window until `feature-b` is selected, then move back once
+- Expected: The highlight moves predictably between managed rows and never disappears
 
-## Test 4: Refresh with r
-- Action: Press r
-- Expected: The worktree list refreshes. All three worktrees still visible.
+## Test 4: Open selected row
+- Action: Press `Enter` on a managed worktree row
+- Expected: Zellij switches to that tab and the persistent sidebar remains visible
 
-## Test 5: Close and reopen preserves list
-- Action: Press q, then Ctrl+Y
-- Expected: Plugin closes then reopens showing the same 3 worktrees
+## Test 5: Browse-mode quit keys are no-ops
+- Action: Press `q`, then `Esc`
+- Expected: The sidebar stays visible and the current tab remains open
 
-## Test 6: Version is displayed
-- Action: Read the terminal buffer
-- Expected: A semantic version string (e.g., "0.1.14") appears in the plugin UI
-
-## Test 7: Clean close
-- Action: Press q
-- Expected: Back to shell prompt, no errors
+## Test 6: Footer/version still render
+- Action: Capture the terminal buffer
+- Expected: The sidebar footer still shows the key hints and a semantic version string
