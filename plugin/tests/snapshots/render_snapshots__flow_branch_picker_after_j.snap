@@ -2,7 +2,7 @@
 source: tests/render_snapshots.rs
 expression: picker_moved
 ---
-[1m[36m zelligent:  ───────────────────────────────────────────────────────────────────[0m
+[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
   [1mSelect a branch:[0m
 
@@ -10,6 +10,15 @@ expression: picker_moved
   [7m feat-a [0m
    feat-b [0m
    dev [0m
+
+
+
+
+
+
+
+
+
 
   [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m create  [2mEsc[0m back
   [2mVERSION                                                             [0m

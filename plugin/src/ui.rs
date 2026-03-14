@@ -7,6 +7,8 @@ pub const GREEN: &str = "\x1b[32m";
 pub const RED: &str = "\x1b[31m";
 pub const CYAN: &str = "\x1b[36m";
 pub const YELLOW: &str = "\x1b[33m";
+pub const BG_CYAN: &str = "\x1b[46m";
+pub const FG_BLACK: &str = "\x1b[30m";
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -76,7 +78,11 @@ fn status_color(status: &AgentStatus) -> &'static str {
 }
 
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
-    let title = format!(" zelligent: {repo_name} ");
+    let title = if repo_name.is_empty() {
+        " zelligent ".to_string()
+    } else {
+        format!(" {repo_name} ")
+    };
     let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
@@ -100,6 +106,7 @@ pub fn render_sidebar_list(
     w: &mut impl Write,
     items: &[SidebarItem],
     agent_statuses: &BTreeMap<String, AgentStatus>,
+    active_tab_name: Option<&str>,
     selected: usize,
     rows: usize,
     cols: usize,
@@ -118,15 +125,20 @@ pub fn render_sidebar_list(
         0
     };
     let content_width = cols.saturating_sub(4).max(1);
-    let title_width = content_width.saturating_sub(2).max(1);
+    let title_width = content_width.saturating_sub(4).max(1);
 
     writeln!(w).unwrap();
     for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
         let selected_row = idx == selected;
+        let active_row = active_tab_name.is_some_and(|name| name == item.tab_name);
         let status = agent_statuses
             .get(&item.tab_name)
             .unwrap_or(&AgentStatus::Idle);
-        let indicator = status_indicator(status);
+        let indicator = if item.matched_branch.is_none() {
+            "  "
+        } else {
+            status_indicator(status)
+        };
         let color = status_color(status);
         let title = fit_text(&item.display_name, title_width);
         let subtitle = match item.matched_branch.as_deref() {
@@ -137,9 +149,23 @@ pub fn render_sidebar_list(
             None => fit_text("user tab", content_width),
         };
 
-        if selected_row {
-            writeln!(w, "  {color}{indicator}{RESET}{INVERSE} {title} {RESET}").unwrap();
-            writeln!(w, "    {DIM}{INVERSE}{subtitle}{RESET}").unwrap();
+        if active_row && selected_row {
+            writeln!(
+                w,
+                "  {BG_CYAN}{FG_BLACK}{indicator}{title} {RESET}{CYAN}{RESET}"
+            )
+            .unwrap();
+            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
+        } else if active_row {
+            writeln!(
+                w,
+                "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}"
+            )
+            .unwrap();
+            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
+        } else if selected_row {
+            writeln!(w, "  {INVERSE}{indicator}{title} {RESET}{RESET}").unwrap();
+            writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
         } else {
             writeln!(w, "  {color}{indicator}{RESET} {title}").unwrap();
             writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
@@ -201,13 +227,18 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
     match mode {
         Mode::Loading => {}
         Mode::BrowseWorktrees => {
-            writeln!(
-                w,
-                "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
-                 {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
-                 {DIM}r{RESET} refresh"
-            )
-            .unwrap();
+            if cols >= 55 {
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
+                     {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
+                     {DIM}r{RESET} refresh"
+                )
+                .unwrap();
+            } else {
+                writeln!(w, "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open").unwrap();
+                writeln!(w, "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} refresh").unwrap();
+            }
         }
         Mode::SelectBranch => {
             writeln!(
