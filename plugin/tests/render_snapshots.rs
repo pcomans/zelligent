@@ -1,7 +1,7 @@
 mod common;
 
-use common::{key, render_to_string, state_with_worktrees};
-use zelligent_plugin::{AgentStatus, Mode, State, Worktree};
+use common::{key, make_tab_info, render_to_string, state_with_worktrees};
+use zelligent_plugin::{AgentStatus, Mode, SidebarItem, State, Worktree};
 use zellij_tile::prelude::*;
 
 fn state_with_branches() -> State {
@@ -110,13 +110,30 @@ fn render_sidebar_list_scrolling() {
             .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
             .collect(),
         tabs: (0..20)
-            .map(|i| common::make_tab_info(&format!("branch-{i}"), i == 15))
+            .map(|i| make_tab_info(&format!("branch-{i}"), i == 15))
             .collect(),
         selected_index: 15,
         ..Default::default()
     };
     s.recompute_sidebar_items();
     insta::assert_snapshot!(render_to_string(&s, 10, 80));
+}
+
+#[test]
+fn render_sidebar_list_short_pane_still_shows_one_item() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        worktrees: (0..3)
+            .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
+            .collect(),
+        tabs: (0..3)
+            .map(|i| make_tab_info(&format!("branch-{i}"), i == 2))
+            .collect(),
+        selected_index: 2,
+        ..Default::default()
+    };
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 5, 80));
 }
 
 #[test]
@@ -132,9 +149,9 @@ fn render_browse_mixed_dir_branch_names() {
         ..Default::default()
     };
     s.tabs = vec![
-        common::make_tab_info("plugin-snapshot-tests", true),
-        common::make_tab_info("competition", false),
-        common::make_tab_info("feat-ding-dong", false),
+        make_tab_info("plugin-snapshot-tests", true),
+        make_tab_info("competition", false),
+        make_tab_info("feat-ding-dong", false),
     ];
     s.recompute_sidebar_items();
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
@@ -143,8 +160,30 @@ fn render_browse_mixed_dir_branch_names() {
 #[test]
 fn render_sidebar_with_user_tab() {
     let mut s = state_with_worktrees();
-    s.tabs.push(common::make_tab_info("notes", false));
+    s.tabs.push(make_tab_info("notes", false));
     s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_sidebar_with_branch_subtitle() {
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        sidebar_items: vec![
+            SidebarItem {
+                tab_name: "feat-cool".into(),
+                display_name: "feat-cool".into(),
+                matched_branch: Some("feat/cool".into()),
+            },
+            SidebarItem {
+                tab_name: "notes".into(),
+                display_name: "notes".into(),
+                matched_branch: None,
+            },
+        ],
+        ..Default::default()
+    };
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
