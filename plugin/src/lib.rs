@@ -731,7 +731,8 @@ impl State {
             Mode::NotGitRepo => {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
-                let used_lines = 1 + 7 + 2 + 2;
+                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                let used_lines = 1 + 7 + status_height + 2;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
                     writeln!(w).unwrap();

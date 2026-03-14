@@ -200,6 +200,16 @@ fn render_not_git_repo() {
 }
 
 #[test]
+fn render_not_git_repo_without_status() {
+    let s = State {
+        mode: Mode::NotGitRepo,
+        initial_cwd: std::path::PathBuf::from("/tmp/foo"),
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
 fn render_browse_with_agent_statuses() {
     let mut s = state_with_worktrees();
     s.agent_statuses.insert("feat-a".into(), AgentStatus::Working);
