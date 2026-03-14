@@ -177,6 +177,25 @@ impl State {
         }
     }
 
+    fn active_tab_name(&self) -> Option<&str> {
+        self.tabs.iter().find(|tab| tab.active).map(|tab| tab.name.as_str())
+    }
+
+    fn select_active_sidebar_item(&mut self) -> bool {
+        let Some(active_tab_name) = self.active_tab_name() else {
+            return false;
+        };
+        let Some(idx) = self
+            .sidebar_items
+            .iter()
+            .position(|item| item.tab_name == active_tab_name)
+        else {
+            return false;
+        };
+        self.selected_index = idx;
+        true
+    }
+
     fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("cmd_type".to_string(), cmd_type.to_string());
@@ -403,9 +422,10 @@ impl State {
             }
         }
 
-        if let Some(idx) = self.tabs.iter().position(|tab| tab.active) {
-            self.selected_index = idx;
-        } else if self.selected_index >= self.sidebar_items.len() && !self.sidebar_items.is_empty() {
+        if !self.select_active_sidebar_item()
+            && self.selected_index >= self.sidebar_items.len()
+            && !self.sidebar_items.is_empty()
+        {
             self.selected_index = self.sidebar_items.len() - 1;
         }
     }
@@ -1563,6 +1583,29 @@ mod tests {
         s.handle_list_worktrees(Some(0), b"main\tmain\nfeature-cool\tfeature/cool\n", b"");
         assert_eq!(s.selected_index, 1);
         assert_eq!(s.sidebar_items[1].matched_branch, Some("feature/cool".into()));
+    }
+
+    #[test]
+    fn select_active_sidebar_item_uses_tab_identity_not_position() {
+        let mut s = State {
+            tabs: vec![make_tab("feat-a", false), make_tab("feat-b", true)],
+            sidebar_items: vec![
+                SidebarItem {
+                    tab_name: "feat-b".into(),
+                    display_name: "feat-b".into(),
+                    matched_branch: Some("feat-b".into()),
+                },
+                SidebarItem {
+                    tab_name: "feat-a".into(),
+                    display_name: "feat-a".into(),
+                    matched_branch: Some("feat-a".into()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(s.select_active_sidebar_item());
+        assert_eq!(s.selected_index, 0);
     }
 
     #[test]
