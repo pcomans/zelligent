@@ -15,26 +15,21 @@ A `tab { }` wrapper causes session-level replacement, breaking existing tabs and
 
 ## `new-tab` does not inherit `default_tab_template`
 
-Tab-bar and status-bar plugins must be included explicitly in the layout file. Every zelligent layout includes:
-
-```kdl
-pane size=1 borderless=true {
-    plugin location="zellij:tab-bar"
-}
-// ... content panes ...
-pane size=1 borderless=true {
-    plugin location="zellij:status-bar"
-}
-```
+Tabs opened with `zellij action new-tab --layout FILE` must include the sidebar
+plugin and any other chrome explicitly in `FILE`. `default_tab_template` only
+applies to tabs created without `--layout`.
 
 ## Template variables
 
-Custom layouts (`.zelligent/layout.kdl`) use these template variables, substituted by the CLI at runtime:
+Custom layouts (`.zelligent/layout.kdl`) are fragment-based pane lists. They use
+these template variables, substituted by the CLI at runtime:
 
 | Variable | Replaced with |
 |----------|--------------|
-| `{{cwd}}` | Worktree path |
-| `{{agent_cmd}}` | Agent command (e.g., `claude`) |
+| `{{zelligent_sidebar}}` | Embedded sidebar plugin block |
+| `{{zelligent_children}}` | Main tab body or literal `children` in `default_tab_template` |
+| `{{cwd}}` | Repo root or worktree path, depending on render context |
+| `{{agent_cmd}}` | Rendered shell command for the tab |
 
 ## Session vs tab layout wrapping
 
@@ -42,4 +37,5 @@ The CLI handles wrapping based on context:
 - **Inside Zellij** (`new-tab`): flat panes, no `tab { }` wrapper
 - **Outside Zellij** (new session): panes wrapped in `tab name="..." { }`
 
-Custom layouts should contain only the pane content — the CLI adds the appropriate wrapping.
+Custom layouts should contain only the pane content. The CLI adds the outer
+`layout { ... }`, `tab { ... }`, and `default_tab_template { ... }` wrappers.

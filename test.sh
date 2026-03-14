@@ -5,13 +5,62 @@
 
 PASS=0
 FAIL=0
+CLEANUP_WORKTREE_PATHS=()
+CLEANUP_WORKTREE_BRANCHES=()
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/zelligent.sh"
 GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
+# Spawn now requires a resolvable plugin path and layout asset.
+export ZELLIGENT_PLUGIN_SRC="${ZELLIGENT_PLUGIN_SRC:-$SCRIPT}"
+export ZELLIGENT_DEFAULT_LAYOUT_SRC="${ZELLIGENT_DEFAULT_LAYOUT_SRC:-$REPO_ROOT/share/default-layout.kdl}"
+
+TEST_REPO_LAYOUT="$REPO_ROOT/.zelligent/layout.kdl"
+TEST_REPO_LAYOUT_BAK="$REPO_ROOT/.zelligent/layout.kdl.test-bak"
+if [ -f "$TEST_REPO_LAYOUT" ]; then
+  cp "$TEST_REPO_LAYOUT" "$TEST_REPO_LAYOUT_BAK"
+fi
+cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 
 pass() { echo "  ✅ $1"; ((PASS++)); }
 fail() { echo "  ❌ $1"; ((FAIL++)); }
+
+restore_test_layout() {
+  if [ -f "$TEST_REPO_LAYOUT_BAK" ]; then
+    mv "$TEST_REPO_LAYOUT_BAK" "$TEST_REPO_LAYOUT"
+  else
+    rm -f "$TEST_REPO_LAYOUT"
+  fi
+}
+
+restore_setup() { :; }
+
+register_cleanup_worktree() {
+  local worktree_path="$1" branch="$2"
+  CLEANUP_WORKTREE_PATHS+=("$worktree_path")
+  CLEANUP_WORKTREE_BRANCHES+=("$branch")
+}
+
+register_managed_cleanup() {
+  local home_dir="$1" branch="$2"
+  register_cleanup_worktree "$home_dir/.zelligent/worktrees/$REPO_NAME/$branch" "$branch"
+}
+
+cleanup_registered_worktrees() {
+  local i
+  for i in "${!CLEANUP_WORKTREE_PATHS[@]}"; do
+    git -C "$REPO_ROOT" worktree remove --force "${CLEANUP_WORKTREE_PATHS[$i]}" &>/dev/null || true
+    git -C "$REPO_ROOT" branch -D "${CLEANUP_WORKTREE_BRANCHES[$i]}" &>/dev/null || true
+  done
+}
+
+cleanup_test_artifacts() {
+  cleanup_registered_worktrees
+  restore_setup
+  restore_test_layout
+}
+
+trap cleanup_test_artifacts EXIT INT TERM
 
 check() {
   local desc="$1" expected="$2" actual="$3"
@@ -41,6 +90,24 @@ not_contains() {
 }
 
 excludes() { not_contains "$@"; }
+
+count_equals() {
+  local desc="$1" needle="$2" expected="$3" haystack="$4"
+  local actual
+  actual=$(echo "$haystack" | grep -oF -- "$needle" | wc -l | tr -d ' ')
+  if [ "$actual" -eq "$expected" ]; then
+    pass "$desc"
+  else
+    fail "$desc (expected $expected occurrences of '$needle', got $actual)"
+  fi
+}
+
+cleanup_test_branch_for_home() {
+  local home_dir="$1" branch="$2"
+  git -C "$REPO_ROOT" worktree remove --force \
+    "$home_dir/.zelligent/worktrees/$REPO_NAME/$branch" &>/dev/null || true
+  git -C "$REPO_ROOT" branch -D "$branch" &>/dev/null || true
+}
 
 # ── Session name generation ────────────────────────────────────────────────────
 echo "Session name generation:"
@@ -74,6 +141,7 @@ MOCK
 chmod +x "$MOCK_BIN_LAYOUT/zellij" "$MOCK_BIN_LAYOUT/lazygit"
 
 # Run the script inside-Zellij mode so it calls new-tab and emits the layout
+register_managed_cleanup "$HOME" test-layout-branch
 out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-layout-branch claude 2>&1)
 # Cleanup worktree/branch created by the script
@@ -85,15 +153,19 @@ EXPECTED_CWD="$HOME/.zelligent/worktrees/$REPO_NAME/test-layout-branch"
 contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
-contains "layout contains tab-bar"        'zellij:tab-bar'            "$out"
+contains "layout contains sidebar plugin" 'plugin location="file:'    "$out"
+count_equals "L1: exactly one vertical split per tab (sidebar left)" 'split_direction="Vertical"' 1 "$out"
+excludes "layout omits tab-bar"           'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"
 excludes "inside zellij layout: no tab{} wrapper" 'tab name='        "$out"
 contains "new worktree: setup.sh runs as preamble" 'setup.sh'        "$out"
 contains "new worktree: agent starts via exec"     'exec claude'     "$out"
 excludes "new worktree: no invalid KDL \\$ escape" '"\$'             "$out"
+contains "new worktree: setup failure prompt keeps literal \$?" "Setup failed (exit '\$?'). Press Enter to close." "$out"
 
 # Test: existing worktree should NOT include setup.sh preamble
 # Re-create the worktree so it already exists, then run the script again
+register_managed_cleanup "$HOME" test-layout-branch
 git -C "$REPO_ROOT" worktree add -b test-layout-branch \
   "$HOME/.zelligent/worktrees/$REPO_NAME/test-layout-branch" HEAD &>/dev/null
 out_existing=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
@@ -113,8 +185,8 @@ restore_setup() {
     mv "$SETUP_SH_BAK" "$SETUP_SH"
   fi
 }
-trap restore_setup EXIT INT TERM
 mv "$SETUP_SH" "$SETUP_SH_BAK"
+register_managed_cleanup "$HOME" test-no-setup-branch
 out_no_setup=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-no-setup-branch claude 2>&1)
 restore_setup
@@ -126,6 +198,7 @@ contains "no setup.sh: uses direct command"  'exec claude' "$out_no_setup"
 excludes "no setup.sh: no setup preamble"    '.zelligent/setup.sh'    "$out_no_setup"
 
 # Test: multi-word AGENT_CMD with arguments
+register_managed_cleanup "$HOME" test-multi-cmd-branch
 out_multi=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
   "$SCRIPT" spawn test-multi-cmd-branch 'claude "pls fix the bug" --model claude-sonnet-4-6' 2>&1)
 git -C "$REPO_ROOT" worktree remove --force \
@@ -137,6 +210,134 @@ contains "multi-word cmd: contains exec"         'exec claude'   "$out_multi"
 contains "multi-word cmd: contains model flag"   'claude-sonnet-4-6' "$out_multi"
 
 rm -rf "$MOCK_BIN_LAYOUT"
+
+# ── Layout source resolution and validation ──────────────────────────────────
+echo "Layout source resolution:"
+
+MOCK_BIN_LAYOUT_SOURCE=$(mktemp -d)
+cat > "$MOCK_BIN_LAYOUT_SOURCE/zellij" <<'MOCK'
+#!/bin/bash
+echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
+MOCK
+cat > "$MOCK_BIN_LAYOUT_SOURCE/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_BIN_LAYOUT_SOURCE/zellij" "$MOCK_BIN_LAYOUT_SOURCE/lazygit"
+
+LAYOUT_TEST_HOME=$(mktemp -d)
+mkdir -p "$LAYOUT_TEST_HOME/.zelligent"
+cat > "$LAYOUT_TEST_HOME/.zelligent/layout.kdl" <<'KDL'
+// user-layout-marker
+pane split_direction="Vertical" {
+    pane size="31%" {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
+}
+KDL
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+// repo-layout-marker
+pane split_direction="Vertical" {
+    pane size="30%" {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
+}
+KDL
+
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-precedence-repo
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-precedence-repo claude 2>&1)
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-precedence-repo
+contains "layout precedence: repo layout wins" "repo-layout-marker" "$out"
+contains "layout precedence: repo fragment controls sidebar width" 'size="30%"' "$out"
+not_contains "layout precedence: repo layout hides user layout" "user-layout-marker" "$out"
+
+rm -f "$TEST_REPO_LAYOUT"
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-precedence-user
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-precedence-user claude 2>&1)
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-precedence-user
+contains "layout precedence: user layout used when repo layout missing" "user-layout-marker" "$out"
+contains "layout precedence: user fragment controls sidebar width" 'size="31%"' "$out"
+
+rm -f "$LAYOUT_TEST_HOME/.zelligent/layout.kdl"
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-missing
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-missing claude 2>&1); code=$?
+check "layout precedence: missing layout exits non-zero" "1" "$code"
+contains "layout precedence: missing layout prints error" "no layout found" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-missing
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+// repo-layout-leading-comment
+pane {
+    {{zelligent_children}}
+}
+// repo-layout-trailing-comment
+KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-missing
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-invalid-missing claude 2>&1); code=$?
+check "layout validation: missing sidebar placeholder exits non-zero" "1" "$code"
+contains "layout validation: missing sidebar placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-missing
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+pane {
+    // {{zelligent_sidebar}}
+    {{zelligent_children}}
+}
+KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-comment-only
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-invalid-comment-only claude 2>&1); code=$?
+check "layout validation: commented sidebar placeholder exits non-zero" "1" "$code"
+contains "layout validation: commented sidebar placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-comment-only
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+pane split_direction="Vertical" {
+    pane size="24%" {
+        {{zelligent_sidebar}}
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-duplicate
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-invalid-duplicate claude 2>&1); code=$?
+check "layout validation: duplicate sidebar placeholder exits non-zero" "1" "$code"
+contains "layout validation: duplicate sidebar placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-duplicate
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+pane split_direction="Vertical" {
+    pane size="24%" {
+        {{zelligent_sidebar}}
+    }
+}
+KDL
+register_managed_cleanup "$LAYOUT_TEST_HOME" test-layout-invalid-missing-children
+out=$(HOME="$LAYOUT_TEST_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT_SOURCE:$PATH" \
+  "$SCRIPT" spawn test-layout-invalid-missing-children claude 2>&1); code=$?
+check "layout validation: missing children placeholder exits non-zero" "1" "$code"
+contains "layout validation: missing children placeholder prints error" "must contain {{zelligent_sidebar}} and {{zelligent_children}} exactly once" "$out"
+cleanup_test_branch_for_home "$LAYOUT_TEST_HOME" test-layout-invalid-missing-children
+
+cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
+rm -rf "$LAYOUT_TEST_HOME" "$MOCK_BIN_LAYOUT_SOURCE"
 
 # ── Quoted agent command ─────────────────────────────────────────────────────
 echo "Quoted agent command:"
@@ -154,6 +355,7 @@ cat > "$MOCK_BIN_QUOTE/lazygit" <<'MOCK'
 MOCK
 chmod +x "$MOCK_BIN_QUOTE/zellij" "$MOCK_BIN_QUOTE/lazygit"
 
+register_managed_cleanup "$HOME" test-quoted-branch
 out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_QUOTE:$PATH" \
   "$SCRIPT" spawn test-quoted-branch 'claude -p "Sag Hallo auf Deutsch"' 2>&1)
 git -C "$REPO_ROOT" worktree remove --force \
@@ -235,9 +437,9 @@ prompt_test_cleanup() {
 
 # Move setup.sh aside so tests don't invoke the repo's real one (e.g. sleep)
 mv "$SETUP_SH" "$SETUP_SH_BAK" 2>/dev/null || true
-trap restore_setup EXIT INT TERM
 
 # Test 1: positional prompt (interactive mode with initial prompt)
+register_managed_cleanup "$HOME" test-prompt-branch
 out_prompt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-prompt-branch 'claude "fix the login bug"' 2>&1)
 PROMPT_ARGS=$(cat "$PROMPT_LOG")
@@ -246,6 +448,7 @@ prompt_test_cleanup test-prompt-branch
 
 # Test 2: -p flag (non-interactive)
 > "$PROMPT_LOG"
+register_managed_cleanup "$HOME" test-pflag-branch
 out_pflag=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-pflag-branch 'claude -p "run all tests and fix failures"' 2>&1)
 PROMPT_ARGS=$(cat "$PROMPT_LOG")
@@ -255,6 +458,7 @@ prompt_test_cleanup test-pflag-branch
 
 # Test 3: prompt with --model flag
 > "$PROMPT_LOG"
+register_managed_cleanup "$HOME" test-model-prompt-branch
 out_model=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-model-prompt-branch 'claude --model claude-sonnet-4-6 "refactor the auth module"' 2>&1)
 PROMPT_ARGS=$(cat "$PROMPT_LOG")
@@ -265,6 +469,7 @@ prompt_test_cleanup test-model-prompt-branch
 
 # Test 4: bare claude (no prompt) — should still work, no args logged
 > "$PROMPT_LOG"
+register_managed_cleanup "$HOME" test-bare-branch
 out_bare=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PROMPT:$PATH" \
   "$SCRIPT" spawn test-bare-branch claude 2>&1)
 BARE_ARGS=$(cat "$PROMPT_LOG")
@@ -306,16 +511,17 @@ rm -rf "$NONGIT_NOARGS"
 # No args with plugin not installed: tells user to run doctor
 # Use a restricted PATH without zelligent and no ZELLIGENT_PLUGIN_SRC
 MOCK_NOARGS_BIN_NONE=$(mktemp -d)
+MOCK_NOARGS_HOME_NONE=$(mktemp -d)
 cat > "$MOCK_NOARGS_BIN_NONE/git" <<'MOCK'
 #!/bin/bash
 # Proxy to real git
 /usr/bin/git "$@"
 MOCK
 chmod +x "$MOCK_NOARGS_BIN_NONE/git"
-out=$(ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN_NONE:/usr/bin:/bin" "$SCRIPT" 2>&1); code=$?
+out=$(HOME="$MOCK_NOARGS_HOME_NONE" ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN_NONE:/usr/bin:/bin" "$SCRIPT" 2>&1); code=$?
 check "no args without plugin exits non-zero" "1" "$code"
 contains "no args without plugin: suggests doctor" "zelligent doctor" "$out"
-rm -rf "$MOCK_NOARGS_BIN_NONE"
+rm -rf "$MOCK_NOARGS_BIN_NONE" "$MOCK_NOARGS_HOME_NONE"
 
 # No args inside Zellij: prints spawn suggestion
 # zelligent is in PATH (we're running from the repo), so the check passes
@@ -323,27 +529,54 @@ out=$(ZELLIJ=1 ZELLIGENT_PLUGIN_SRC="$SCRIPT" "$SCRIPT" 2>&1); code=$?
 check "no args inside zellij exits 0" "0" "$code"
 contains "no args inside zellij: suggests spawn" "zelligent spawn" "$out"
 
-# No args outside Zellij with mock zellij (no existing session): creates session
-MOCK_NOARGS_BIN=$(mktemp -d)
-cat > "$MOCK_NOARGS_BIN/zellij" <<'MOCK'
+# No args outside Zellij with plugin available: starts with zelligent layout
+MOCK_NOARGS_LAYOUT_BIN=$(mktemp -d)
+FAKE_NOARGS_WASM_DIR=$(mktemp -d)
+FAKE_NOARGS_WASM="$FAKE_NOARGS_WASM_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_NOARGS_WASM"
+cat > "$MOCK_NOARGS_LAYOUT_BIN/zellij" <<'MOCK'
 #!/bin/bash
 if [ "$1" = "list-sessions" ]; then echo ""; exit 0; fi
 echo "zellij $*"
+for arg in "$@"; do
+  if [ -f "$arg" ]; then cat "$arg"; fi
+done
 MOCK
-cat > "$MOCK_NOARGS_BIN/zelligent" <<'MOCK'
+cat > "$MOCK_NOARGS_LAYOUT_BIN/zelligent" <<'MOCK'
 #!/bin/bash
 MOCK
-chmod +x "$MOCK_NOARGS_BIN/zellij" "$MOCK_NOARGS_BIN/zelligent"
-out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
-check "no args creates session" "0" "$code"
-contains "no args: prints session message" "session" "$out"
-rm -rf "$MOCK_NOARGS_BIN"
+chmod +x "$MOCK_NOARGS_LAYOUT_BIN/zellij" "$MOCK_NOARGS_LAYOUT_BIN/zelligent"
+out=$(ZELLIJ="" SHELL="/bin/zsh" ZELLIGENT_PLUGIN_SRC="$FAKE_NOARGS_WASM" PATH="$MOCK_NOARGS_LAYOUT_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+check "no args with plugin: exits 0" "0" "$code"
+contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
+contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
+contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
+contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
+count_equals "no args with plugin: session layout has template + initial tab split" 'split_direction="Vertical"' 2 "$out"
+contains "no args with plugin: startup honors SHELL" 'agent_cmd "/bin/zsh"' "$out"
+contains "no args with plugin: startup shell reaches layout args" 'exec /bin/zsh' "$out"
+
+# No args outside Zellij with plugin but no layout: fails clearly
+NOARGS_LAYOUT_BACKUP=$(mktemp)
+cp "$TEST_REPO_LAYOUT" "$NOARGS_LAYOUT_BACKUP"
+rm -f "$TEST_REPO_LAYOUT"
+NOARGS_EMPTY_HOME=$(mktemp -d)
+out=$(HOME="$NOARGS_EMPTY_HOME" ZELLIJ="" SHELL="/bin/zsh" ZELLIGENT_PLUGIN_SRC="$FAKE_NOARGS_WASM" PATH="$MOCK_NOARGS_LAYOUT_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
+check "no args without layout exits non-zero" "1" "$code"
+contains "no args without layout: prints error" "no layout found" "$out"
+contains "no args without layout: suggests doctor" "zelligent doctor" "$out"
+mv "$NOARGS_LAYOUT_BACKUP" "$TEST_REPO_LAYOUT"
+rm -rf "$NOARGS_EMPTY_HOME"
+rm -rf "$MOCK_NOARGS_LAYOUT_BIN" "$FAKE_NOARGS_WASM_DIR"
 
 # ── Stale socket timeout ──────────────────────────────────────────────────────
 echo "Stale socket timeout:"
 
 # Mock zellij that hangs forever (simulates stale socket)
 MOCK_HANG_BIN=$(mktemp -d)
+FAKE_HANG_WASM_DIR=$(mktemp -d)
+FAKE_HANG_WASM="$FAKE_HANG_WASM_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_HANG_WASM"
 cat > "$MOCK_HANG_BIN/zellij" <<'MOCK'
 #!/bin/bash
 if [ "$1" = "list-sessions" ]; then sleep 60; fi
@@ -358,14 +591,15 @@ MOCK
 chmod +x "$MOCK_HANG_BIN/zellij" "$MOCK_HANG_BIN/lazygit" "$MOCK_HANG_BIN/zelligent"
 
 # No args outside Zellij with hanging zellij: should time out and create new session
-out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="" TMPDIR="/tmp/fake-zellij-$$" \
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="$FAKE_HANG_WASM" TMPDIR="/tmp/fake-zellij-$$" \
   PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
 check "stale socket: exits 0 (falls through to create)" "0" "$code"
 contains "stale socket: prints timeout warning" "timed out" "$out"
 contains "stale socket: creates session anyway" "Creating Zellij session" "$out"
 
 # Spawn outside Zellij with hanging zellij: should time out and create new session
-out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" TMPDIR="/tmp/fake-zellij-$$" \
+register_managed_cleanup "$HOME" some-branch
+out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" ZELLIGENT_PLUGIN_SRC="$FAKE_HANG_WASM" TMPDIR="/tmp/fake-zellij-$$" \
   PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1); code=$?
 cleanup_stale() {
   git -C "$REPO_ROOT" worktree remove --force \
@@ -380,12 +614,12 @@ contains "stale socket spawn: creates new session" "Creating Zellij session" "$o
 # When TMPDIR has a zellij socket dir, the warning includes cleanup command
 FAKE_TMPDIR=$(mktemp -d)
 mkdir -p "$FAKE_TMPDIR/zellij-fake"
-out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="" TMPDIR="$FAKE_TMPDIR" \
+out=$(ZELLIJ="" ZELLIGENT_PLUGIN_SRC="$FAKE_HANG_WASM" TMPDIR="$FAKE_TMPDIR" \
   PATH="$MOCK_HANG_BIN:$PATH" "$SCRIPT" 2>&1); code=$?
 contains "stale socket: shows cleanup command" "rm -rf" "$out"
 rm -rf "$FAKE_TMPDIR"
 
-rm -rf "$MOCK_HANG_BIN"
+rm -rf "$MOCK_HANG_BIN" "$FAKE_HANG_WASM_DIR"
 
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
@@ -511,10 +745,14 @@ check "doctor exits 0" "0" "$code"
 check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
 CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
-contains "doctor adds keybinding" "zelligent-plugin.wasm" "$CONFIG_CONTENT"
-contains "doctor adds Ctrl y" "Ctrl y" "$CONFIG_CONTENT"
+not_contains "doctor does not add launcher keybinding" "Ctrl y" "$CONFIG_CONTENT"
+check "doctor creates user layout" "true" \
+  "$([ -f "$MOCK_DR_HOME/.zelligent/layout.kdl" ] && echo true || echo false)"
+check "doctor copies shipped default layout" \
+  "$(cat "$ZELLIGENT_DEFAULT_LAYOUT_SRC")" \
+  "$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")"
 
-# doctor writes permissions with file: prefix matching the config keybinding
+# doctor writes permissions for the plugin path
 if [ "$(uname)" = "Darwin" ]; then
   PERM_FILE="$MOCK_DR_HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
 else
@@ -529,19 +767,41 @@ contains "doctor without claude CLI skips plugin" "claude plugin: claude CLI not
 
 # doctor idempotent: run again, should say "ok" / "already"
 CONFIG_BEFORE=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
+LAYOUT_BEFORE=$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")
 out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
-contains "doctor idempotent: keybinding ok" "keybinding: ok" "$out2"
+contains "doctor idempotent: keybinding skipped" "keybinding: skipped (persistent sidebar only)" "$out2"
 contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
+contains "doctor idempotent: layout ok" "layout: ok" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
+LAYOUT_AFTER=$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")
 check "doctor idempotent: config unchanged" "$CONFIG_BEFORE" "$CONFIG_AFTER"
+check "doctor idempotent: layout unchanged" "$LAYOUT_BEFORE" "$LAYOUT_AFTER"
+
+# doctor with drifted user layout: reports overwrite command but does not rewrite
+cat > "$MOCK_DR_HOME/.zelligent/layout.kdl" <<'KDL'
+// drifted-layout
+pane split_direction="Vertical" {
+    pane size="40%" {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+KDL
+DRIFTED_LAYOUT_BEFORE=$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")
+out_drift=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_drift=$?
+check "doctor drift exits 0" "0" "$code_drift"
+contains "doctor drift: reports custom layout" "layout: custom user layout differs from shipped default" "$out_drift"
+contains "doctor drift: prints overwrite command" "Overwrite with: cp" "$out_drift"
+check "doctor drift: does not rewrite layout" "$DRIFTED_LAYOUT_BEFORE" "$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")"
 
 rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
 
-# doctor with existing keybinds block in config: appends without corrupting
+# doctor with existing keybinds block in config: preserves existing keybinds
 MOCK_DR_BIN2=$(mktemp -d)
 MOCK_DR_HOME2=$(mktemp -d)
 FAKE_WASM_DIR2=$(mktemp -d)
@@ -567,7 +827,7 @@ out=$(HOME="$MOCK_DR_HOME2" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM2" \
 check "doctor with existing keybinds exits 0" "0" "$code"
 CONFIG_CONTENT2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
 contains "doctor preserves existing keybinds" "Ctrl x" "$CONFIG_CONTENT2"
-contains "doctor adds new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
+not_contains "doctor does not add new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
 
 rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2" "$FAKE_WASM_DIR2"
 
@@ -609,6 +869,14 @@ check "doctor does not use ~/.config when XDG set" "false" \
 
 rm -rf "$MOCK_DR_BIN4" "$MOCK_DR_HOME4" "$MOCK_XDG" "$FAKE_WASM_DIR4"
 
+# ── Install script contract ──────────────────────────────────────────────────
+echo "Install script contract:"
+
+DEV_INSTALL_CONTENT=$(cat "$REPO_ROOT/dev-install.sh")
+contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
+contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
+contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
+
 # ── Query subcommands ────────────────────────────────────────────────────────
 echo "Query subcommands:"
 
@@ -637,6 +905,7 @@ check "list-worktrees exits 0" "0" "$code"
 TEST_WT_BRANCH="test-mismatched-branch-$$"
 TEST_WT_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/different-dirname-$$"
 mkdir -p "$HOME/.zelligent/worktrees/$REPO_NAME"
+register_cleanup_worktree "$TEST_WT_DIR" "$TEST_WT_BRANCH"
 git -C "$REPO_ROOT" worktree add -b "$TEST_WT_BRANCH" "$TEST_WT_DIR" HEAD &>/dev/null
 
 out=$("$SCRIPT" list-worktrees 2>&1); code=$?
@@ -664,6 +933,7 @@ contains "remove nonexistent branch: prints error" "no worktree found" "$out"
 # remove refuses to act on non-zelligent-managed worktree (safety check)
 TEST_WT_UNMANAGED_BRANCH="test-unmanaged-$$"
 TEST_WT_UNMANAGED_DIR=$(mktemp -d)
+register_cleanup_worktree "$TEST_WT_UNMANAGED_DIR" "$TEST_WT_UNMANAGED_BRANCH"
 git -C "$REPO_ROOT" worktree add -b "$TEST_WT_UNMANAGED_BRANCH" "$TEST_WT_UNMANAGED_DIR" HEAD &>/dev/null
 out=$("$SCRIPT" remove "$TEST_WT_UNMANAGED_BRANCH" 2>&1); code=$?
 check "remove unmanaged worktree exits non-zero" "1" "$code"
@@ -703,6 +973,7 @@ cleanup_test_branch() {
 }
 
 # Inside Zellij: new-tab, no tab wrapper in layout
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "inside zellij: prints tab message"        "Opening tab"       "$out"
@@ -710,12 +981,32 @@ contains "inside zellij: calls action new-tab"      "action new-tab"    "$out"
 excludes "inside zellij: layout has no tab wrapper" 'tab name='         "$out"
 
 # Outside Zellij, no existing repo session: create session named after repo
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "outside zellij (new): prints session message"          "Creating Zellij session"            "$out"
 contains "outside zellij (new): session named after repo"        "$REPO_NAME"                         "$out"
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
+contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
+
+cat > "$TEST_REPO_LAYOUT" <<'KDL'
+// leading comment before outer layout
+pane split_direction="Vertical" {
+    pane size="33%" {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+// trailing comment after outer layout
+KDL
+register_managed_cleanup "$HOME" some-branch
+out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
+cleanup_test_branch
+contains "outside zellij (new): commented layout still parses" "zellij --new-session-with-layout" "$out"
+contains "outside zellij (new): commented layout keeps tab wrapper" 'tab name="some-branch"' "$out"
+count_equals "outside zellij (new): custom sidebar width reaches initial tab and default template" 'size="33%"' 2 "$out"
+cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 
 # Outside Zellij, repo session already exists: add tab and attach
 MOCK_BIN2=$(mktemp -d)
@@ -732,6 +1023,7 @@ cat > "$MOCK_BIN2/lazygit" <<'MOCK'
 MOCK
 chmod +x "$MOCK_BIN2/zellij" "$MOCK_BIN2/lazygit"
 
+register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN2:$PATH" "$SCRIPT" spawn some-branch 2>&1)
 cleanup_test_branch
 contains "outside zellij (existing): attaches to repo session" "Attaching to session '$REPO_NAME'" "$out"
@@ -758,6 +1050,7 @@ MOCK
 
   # Call the script in inside-Zellij mode; it will call `zellij action new-tab`
   # targeting the background test session via ZELLIJ_SESSION_NAME
+  register_managed_cleanup "$HOME" integration-test-branch
   int_out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME="$TEST_SESSION" PATH="$MOCK_BIN_INT:$PATH" \
     "$SCRIPT" spawn integration-test-branch 2>&1)
   int_code=$?
@@ -770,11 +1063,26 @@ MOCK
 
   DUMP=$(ZELLIJ_SESSION_NAME="$TEST_SESSION" zellij action dump-layout 2>/dev/null)
   contains "tab appears in session layout" 'tab name="integration-test-branch"' "$DUMP"
-  contains "tab has tab-bar"    'plugin location="zellij:tab-bar"'    "$DUMP"
+  contains "tab has sidebar plugin" 'plugin location="file:' "$DUMP"
   contains "tab has status-bar" 'plugin location="zellij:status-bar"' "$DUMP"
+  # L1: sidebar must be a vertical (left/right) split — "vertical" means side-by-side,
+  # "horizontal" means top/bottom. Getting this wrong renders the sidebar as a top bar.
+  # Note: dump-layout normalizes split_direction values to lowercase.
+  contains "L1: dump-layout shows vertical split (sidebar on left)" 'split_direction="vertical"' "$DUMP"
+  not_contains "L1: dump-layout has no horizontal split (no top bar)" 'split_direction="horizontal"' "$DUMP"
 
   zellij kill-session "$TEST_SESSION" 2>/dev/null
 fi
+
+# ── Doc index completeness ─────────────────────────────────────────────────
+echo "Doc index completeness:"
+
+INDEX_CONTENT=$(cat "$REPO_ROOT/docs/design-docs/index.md")
+for doc in "$REPO_ROOT"/docs/design-docs/*.md; do
+  docname=$(basename "$doc")
+  [ "$docname" = "index.md" ] && continue
+  contains "index references $docname" "$docname" "$INDEX_CONTENT"
+done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""

@@ -27,7 +27,10 @@ Use the tmux skill for all tmux session, window, pane, send-keys, and capture-pa
 ### Phase 1: Read the test plan
 
 1. `Read` the test plan markdown file
-2. Parse the `fixture` field from the YAML frontmatter
+2. Parse the YAML frontmatter fields:
+   - `fixture`
+   - `launch` (default: `ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh`)
+   - `session_name` (default: `test-harness`)
 3. Note all test steps
 
 ### Phase 2: Setup
@@ -35,15 +38,17 @@ Use the tmux skill for all tmux session, window, pane, send-keys, and capture-pa
 #### Step 1: Clean up previous state
 
 ```bash
-bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
+HARNESS_SESSION_NAME="$SESSION_NAME" bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
 ```
 
 Also kill any leftover tmux session:
+
 ```bash
 tmux -L zt-driver-test kill-server 2>/dev/null || true
 ```
 
 #### Step 2: Run the fixture script
+
 ```bash
 bash tests/harness/fixtures/<fixture-name>.sh
 ```
@@ -61,9 +66,11 @@ Create the session with the tmux skill:
 #### Step 4: Start Zellij in the view window
 
 Send to window `view`, pane 0:
+
 ```bash
-zellij --session test-harness
+$LAUNCH
 ```
+
 Then send Enter.
 
 Wait a few seconds, then capture the pane to confirm Zellij is running.
@@ -96,7 +103,7 @@ Use plain-text capture for text assertions and `capture-pane -e -J` via the tmux
 
 - Send UI keys to the `view` window when the plan describes interactive input
 - Send shell commands to the `ctrl` window when the plan describes setup or external control
-- Prefer running control commands with `ZELLIJ=1 ZELLIJ_SESSION_NAME=test-harness` when they need to target the live session
+- Prefer running control commands with `ZELLIJ=1 ZELLIJ_SESSION_NAME=$SESSION_NAME` when they need to target the live session
 
 ### High-Resolution Proof Capture
 
@@ -118,13 +125,15 @@ If the structured tmux tools are unavailable, use direct tmux CLI commands with 
 ### Phase 4: Teardown (ALWAYS run, even if tests fail)
 
 1. Kill the tmux harness:
+
 ```bash
 tmux -L zt-driver-test kill-server 2>/dev/null || true
 ```
 
 2. Run the teardown script:
+
 ```bash
-bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
+HARNESS_SESSION_NAME="$SESSION_NAME" bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
 ```
 
 ### Phase 5: Report results
@@ -149,7 +158,7 @@ bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
 
 - Use socket `zt-driver-test` for all tmux skill calls
 - Follow setup steps in exact order
-- Never interact with any session other than `zt-driver` / `test-harness`
+- Never interact with any session other than `zt-driver` and the plan's `session_name`
 - Always verify after each action before recording PASS/FAIL
 - If a test step fails, continue with remaining steps
 - ALWAYS run teardown
