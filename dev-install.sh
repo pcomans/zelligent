@@ -39,6 +39,15 @@ mkdir -p "$SHARE_DIR"
 cp "plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm" "$SHARE_DIR/zelligent-plugin.wasm"
 echo "Installed plugin to $SHARE_DIR/zelligent-plugin.wasm"
 
+DEFAULT_LAYOUT_SRC="share/default-layout.kdl"
+DEFAULT_LAYOUT_DST="$SHARE_DIR/default-layout.kdl"
+if [ ! -f "$DEFAULT_LAYOUT_SRC" ]; then
+  echo "Error: Missing default layout asset at $DEFAULT_LAYOUT_SRC" >&2
+  exit 1
+fi
+cp "$DEFAULT_LAYOUT_SRC" "$DEFAULT_LAYOUT_DST"
+echo "Installed default layout to $DEFAULT_LAYOUT_DST"
+
 # Install Claude Code plugin (marketplace directory) for `zelligent doctor`
 PLUGIN_SRC="claude-plugin"
 PLUGIN_DST="$SHARE_DIR/claude-plugin"

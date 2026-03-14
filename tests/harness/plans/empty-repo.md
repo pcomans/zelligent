@@ -1,27 +1,29 @@
 ---
 fixture: setup-empty-repo.sh
+launch: ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh
+session_name: zelligent-test-repo
 ---
 
-# Empty Repo Smoke Test
+# Empty Repo Sidebar Smoke Test
 
-Verifies the plugin works correctly in a git repo with no worktrees.
+Verifies PR 83 startup behavior in a git repo with no managed worktrees.
 
-## Test 1: Plugin opens on Ctrl+Y
-- Action: Press Ctrl+Y
-- Expected: A floating pane appears showing the zelligent plugin with the Zelligent logo (empty state) and navigation hints at the bottom
+## Test 1: `zelligent` starts a sidebar session
+- Action: Wait for the `launch: zelligent` command to finish rendering
+- Expected: A Zellij session appears with a persistent left sidebar, not a floating pane
 
-## Test 2: Plugin closes on q
-- Action: Press q
-- Expected: The floating plugin pane closes, back to shell prompt
+## Test 2: Initial tab uses the default two-pane body
+- Action: Read the terminal buffer
+- Expected: The main area shows the repo tab body with a shell pane and a lazygit pane to the right of the sidebar
 
-## Test 3: Plugin reopens
-- Action: Press Ctrl+Y again
-- Expected: The plugin opens again showing the same empty state
+## Test 3: Empty-state sidebar is visible
+- Action: Read the sidebar buffer
+- Expected: The sidebar renders the zelligent UI without requiring `Ctrl-y`
 
 ## Test 4: Version is displayed
 - Action: Read the terminal buffer
 - Expected: A semantic version string (e.g., "0.1.14") appears somewhere in the plugin UI
 
-## Test 5: Clean close
-- Action: Press q to close the plugin
-- Expected: Back to shell prompt, no errors visible
+## Test 5: Manual tabs inherit the sidebar frame
+- Action: Press `Ctrl-t`, then `n`, type `scratch`, and press Enter
+- Expected: The new manual tab still shows the persistent left sidebar pane
