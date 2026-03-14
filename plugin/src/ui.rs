@@ -119,9 +119,12 @@ pub fn render_not_git_repo(w: &mut impl Write, cwd: &str) {
     writeln!(w, "  {DIM}q{RESET}  close plugin").unwrap();
 }
 
-pub fn render_confirm(w: &mut impl Write, branch: &str) {
+pub fn render_confirm(w: &mut impl Write, worktree_dir: &str, branch: &str) {
     writeln!(w).unwrap();
-    writeln!(w, "  {YELLOW}{BOLD}Remove worktree for '{branch}'?{RESET}").unwrap();
+    writeln!(w, "  {YELLOW}{BOLD}Remove worktree '{worktree_dir}'?{RESET}").unwrap();
+    if worktree_dir != branch {
+        writeln!(w, "  {DIM}branch: {branch}{RESET}").unwrap();
+    }
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
