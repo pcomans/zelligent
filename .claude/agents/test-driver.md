@@ -58,7 +58,7 @@ This creates the test repo at `/tmp/zelligent-test-repo`.
 Create the session with the tmux skill:
 - socket: `zt-driver-test`
 - session name: `zt-driver`
-- start directory: `/tmp/zelligent-test-repo`
+- start directory: `/private/tmp/zelligent-test-repo`
 - window name: `view`
 
 #### Step 4: Start zelligent in the view window
@@ -69,7 +69,15 @@ Send to window `view`, pane 0:
 ```
 Then send Enter.
 
-Wait a few seconds, then capture the pane to confirm the persistent sidebar is visible.
+Before moving on:
+- verify the `view` pane cwd is `/private/tmp/zelligent-test-repo`
+- wait a few seconds for Zellij to initialize
+- send `Esc` once to dismiss the built-in `About Zellij` pane if it appears
+- launch the zelligent plugin directly with Zellij action CLI instead of relying on the `Ctrl-Y` keybinding:
+```bash
+ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo zellij action launch-or-focus-plugin -f -m file:$HOME/.local/share/zelligent/zelligent-plugin.wasm
+```
+- wait a few seconds, then capture the pane to confirm the persistent sidebar is visible
 
 #### Step 5: Create the control window
 
@@ -77,7 +85,7 @@ Create the control window with the tmux skill:
 - socket: `zt-driver-test`
 - session: `zt-driver`
 - window name: `ctrl`
-- start directory: `/tmp/zelligent-test-repo`
+- start directory: `/private/tmp/zelligent-test-repo`
 
 Setup is complete.
 
@@ -102,20 +110,22 @@ Use plain-text capture for text assertions and `capture-pane -e -J` via the tmux
 - Prefer running control commands with `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo` when they need to target the live session
 - When a plan needs managed tabs, prefer `<repo-under-test>/zelligent.sh spawn <branch>` over raw `zellij action new-tab`
 - Use raw `zellij action new-tab --name <name>` only for deliberate user-tab scenarios
+- Do not depend on the `Ctrl-Y` keybinding in the harness. It is real product behavior, but it is the wrong abstraction for deterministic tests.
+- If the plugin is not visible after the setup flow, stop treating later key assertions as product results. Report a setup failure instead.
 
 ### High-Resolution Proof Capture
 
 When generating manual proofs, prefer a wide terminal so the full UI is visible:
 
 ```bash
-tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo
+tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /private/tmp/zelligent-test-repo
 ```
 
 ### Direct tmux CLI Fallback
 
 If the structured tmux tools are unavailable, use direct tmux CLI commands with the `zt-driver-test` socket:
 
-1. `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo`
+1. `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /private/tmp/zelligent-test-repo`
 2. `tmux -L zt-driver-test send-keys -t zt-driver:view "..." Enter`
 3. `tmux -L zt-driver-test capture-pane -t zt-driver:view -p`
 4. `tmux -L zt-driver-test kill-server`
@@ -155,6 +165,7 @@ bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
 - Use socket `zt-driver-test` for all tmux skill calls
 - Follow setup steps in exact order
 - Never interact with any session other than `zt-driver` / `zelligent-test-repo`
+- Treat plugin visibility as a setup precondition, not an optional nicety
 - Always verify after each action before recording PASS/FAIL
 - If a test step fails, continue with remaining steps
 - ALWAYS run teardown

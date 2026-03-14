@@ -7,7 +7,7 @@ fixture: setup-empty-repo.sh
 Verifies zelligent starts cleanly in a repo with no extra worktrees and still shows the persistent sidebar.
 
 ## Test 1: Start zelligent
-- Action: In the `view` window, start the repo-under-test `zelligent.sh`
+- Action: In the `view` window, start the repo-under-test `zelligent.sh`, dismiss the built-in Zellij tip pane if needed, then launch the zelligent plugin directly via `zellij action launch-or-focus-plugin`
 - Expected: Zellij starts and the persistent left sidebar is visible immediately
 
 ## Test 2: Browse-mode quit keys are harmless
