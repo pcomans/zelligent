@@ -9,6 +9,8 @@ SOURCE_REPO="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 rm -rf "$REPO_DIR"
 git clone "$SOURCE_REPO" "$REPO_DIR" 2>&1
 cd "$REPO_DIR"
+mkdir -p "$REPO_DIR/.zelligent"
+cp "$SOURCE_REPO/share/default-layout.kdl" "$REPO_DIR/.zelligent/layout.kdl"
 
 # Create worktrees in the standard location (~/.zelligent/worktrees/<repo-name>/)
 # The repo is named "zelligent-test-repo" so it won't collide with the real "zelligent" repo.
