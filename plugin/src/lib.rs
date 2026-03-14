@@ -728,28 +728,35 @@ impl State {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
                 if self.should_render_empty_state() {
                     ui::render_empty_state(w);
                 } else {
-                    ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows);
+                    ui::render_sidebar_list(
+                        w,
+                        &self.sidebar_items,
+                        &self.agent_statuses,
+                        self.selected_index,
+                        rows,
+                        cols,
+                    );
                 }
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::InputBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_input(w, &self.input_buffer);
                 ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION);
+                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);

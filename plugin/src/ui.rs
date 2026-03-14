@@ -11,6 +11,8 @@ pub const YELLOW: &str = "\x1b[33m";
 use std::collections::BTreeMap;
 use std::io::Write;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::{AgentStatus, Mode, SidebarItem};
 
 /// Sanitize a branch name to match the shell's tab/session name logic:
@@ -23,18 +25,59 @@ pub fn sanitize_tab_name(branch: &str) -> String {
         .collect()
 }
 
-fn status_indicator(status: &AgentStatus) -> String {
+pub fn visible_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+pub fn clip_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if visible_width(s) <= max_width {
+        return s.to_string();
+    }
+
+    let mut width = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width.saturating_sub(1) {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+pub fn fit_text(s: &str, width: usize) -> String {
+    let clipped = clip_to_width(s, width);
+    let padding = width.saturating_sub(visible_width(&clipped));
+    format!("{clipped}{}", " ".repeat(padding))
+}
+
+fn status_indicator(status: &AgentStatus) -> &'static str {
     match status {
-        AgentStatus::Idle => "  ".to_string(),
-        AgentStatus::Working => format!("{GREEN}● {RESET}"),
-        AgentStatus::NeedsInput => format!("{YELLOW}● {RESET}"),
-        AgentStatus::Done => format!("{GREEN}✓ {RESET}"),
+        AgentStatus::Idle => "  ",
+        AgentStatus::Working => "● ",
+        AgentStatus::NeedsInput => "● ",
+        AgentStatus::Done => "✓ ",
+    }
+}
+
+fn status_color(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "",
+        AgentStatus::Working => GREEN,
+        AgentStatus::NeedsInput => YELLOW,
+        AgentStatus::Done => GREEN,
     }
 }
 
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
-    let title = format!(" zelligent: {} ", repo_name);
-    let pad = cols.saturating_sub(title.len());
+    let title = format!(" zelligent: {repo_name} ");
+    let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 
@@ -59,6 +102,7 @@ pub fn render_sidebar_list(
     agent_statuses: &BTreeMap<String, AgentStatus>,
     selected: usize,
     rows: usize,
+    cols: usize,
 ) {
     if items.is_empty() {
         writeln!(w).unwrap();
@@ -66,39 +110,39 @@ pub fn render_sidebar_list(
         return;
     }
 
-    let max_visible = rows.saturating_sub(5).max(1);
-    let start = if selected >= max_visible {
-        selected - max_visible + 1
+    let lines_per_item = 2;
+    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
+    let start = if selected >= max_items {
+        selected - max_items + 1
     } else {
         0
     };
+    let content_width = cols.saturating_sub(4).max(1);
+    let title_width = content_width.saturating_sub(2).max(1);
 
     writeln!(w).unwrap();
-    for (idx, item) in items.iter().enumerate().skip(start).take(max_visible) {
-        let cursor = if idx == selected { INVERSE } else { "" };
-        let indicator = status_indicator(
-            agent_statuses.get(&item.tab_name).unwrap_or(&AgentStatus::Idle),
-        );
-        match item.matched_branch.as_deref() {
+    for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
+        let selected_row = idx == selected;
+        let status = agent_statuses
+            .get(&item.tab_name)
+            .unwrap_or(&AgentStatus::Idle);
+        let indicator = status_indicator(status);
+        let color = status_color(status);
+        let title = fit_text(&item.display_name, title_width);
+        let subtitle = match item.matched_branch.as_deref() {
             Some(branch) if branch != item.display_name => {
-                writeln!(
-                    w,
-                    "  {indicator}{cursor} {name} {RESET}  {DIM}({branch}){RESET}",
-                    name = item.display_name,
-                )
-                .unwrap();
+                fit_text(&format!("branch: {branch}"), content_width)
             }
-            Some(_) => {
-                writeln!(w, "  {indicator}{cursor} {name} {RESET}", name = item.display_name).unwrap();
-            }
-            None => {
-                writeln!(
-                    w,
-                    "  {indicator}{cursor} {name} {RESET}  {DIM}(user tab){RESET}",
-                    name = item.display_name,
-                )
-                .unwrap();
-            }
+            Some(_) => " ".repeat(content_width),
+            None => fit_text("user tab", content_width),
+        };
+
+        if selected_row {
+            writeln!(w, "  {color}{indicator}{RESET}{INVERSE} {title} {RESET}").unwrap();
+            writeln!(w, "    {DIM}{INVERSE}{subtitle}{RESET}").unwrap();
+        } else {
+            writeln!(w, "  {color}{indicator}{RESET} {title}").unwrap();
+            writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
         }
     }
 }
@@ -152,7 +196,7 @@ pub fn render_confirm(w: &mut impl Write, branch: &str) {
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
 
-pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
+pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize) {
     writeln!(w).unwrap();
     match mode {
         Mode::Loading => {}
@@ -178,7 +222,8 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str) {
         }
         Mode::NotGitRepo | Mode::Confirming => {}
     }
-    writeln!(w, "  {DIM}{version}{RESET}").unwrap();
+    let version_line = fit_text(version, cols.saturating_sub(2));
+    writeln!(w, "  {DIM}{version_line}{RESET}").unwrap();
 }
 
 pub fn render_status(w: &mut impl Write, message: &str, is_error: bool) {
