@@ -551,6 +551,21 @@ impl State {
         Action::None
     }
 
+    fn sidebar_items_for_render(&self) -> Vec<SidebarItem> {
+        if !self.sidebar_items.is_empty() || self.worktrees.is_empty() {
+            return self.sidebar_items.clone();
+        }
+
+        self.worktrees
+            .iter()
+            .map(|wt| SidebarItem {
+                tab_name: Self::tab_name_for_branch(&wt.branch),
+                display_name: wt.dir.clone(),
+                matched_branch: Some(wt.branch.clone()),
+            })
+            .collect()
+    }
+
     pub fn handle_key_select_branch(&mut self, key: &KeyWithModifier) -> Action {
         if key.has_no_modifiers() {
             match key.bare_key {
@@ -707,7 +722,8 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_sidebar_list(w, &self.sidebar_items, &self.agent_statuses, self.selected_index, rows, cols);
+                let items = self.sidebar_items_for_render();
+                ui::render_sidebar_list(w, &items, &self.agent_statuses, self.selected_index, rows, cols);
                 ui::render_status(w, &self.status_message, self.status_is_error);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }

@@ -119,7 +119,7 @@ pub fn render_sidebar_list(
 
     // Two lines per item, reserve space for header, footer, status
     let lines_per_item = 2;
-    let max_items = rows.saturating_sub(5).max(1) / lines_per_item;
+    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
     let start = if selected >= max_items {
         selected - max_items + 1
     } else {
