@@ -430,15 +430,6 @@ impl State {
         }
     }
 
-    /// Return the index of the worktree whose tab name matches the active tab, if any.
-    /// Returns the first match; see `tab_name_for_branch` for the ambiguity caveat.
-    pub fn find_worktree_for_active_tab(&self) -> Option<usize> {
-        let active_name = self.tabs.iter().find(|t| t.active).map(|t| t.name.as_str())?;
-        self.worktrees
-            .iter()
-            .position(|wt| Self::tab_name_for_branch(&wt.branch) == active_name)
-    }
-
     pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
@@ -503,10 +494,6 @@ impl State {
     /// Convert a branch name to the corresponding Zellij tab name.
     /// Tab names use the branch with `/` replaced by `-` and non-`[A-Za-z0-9_-]`
     /// chars stripped (matching zelligent.sh).
-    ///
-    /// Note: this mapping is not injective — `feat/cool` and `feat-cool` both
-    /// produce `feat-cool`. In that case `find_worktree_for_active_tab` will
-    /// match the first worktree in the list, which may not be the intended one.
     pub fn tab_name_for_branch(branch: &str) -> String {
         ui::sanitize_tab_name(branch)
     }
@@ -1090,10 +1077,18 @@ mod tests {
 
     #[test]
     fn browse_enter_switches_to_existing_tab() {
-        let mut s = state_with_sidebar();
-        s.selected_index = 1;
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            worktrees: vec![Worktree {
+                dir: "feature-cool".into(),
+                branch: "feature/cool".into(),
+            }],
+            tabs: vec![make_tab("feature-cool", true)],
+            ..Default::default()
+        };
+        s.recompute_sidebar_items();
         let action = s.handle_key_browse(&key(BareKey::Enter));
-        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
+        assert_eq!(action, Action::SwitchToTab("feature-cool".into()));
     }
 
     #[test]
@@ -1678,33 +1673,6 @@ mod tests {
         s.tabs = vec![make_tab("feat-cool", true)];
         s.handle_list_worktrees(Some(0), b"feat-cool\tfeat/cool\nfeat-cool\tfeat-cool\n", b"");
         assert_eq!(s.sidebar_items[0].matched_branch, Some("feat/cool".into()));
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_found() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-c", true)];
-        assert_eq!(s.find_worktree_for_active_tab(), Some(2));
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_no_match() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("unrelated", true)];
-        assert_eq!(s.find_worktree_for_active_tab(), None);
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_no_active_tab() {
-        let mut s = state_with_worktrees();
-        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", false)];
-        assert_eq!(s.find_worktree_for_active_tab(), None);
-    }
-
-    #[test]
-    fn find_worktree_for_active_tab_empty_tabs() {
-        let s = state_with_worktrees();
-        assert_eq!(s.find_worktree_for_active_tab(), None);
     }
 
     #[test]
