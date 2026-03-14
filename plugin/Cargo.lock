@@ -1581,7 +1581,7 @@ dependencies = [
  "terminal_size",
  "textwrap 0.15.2",
  "thiserror 1.0.69",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -2706,7 +2706,7 @@ checksum = "b7b3e525a49ec206798b40326a44121291b530c963cfb01018f63e135bac543d"
 dependencies = [
  "smawk",
  "unicode-linebreak",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -2886,6 +2886,12 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unicode-xid"
@@ -3640,6 +3646,7 @@ name = "zelligent-plugin"
 version = "0.0.0-dev"
 dependencies = [
  "insta",
+ "unicode-width 0.2.2",
  "zellij-tile",
 ]
 
@@ -3702,7 +3709,7 @@ dependencies = [
  "termwiz",
  "thiserror 1.0.69",
  "tokio",
- "unicode-width",
+ "unicode-width 0.1.14",
  "url",
  "uuid",
 ]
