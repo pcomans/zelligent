@@ -42,11 +42,13 @@ HARNESS_SESSION_NAME="$SESSION_NAME" bash tests/harness/fixtures/teardown.sh 2>/
 ```
 
 Also kill any leftover tmux session:
+
 ```bash
 tmux -L zt-driver-test kill-server 2>/dev/null || true
 ```
 
 #### Step 2: Run the fixture script
+
 ```bash
 bash tests/harness/fixtures/<fixture-name>.sh
 ```
@@ -64,9 +66,11 @@ Create the session with the tmux skill:
 #### Step 4: Start Zellij in the view window
 
 Send to window `view`, pane 0:
+
 ```bash
 $LAUNCH
 ```
+
 Then send Enter.
 
 Wait a few seconds, then capture the pane to confirm Zellij is running.
@@ -99,8 +103,7 @@ Use plain-text capture for text assertions and `capture-pane -e -J` via the tmux
 
 - Send UI keys to the `view` window when the plan describes interactive input
 - Send shell commands to the `ctrl` window when the plan describes setup or external control
-- Prefer running control commands with `ZELLIJ=1 ZELLIJ_SESSION_NAME=$SESSION_NAME`
-  when they need to target the live session
+- Prefer running control commands with `ZELLIJ=1 ZELLIJ_SESSION_NAME=$SESSION_NAME` when they need to target the live session
 
 ### High-Resolution Proof Capture
 
@@ -122,11 +125,13 @@ If the structured tmux tools are unavailable, use direct tmux CLI commands with 
 ### Phase 4: Teardown (ALWAYS run, even if tests fail)
 
 1. Kill the tmux harness:
+
 ```bash
 tmux -L zt-driver-test kill-server 2>/dev/null || true
 ```
 
 2. Run the teardown script:
+
 ```bash
 HARNESS_SESSION_NAME="$SESSION_NAME" bash tests/harness/fixtures/teardown.sh 2>/dev/null || true
 ```
@@ -153,8 +158,7 @@ HARNESS_SESSION_NAME="$SESSION_NAME" bash tests/harness/fixtures/teardown.sh 2>/
 
 - Use socket `zt-driver-test` for all tmux skill calls
 - Follow setup steps in exact order
-- Never interact with any session other than `zt-driver` and the plan's
-  `session_name`
+- Never interact with any session other than `zt-driver` and the plan's `session_name`
 - Always verify after each action before recording PASS/FAIL
 - If a test step fails, continue with remaining steps
 - ALWAYS run teardown
