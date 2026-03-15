@@ -17,6 +17,13 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{AgentStatus, Mode, SidebarItem};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarViewport {
+    pub start: usize,
+    pub max_items: usize,
+    pub visible_items: usize,
+}
+
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
 pub fn sanitize_tab_name(branch: &str) -> String {
@@ -59,6 +66,22 @@ pub fn fit_text(s: &str, width: usize) -> String {
     format!("{clipped}{}", " ".repeat(padding))
 }
 
+pub fn sidebar_viewport(selected: usize, rows: usize, total_items: usize) -> SidebarViewport {
+    let lines_per_item = 2;
+    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
+    let start = if selected >= max_items {
+        selected - max_items + 1
+    } else {
+        0
+    };
+
+    SidebarViewport {
+        start,
+        max_items,
+        visible_items: total_items.saturating_sub(start).min(max_items),
+    }
+}
+
 fn status_indicator(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "  ",
@@ -89,14 +112,12 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
 
 pub fn render_empty_state(w: &mut impl Write) {
     writeln!(w).unwrap();
-    writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
-    writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
-    writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
-    writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
-    writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
-    writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
-    writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
-    writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
+    writeln!(w, "  {BOLD}No managed worktrees yet.{RESET}").unwrap();
+    writeln!(
+        w,
+        "  {DIM}Pick a branch or type a new one to get started.{RESET}"
+    )
+    .unwrap();
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
     writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
@@ -117,18 +138,17 @@ pub fn render_sidebar_list(
         return;
     }
 
-    let lines_per_item = 2;
-    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
-    let start = if selected >= max_items {
-        selected - max_items + 1
-    } else {
-        0
-    };
+    let viewport = sidebar_viewport(selected, rows, items.len());
     let content_width = cols.saturating_sub(4).max(1);
     let title_width = content_width.saturating_sub(4).max(1);
 
     writeln!(w).unwrap();
-    for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
+    for (idx, item) in items
+        .iter()
+        .enumerate()
+        .skip(viewport.start)
+        .take(viewport.max_items)
+    {
         let selected_row = idx == selected;
         let active_row = active_tab_name.is_some_and(|name| name == item.tab_name);
         let status = agent_statuses
@@ -157,11 +177,7 @@ pub fn render_sidebar_list(
             .unwrap();
             writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
         } else if active_row {
-            writeln!(
-                w,
-                "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}"
-            )
-            .unwrap();
+            writeln!(w, "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}").unwrap();
             writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
         } else if selected_row {
             writeln!(w, "  {INVERSE}{indicator}{title} {RESET}{RESET}").unwrap();
@@ -236,7 +252,11 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
                 )
                 .unwrap();
             } else {
-                writeln!(w, "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open").unwrap();
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open"
+                )
+                .unwrap();
                 writeln!(w, "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} refresh").unwrap();
             }
         }
