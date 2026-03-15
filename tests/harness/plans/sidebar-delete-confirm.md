@@ -22,7 +22,7 @@ sidebar.
 - Expected: The sidebar returns to browse mode and `feature-b` is still present
 
 ## Test 4: Manual tabs cannot enter confirm mode
-- Action: In the control window, run `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo zellij action new-tab --name notes`, then select `notes` and press `d`
+- Action: In the control window, run `zellij --session zelligent-test-repo action new-tab --name notes`, then select `notes` and press `d`
 - Expected: The sidebar stays in browse mode and shows an error indicating only worktree tabs can be removed
 
 ## Test 5: Confirmed deletion removes the worktree
