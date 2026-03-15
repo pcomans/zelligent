@@ -76,6 +76,11 @@ Current plans:
 - `empty-repo.md`: empty-state sidebar startup in a repo with no worktrees
 - `with-worktrees.md`: embedded sidebar stability in a repo with seeded
   worktrees
+- `sidebar-navigation.md`: keyboard navigation, mode switching, and user-tab
+  identity in the sidebar
+- `sidebar-delete-confirm.md`: delete confirmation flow and user-tab removal
+  guardrail
+- `sidebar-agent-status.md`: visible status-indicator updates for managed tabs
 
 ## Writing a new test plan
 
