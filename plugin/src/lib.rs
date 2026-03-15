@@ -579,24 +579,14 @@ impl State {
             return None;
         }
 
+        let viewport = ui::sidebar_viewport(self.selected_index, rows, self.sidebar_items.len());
         let lines_per_item = 2;
-        let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
-        let start = if self.selected_index >= max_items {
-            self.selected_index - max_items + 1
-        } else {
-            0
-        };
-        let visible_items = self
-            .sidebar_items
-            .len()
-            .saturating_sub(start)
-            .min(max_items);
         let item_offset = (line - 2) / lines_per_item;
-        if item_offset >= visible_items {
+        if item_offset >= viewport.visible_items {
             return None;
         }
 
-        Some(start + item_offset)
+        Some(viewport.start + item_offset)
     }
 
     pub fn handle_mouse_browse(&mut self, mouse: &Mouse) -> Action {
@@ -865,9 +855,13 @@ impl State {
                     if self.sidebar_items.is_empty() {
                         2
                     } else {
+                        let visible_items = ui::sidebar_viewport(
+                            self.selected_index,
+                            rows,
+                            self.sidebar_items.len(),
+                        )
+                        .visible_items;
                         let lines_per_item = 2;
-                        let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
-                        let visible_items = self.sidebar_items.len().min(max_items);
                         1 + (visible_items * lines_per_item)
                     }
                 };
