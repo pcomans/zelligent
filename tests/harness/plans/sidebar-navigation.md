@@ -12,11 +12,11 @@ the persistent sidebar. The fixture creates three managed worktrees:
 
 ## Test 1: Startup shows the seeded sidebar rows
 - Action: Wait for the `launch: zelligent` command to finish rendering
-- Expected: The sidebar shows the repo tab plus rows for `feature-a`, `feature-b`, and `feature-c`
+- Expected: The sidebar shows the local row plus rows for `feature-a`, `feature-b`, and `feature-c`
 
 ## Test 2: `j` moves selection down
 - Action: Press `j`
-- Expected: The sidebar selection moves from the startup row to the next visible item
+- Expected: The sidebar selection moves from the local row to the next visible item
 
 ## Test 3: `j` again reaches the next managed worktree
 - Action: Press `j` again
