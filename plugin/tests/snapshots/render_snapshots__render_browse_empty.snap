@@ -4,17 +4,17 @@ expression: "render_to_string(&s, 20, 80)"
 ---
 [1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
-  [36m  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄[0m
-  [36m █▀▀▀▀▀██▀       ██ ██                      █▄[0m
-  [36m      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄[0m
-  [36m    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██[0m
-  [36m  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██[0m
-  [36m ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██[0m
-  [36m                             ██[0m
-  [36m                           ▀▀▀[0m
+  [1mNo managed worktrees yet.[0m
+  [2mPick a branch or type a new one to get started.[0m
 
   [2mn[0m  pick an existing branch
   [2mi[0m  type a new branch name
+
+
+
+
+
+
 
 
 
