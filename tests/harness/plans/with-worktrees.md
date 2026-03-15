@@ -12,7 +12,7 @@ worktrees. The fixture creates three worktrees: `feature-a`, `feature-b`, and
 
 ## Test 1: Session starts with the embedded sidebar visible
 - Action: Wait for the `launch: zelligent` command to finish
-- Expected: The left sidebar is visible immediately, without pressing `Ctrl-y`
+- Expected: The left sidebar is visible immediately as part of the startup layout
 
 ## Test 2: Fixture seeded the repo with managed worktrees
 - Action: In the control window, run `git worktree list`

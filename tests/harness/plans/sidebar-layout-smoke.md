@@ -10,7 +10,7 @@ Verifies the PR 83 layout behavior started through `zelligent`.
 
 ## Test 1: Session startup renders the sidebar
 - Action: Wait for the `launch: zelligent` command to create the session
-- Expected: The session opens with a persistent left sidebar and no floating `Ctrl-y` launcher flow
+- Expected: The session opens with a persistent left sidebar already embedded in the layout
 
 ## Test 2: Initial repo tab uses the shared layout
 - Action: Read the terminal buffer

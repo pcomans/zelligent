@@ -10,7 +10,7 @@ Verifies PR 83 startup behavior in a git repo with no managed worktrees.
 
 ## Test 1: `zelligent` starts a sidebar session
 - Action: Wait for the `launch: zelligent` command to finish rendering
-- Expected: A Zellij session appears with a persistent left sidebar, not a floating pane
+- Expected: A Zellij session appears with a persistent left sidebar embedded in the layout
 
 ## Test 2: Initial tab uses the default two-pane body
 - Action: Read the terminal buffer
@@ -18,7 +18,7 @@ Verifies PR 83 startup behavior in a git repo with no managed worktrees.
 
 ## Test 3: Empty-state sidebar is visible
 - Action: Read the sidebar buffer
-- Expected: The sidebar renders the zelligent UI without requiring `Ctrl-y`
+- Expected: The sidebar renders the zelligent UI immediately on startup
 
 ## Test 4: Version is displayed
 - Action: Read the terminal buffer
