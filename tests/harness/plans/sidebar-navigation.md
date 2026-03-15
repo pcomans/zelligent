@@ -51,7 +51,7 @@ the persistent sidebar. The fixture creates three managed worktrees:
 - Expected: The sidebar returns to browse mode instead of keeping the typed prompt on screen
 
 ## Test 11: Manual tabs are labeled as user tabs
-- Action: In the control window, run `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo zellij action new-tab --name notes`
+- Action: In the control window, run `zellij --session zelligent-test-repo action new-tab --name notes`
 - Expected: The sidebar gains a `notes` row that is shown as a user tab rather than a managed worktree
 
 ## Test 12: `Enter` opens the selected manual tab
