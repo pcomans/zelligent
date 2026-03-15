@@ -9,6 +9,10 @@ session_name: zelligent-test-repo
 Verifies that visible sidebar status indicators update in response to pipe
 messages for managed tabs.
 
+Note: The sidebar matches managed rows by tab name. A manually created tab whose
+name matches a seeded worktree branch name after zelligent's normal
+sanitization is treated as a managed row for status rendering.
+
 ## Test 1: Open managed tabs for the seeded worktrees
 - Action: In the control window, run `zellij --session zelligent-test-repo action new-tab --name feature-a`
 - Action: In the control window, run `zellij --session zelligent-test-repo action new-tab --name feature-b`
