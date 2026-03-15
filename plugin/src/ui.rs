@@ -89,14 +89,12 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
 
 pub fn render_empty_state(w: &mut impl Write) {
     writeln!(w).unwrap();
-    writeln!(w, "  {CYAN}  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄{RESET}").unwrap();
-    writeln!(w, "  {CYAN} █▀▀▀▀▀██▀       ██ ██                      █▄{RESET}").unwrap();
-    writeln!(w, "  {CYAN}      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄{RESET}").unwrap();
-    writeln!(w, "  {CYAN}    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██{RESET}").unwrap();
-    writeln!(w, "  {CYAN}  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██{RESET}").unwrap();
-    writeln!(w, "  {CYAN} ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██{RESET}").unwrap();
-    writeln!(w, "  {CYAN}                             ██{RESET}").unwrap();
-    writeln!(w, "  {CYAN}                           ▀▀▀{RESET}").unwrap();
+    writeln!(w, "  {BOLD}No managed worktrees yet.{RESET}").unwrap();
+    writeln!(
+        w,
+        "  {DIM}Pick a branch or type a new one to get started.{RESET}"
+    )
+    .unwrap();
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
     writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
@@ -157,11 +155,7 @@ pub fn render_sidebar_list(
             .unwrap();
             writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
         } else if active_row {
-            writeln!(
-                w,
-                "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}"
-            )
-            .unwrap();
+            writeln!(w, "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}").unwrap();
             writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
         } else if selected_row {
             writeln!(w, "  {INVERSE}{indicator}{title} {RESET}{RESET}").unwrap();
@@ -236,7 +230,11 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
                 )
                 .unwrap();
             } else {
-                writeln!(w, "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open").unwrap();
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open"
+                )
+                .unwrap();
                 writeln!(w, "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} refresh").unwrap();
             }
         }
