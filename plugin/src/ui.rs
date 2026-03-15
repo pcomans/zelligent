@@ -17,6 +17,13 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{AgentStatus, Mode, SidebarItem};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarViewport {
+    pub start: usize,
+    pub max_items: usize,
+    pub visible_items: usize,
+}
+
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
 pub fn sanitize_tab_name(branch: &str) -> String {
@@ -57,6 +64,22 @@ pub fn fit_text(s: &str, width: usize) -> String {
     let clipped = clip_to_width(s, width);
     let padding = width.saturating_sub(visible_width(&clipped));
     format!("{clipped}{}", " ".repeat(padding))
+}
+
+pub fn sidebar_viewport(selected: usize, rows: usize, total_items: usize) -> SidebarViewport {
+    let lines_per_item = 2;
+    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
+    let start = if selected >= max_items {
+        selected - max_items + 1
+    } else {
+        0
+    };
+
+    SidebarViewport {
+        start,
+        max_items,
+        visible_items: total_items.saturating_sub(start).min(max_items),
+    }
 }
 
 fn status_indicator(status: &AgentStatus) -> &'static str {
@@ -115,18 +138,17 @@ pub fn render_sidebar_list(
         return;
     }
 
-    let lines_per_item = 2;
-    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
-    let start = if selected >= max_items {
-        selected - max_items + 1
-    } else {
-        0
-    };
+    let viewport = sidebar_viewport(selected, rows, items.len());
     let content_width = cols.saturating_sub(4).max(1);
     let title_width = content_width.saturating_sub(4).max(1);
 
     writeln!(w).unwrap();
-    for (idx, item) in items.iter().enumerate().skip(start).take(max_items) {
+    for (idx, item) in items
+        .iter()
+        .enumerate()
+        .skip(viewport.start)
+        .take(viewport.max_items)
+    {
         let selected_row = idx == selected;
         let active_row = active_tab_name.is_some_and(|name| name == item.tab_name);
         let status = agent_statuses
