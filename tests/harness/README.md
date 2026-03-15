@@ -76,6 +76,16 @@ Current plans:
 - `empty-repo.md`: empty-state sidebar startup in a repo with no worktrees
 - `with-worktrees.md`: embedded sidebar stability in a repo with seeded
   worktrees
+- `sidebar-navigation.md`: keyboard navigation, mode switching, and user-tab
+  identity in the sidebar
+- `sidebar-delete-confirm.md`: delete confirmation flow and user-tab removal
+  guardrail
+- `sidebar-agent-status.md`: visible status-indicator updates for managed tabs
+
+Coverage notes:
+
+- Mouse support currently relies on plugin tests plus manual tmux proofs. There is no dedicated mouse-only harness plan on `main`.
+- The old `mixed-three-tabs-switching` scenario was not restacked. Its useful coverage is split across `sidebar-navigation.md` and `with-worktrees.md`.
 
 ## Writing a new test plan
 
