@@ -875,6 +875,8 @@ echo "Install script contract:"
 
 DEV_INSTALL_CONTENT=$(cat "$REPO_ROOT/dev-install.sh")
 contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
+contains "dev-install creates user layout if missing" 'USER_LAYOUT_DST' "$DEV_INSTALL_CONTENT"
+contains "dev-install preserves existing user layout" 'Preserved existing user layout' "$DEV_INSTALL_CONTENT"
 contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 
