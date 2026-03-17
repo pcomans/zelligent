@@ -20,6 +20,7 @@ validation, and `doctor` behavior remains in `bash test.sh`.
 tests/harness/
 ├── plans/          # Test plan markdown files
 │   ├── empty-repo.md
+│   ├── sidebar-mouse-interaction.md
 │   ├── sidebar-layout-smoke.md
 │   └── with-worktrees.md
 ├── fixtures/       # Setup scripts (one per scenario)
@@ -74,6 +75,8 @@ Current plans:
 - `sidebar-layout-smoke.md`: PR 83 smoke test for startup, spawned tabs, and
   manual-tab inheritance
 - `empty-repo.md`: empty-state sidebar startup in a repo with no worktrees
+- `sidebar-mouse-interaction.md`: wheel navigation and click-to-select/open
+  behavior in the persistent sidebar
 - `with-worktrees.md`: embedded sidebar stability in a repo with seeded
   worktrees
 
