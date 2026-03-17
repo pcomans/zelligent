@@ -4,10 +4,10 @@ expression: "render_to_string(&s, 20, 44)"
 ---
 [1m[36m zelligent ─────────────────────────────────[0m
 
-    [0m local                               
-    [2mcurrent repo                            [0m
-  [46m[30m  agent-test-mouse                     [0m[36m[0m
-    [36mbranch: agent/test-mouse                [0m
+ local                                     
+  [2mcurrent repo                              [0m
+ [46m[30magent-test-mouse                         [0m[36m[0m
+  [36mbranch: agent/test-mouse                  [0m
 
 
 

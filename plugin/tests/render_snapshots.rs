@@ -206,6 +206,28 @@ fn render_sidebar_with_branch_subtitle() {
 }
 
 #[test]
+fn render_sidebar_with_redundant_branch_shows_subtitle_text() {
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        sidebar_items: vec![
+            SidebarItem {
+                tab_name: "feature-a".into(),
+                display_name: "feature-a".into(),
+                matched_branch: Some("feature-a".into()),
+            },
+            SidebarItem {
+                tab_name: "feature-cool".into(),
+                display_name: "feature-cool".into(),
+                matched_branch: Some("feature/cool".into()),
+            },
+        ],
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
 fn render_not_git_repo() {
     let s = State {
         mode: Mode::NotGitRepo,

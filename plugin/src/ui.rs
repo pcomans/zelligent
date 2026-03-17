@@ -82,21 +82,20 @@ pub fn sidebar_viewport(selected: usize, rows: usize, total_items: usize) -> Sid
     }
 }
 
-fn status_indicator(status: &AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Idle => "  ",
-        AgentStatus::Working => "● ",
-        AgentStatus::NeedsInput => "● ",
-        AgentStatus::Done => "✓ ",
-    }
-}
-
 fn status_color(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "",
         AgentStatus::Working => GREEN,
         AgentStatus::NeedsInput => YELLOW,
         AgentStatus::Done => GREEN,
+    }
+}
+
+fn status_symbol(status: &AgentStatus) -> Option<&'static str> {
+    match status {
+        AgentStatus::Idle => None,
+        AgentStatus::Working | AgentStatus::NeedsInput => Some("●"),
+        AgentStatus::Done => Some("✓"),
     }
 }
 
@@ -140,8 +139,7 @@ pub fn render_sidebar_list(
     }
 
     let viewport = sidebar_viewport(selected, rows, items.len());
-    let content_width = cols.saturating_sub(4).max(1);
-    let title_width = content_width.saturating_sub(4).max(1);
+    let content_width = cols.saturating_sub(2).max(1);
 
     writeln!(w).unwrap();
     for (idx, item) in items
@@ -155,18 +153,26 @@ pub fn render_sidebar_list(
         let status = agent_statuses
             .get(&item.tab_name)
             .unwrap_or(&AgentStatus::Idle);
-        let indicator = if item.matched_branch.is_none() {
-            "  "
+        let indicator = if item.matched_branch.is_some() {
+            status_symbol(status)
         } else {
-            status_indicator(status)
+            None
         };
         let color = status_color(status);
-        let title = fit_text(&item.display_name, title_width);
+        let inline_indicator_width = if active_row || selected_row || indicator.is_none() {
+            0
+        } else {
+            2
+        };
+        let trailing_arrow_width = if active_row || selected_row { 1 } else { 0 };
+        let title = fit_text(
+            &item.display_name,
+            content_width
+                .saturating_sub(inline_indicator_width + trailing_arrow_width)
+                .max(1),
+        );
         let subtitle = match item.matched_branch.as_deref() {
-            Some(branch) if branch != item.display_name => {
-                fit_text(&format!("branch: {branch}"), content_width)
-            }
-            Some(_) => " ".repeat(content_width),
+            Some(branch) => fit_text(&format!("branch: {branch}"), content_width),
             None if !repo_name.is_empty() && item.tab_name == repo_name => {
                 fit_text("current repo", content_width)
             }
@@ -174,21 +180,21 @@ pub fn render_sidebar_list(
         };
 
         if active_row && selected_row {
-            writeln!(
-                w,
-                "  {BG_CYAN}{FG_BLACK}{indicator}{title} {RESET}{CYAN}{RESET}"
-            )
-            .unwrap();
-            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
+            writeln!(w, " {BG_CYAN}{FG_BLACK}{title}{RESET}{CYAN}{RESET}").unwrap();
+            writeln!(w, "  {CYAN}{subtitle}{RESET}").unwrap();
         } else if active_row {
-            writeln!(w, "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}").unwrap();
-            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
+            writeln!(w, " {BOLD}{CYAN}{title}{RESET}{CYAN}{RESET}").unwrap();
+            writeln!(w, "  {CYAN}{subtitle}{RESET}").unwrap();
         } else if selected_row {
-            writeln!(w, "  {INVERSE}{indicator}{title} {RESET}{RESET}").unwrap();
-            writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
+            writeln!(w, " {INVERSE}{title}{RESET}{RESET}").unwrap();
+            writeln!(w, "  {DIM}{subtitle}{RESET}").unwrap();
         } else {
-            writeln!(w, "  {color}{indicator}{RESET} {title}").unwrap();
-            writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
+            if let Some(indicator) = indicator {
+                writeln!(w, " {title} {color}{indicator}{RESET}").unwrap();
+            } else {
+                writeln!(w, " {title}").unwrap();
+            }
+            writeln!(w, "  {DIM}{subtitle}{RESET}").unwrap();
         }
     }
 }
