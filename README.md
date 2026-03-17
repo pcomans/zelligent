@@ -145,7 +145,7 @@ Example:
 
 ```kdl
 pane split_direction="Vertical" {
-    pane size="24%" {
+    pane name="zelligent" size=36 {
         {{zelligent_sidebar}}
     }
     pane {

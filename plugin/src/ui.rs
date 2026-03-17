@@ -101,10 +101,10 @@ fn status_color(status: &AgentStatus) -> &'static str {
 }
 
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
-    let title = if repo_name.is_empty() {
+    let title = if repo_name.is_empty() || repo_name == "zelligent" {
         " zelligent ".to_string()
     } else {
-        format!(" {repo_name} ")
+        format!(" zelligent / {repo_name} ")
     };
     let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
@@ -127,6 +127,7 @@ pub fn render_sidebar_list(
     w: &mut impl Write,
     items: &[SidebarItem],
     agent_statuses: &BTreeMap<String, AgentStatus>,
+    repo_name: &str,
     active_tab_name: Option<&str>,
     selected: usize,
     rows: usize,
@@ -166,6 +167,9 @@ pub fn render_sidebar_list(
                 fit_text(&format!("branch: {branch}"), content_width)
             }
             Some(_) => " ".repeat(content_width),
+            None if !repo_name.is_empty() && item.tab_name == repo_name => {
+                fit_text("current repo", content_width)
+            }
             None => fit_text("user tab", content_width),
         };
 

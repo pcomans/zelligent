@@ -44,8 +44,8 @@ The supported placeholders are:
 Unknown placeholders are left untouched.
 
 `{{zelligent_sidebar}}` expands to the embedded plugin block only. The layout
-fragment owns the surrounding `pane size="..." { ... }` wrapper, so custom
-layouts can control sidebar geometry.
+fragment owns the surrounding `pane ... { ... }` wrapper, so custom layouts can
+control sidebar geometry and pane naming.
 
 `{{zelligent_children}}` is the insertion point for the main tab body:
 

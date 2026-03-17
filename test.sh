@@ -551,6 +551,7 @@ check "no args with plugin: exits 0" "0" "$code"
 contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
 contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
+contains "no args with plugin: layout names sidebar pane" 'pane name="zelligent"' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
 count_equals "no args with plugin: session layout has one shared sidebar split" 'split_direction="Vertical"' 1 "$out"
 contains "no args with plugin: startup honors SHELL" 'agent_cmd "/bin/zsh"' "$out"
@@ -989,6 +990,7 @@ contains "outside zellij (new): session named after repo"        "$REPO_NAME"   
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
 contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
+contains "outside zellij (new): layout names sidebar pane"       'pane name="zelligent"'             "$out"
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 // leading comment before outer layout

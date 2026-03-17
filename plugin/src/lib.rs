@@ -400,14 +400,25 @@ impl State {
         let mut items: Vec<SidebarItem> = self
             .tabs
             .iter()
-            .map(|tab| SidebarItem {
-                tab_name: tab.name.clone(),
-                display_name: tab.name.clone(),
-                matched_branch: self
+            .map(|tab| {
+                let matched_branch = self
                     .worktrees
                     .iter()
                     .find(|wt| Self::tab_name_for_branch(&wt.branch) == tab.name)
-                    .map(|wt| wt.branch.clone()),
+                    .map(|wt| wt.branch.clone());
+                let display_name = if matched_branch.is_none()
+                    && !self.repo_name.is_empty()
+                    && tab.name == self.repo_name
+                {
+                    "local".to_string()
+                } else {
+                    tab.name.clone()
+                };
+                SidebarItem {
+                    tab_name: tab.name.clone(),
+                    display_name,
+                    matched_branch,
+                }
             })
             .collect();
 
@@ -847,6 +858,7 @@ impl State {
                         w,
                         &self.sidebar_items,
                         &self.agent_statuses,
+                        &self.repo_name,
                         self.active_tab_name(),
                         self.selected_index,
                         rows,
@@ -1967,6 +1979,19 @@ mod tests {
         assert_eq!(s.sidebar_items[0].matched_branch, None);
         assert_eq!(s.sidebar_items[1].tab_name, "feat-a");
         assert_eq!(s.sidebar_items[1].matched_branch, Some("feat-a".into()));
+    }
+
+    #[test]
+    fn recompute_sidebar_labels_repo_tab_as_local() {
+        let mut s = State {
+            repo_name: "zelligent".into(),
+            ..Default::default()
+        };
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        assert_eq!(s.sidebar_items[0].tab_name, "zelligent");
+        assert_eq!(s.sidebar_items[0].display_name, "local");
+        assert_eq!(s.sidebar_items[0].matched_branch, None);
     }
 
     #[test]

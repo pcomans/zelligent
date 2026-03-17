@@ -166,6 +166,24 @@ fn render_sidebar_with_user_tab() {
 }
 
 #[test]
+fn render_sidebar_with_local_row() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "zelligent".into(),
+        worktrees: vec![
+            Worktree { dir: "agent-test-mouse".into(), branch: "agent/test-mouse".into() },
+        ],
+        tabs: vec![
+            make_tab_info("zelligent", false),
+            make_tab_info("agent-test-mouse", true),
+        ],
+        ..Default::default()
+    };
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 20, 44));
+}
+
+#[test]
 fn render_sidebar_with_branch_subtitle() {
     let s = State {
         mode: Mode::BrowseWorktrees,
