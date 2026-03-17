@@ -4,12 +4,12 @@ expression: after_j
 ---
 [1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
-  [1m[36m  feat-a                                                                   [0m[36m[0m
-    [36m                                                                            [0m
-  [7m  feat-b                                                                   [0m[0m
-    [2m                                                                            [0m
-    [0m feat-c                                                                  
-    [2m                                                                            [0m
+ [1m[36mfeat-a                                                                       [0m[36m[0m
+  [36mbranch: feat-a                                                                [0m
+ [7mfeat-b                                                                       [0m[0m
+  [2mbranch: feat-b                                                                [0m
+ feat-c                                                                        
+  [2mbranch: feat-c                                                                [0m
 
 
 

@@ -397,33 +397,45 @@ impl State {
             .get(self.selected_index)
             .map(Self::sidebar_item_key);
 
-        let mut items: Vec<SidebarItem> = self
-            .tabs
-            .iter()
-            .map(|tab| SidebarItem {
-                tab_name: tab.name.clone(),
-                display_name: tab.name.clone(),
-                matched_branch: self
-                    .worktrees
-                    .iter()
-                    .find(|wt| Self::tab_name_for_branch(&wt.branch) == tab.name)
-                    .map(|wt| wt.branch.clone()),
-            })
-            .collect();
+        let mut items = Vec::new();
+
+        if !self.repo_name.is_empty() && self.tabs.iter().any(|tab| tab.name == self.repo_name) {
+            items.push(SidebarItem {
+                tab_name: self.repo_name.clone(),
+                display_name: "local".to_string(),
+                matched_branch: None,
+            });
+        }
 
         for wt in &self.worktrees {
-            let tab_name = Self::tab_name_for_branch(&wt.branch);
-            if items.iter().any(|item| item.tab_name == tab_name) {
-                continue;
-            }
             items.push(SidebarItem {
-                tab_name,
+                tab_name: Self::tab_name_for_branch(&wt.branch),
                 display_name: if wt.dir != wt.branch {
                     wt.dir.clone()
                 } else {
                     wt.branch.clone()
                 },
                 matched_branch: Some(wt.branch.clone()),
+            });
+        }
+
+        for tab in &self.tabs {
+            if tab.name == self.repo_name {
+                continue;
+            }
+
+            let is_managed = self
+                .worktrees
+                .iter()
+                .any(|wt| Self::tab_name_for_branch(&wt.branch) == tab.name);
+            if is_managed {
+                continue;
+            }
+
+            items.push(SidebarItem {
+                tab_name: tab.name.clone(),
+                display_name: tab.name.clone(),
+                matched_branch: None,
             });
         }
 
@@ -457,6 +469,18 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.branches = parse_branches(&output);
+    }
+
+    pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) {
+        let had_tabs = !self.tabs.is_empty();
+        self.tabs = tab_info;
+        self.recompute_sidebar_items();
+
+        // On first tab sync, prefer the actual active tab over the bootstrap cursor
+        // that may have been established from worktrees before tab state arrived.
+        if !had_tabs {
+            self.select_active_sidebar_item();
+        }
     }
 
     pub fn handle_spawn_result(
@@ -574,14 +598,11 @@ impl State {
             return None;
         }
 
-        // Layout: line 0 = header, line 1 = blank, then 2 lines per item.
-        if line < 2 {
-            return None;
-        }
-
         let viewport = ui::sidebar_viewport(self.selected_index, rows, self.sidebar_items.len());
         let lines_per_item = 2;
-        let item_offset = (line - 2) / lines_per_item;
+        // Zellij reports mouse rows relative to the first visible sidebar item.
+        // Each item occupies two rows: title then subtitle.
+        let item_offset = line / lines_per_item;
         if item_offset >= viewport.visible_items {
             return None;
         }
@@ -847,6 +868,7 @@ impl State {
                         w,
                         &self.sidebar_items,
                         &self.agent_statuses,
+                        &self.repo_name,
                         self.active_tab_name(),
                         self.selected_index,
                         rows,
@@ -991,8 +1013,7 @@ impl ZellijPlugin for State {
                 }
             }
             Event::TabUpdate(tab_info) => {
-                self.tabs = tab_info;
-                self.recompute_sidebar_items();
+                self.handle_tab_update(tab_info);
                 Action::None
             }
             Event::Key(key) => match self.mode {
@@ -1417,7 +1438,16 @@ mod tests {
     fn browse_mouse_click_selects_clicked_item() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.selected_index, 1);
+    }
+
+    #[test]
+    fn browse_mouse_click_second_item_subtitle_selects_second_item() {
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(3, 5));
         assert_eq!(action, Action::None);
         assert_eq!(s.selected_index, 1);
     }
@@ -1427,7 +1457,7 @@ mod tests {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         s.selected_index = 1;
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
         assert_eq!(action, Action::SwitchToTab("feat-b".into()));
     }
 
@@ -1443,7 +1473,7 @@ mod tests {
             ..Default::default()
         };
         s.recompute_sidebar_items();
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(0, 5));
         assert_eq!(action, Action::Spawn("feat-a".into()));
         assert_eq!(s.status_message, "Spawning 'feat-a'...");
     }
@@ -1452,13 +1482,13 @@ mod tests {
     fn browse_mouse_click_ignores_non_item_lines() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
-        assert_eq!(s.sidebar_index_at_line(0, 20), None);
-        assert_eq!(s.sidebar_index_at_line(1, 20), None);
-        assert_eq!(s.sidebar_index_at_line(2, 20), Some(0));
-        assert_eq!(s.sidebar_index_at_line(3, 20), Some(0));
-        assert_eq!(s.sidebar_index_at_line(4, 20), Some(1));
+        assert_eq!(s.sidebar_index_at_line(0, 20), Some(0));
+        assert_eq!(s.sidebar_index_at_line(1, 20), Some(0));
+        assert_eq!(s.sidebar_index_at_line(2, 20), Some(1));
+        assert_eq!(s.sidebar_index_at_line(3, 20), Some(1));
+        assert_eq!(s.sidebar_index_at_line(4, 20), Some(2));
         assert_eq!(s.sidebar_index_at_line(10, 20), None);
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(1, 5));
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(10, 5));
         assert_eq!(action, Action::None);
         assert_eq!(s.selected_index, 0);
     }
@@ -1901,6 +1931,21 @@ mod tests {
     }
 
     #[test]
+    fn tab_update_after_worktrees_selects_active_tab_instead_of_stale_bootstrap_cursor() {
+        let mut s = State::default();
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\nfeat-b\tfeat-b\n", b"");
+        assert_eq!(s.selected_index, 0);
+
+        s.handle_tab_update(vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", true),
+        ]);
+
+        assert_eq!(s.selected_index, 1);
+        assert_eq!(s.sidebar_items[1].tab_name, "feat-b");
+    }
+
+    #[test]
     fn select_active_sidebar_item_uses_tab_identity_not_position() {
         let mut s = State {
             tabs: vec![make_tab("feat-a", false), make_tab("feat-b", true)],
@@ -1963,10 +2008,23 @@ mod tests {
         s.tabs = vec![make_tab("notes", true)];
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
         assert_eq!(s.sidebar_items.len(), 2);
-        assert_eq!(s.sidebar_items[0].tab_name, "notes");
+        assert_eq!(s.sidebar_items[0].tab_name, "feat-a");
+        assert_eq!(s.sidebar_items[0].matched_branch, Some("feat-a".into()));
+        assert_eq!(s.sidebar_items[1].tab_name, "notes");
+        assert_eq!(s.sidebar_items[1].matched_branch, None);
+    }
+
+    #[test]
+    fn recompute_sidebar_labels_repo_tab_as_local() {
+        let mut s = State {
+            repo_name: "zelligent".into(),
+            ..Default::default()
+        };
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        assert_eq!(s.sidebar_items[0].tab_name, "zelligent");
+        assert_eq!(s.sidebar_items[0].display_name, "local");
         assert_eq!(s.sidebar_items[0].matched_branch, None);
-        assert_eq!(s.sidebar_items[1].tab_name, "feat-a");
-        assert_eq!(s.sidebar_items[1].matched_branch, Some("feat-a".into()));
     }
 
     #[test]
@@ -1984,6 +2042,73 @@ mod tests {
         assert_eq!(
             s.sidebar_items[1].matched_branch,
             Some("feature/cool".into())
+        );
+    }
+
+    #[test]
+    fn recompute_sidebar_keeps_managed_order_when_tabs_change() {
+        let mut s = State {
+            repo_name: "zelligent".into(),
+            worktrees: vec![
+                Worktree {
+                    dir: "autonomy".into(),
+                    branch: "plugin-snapshot-tests".into(),
+                },
+                Worktree {
+                    dir: "competition".into(),
+                    branch: "competition".into(),
+                },
+                Worktree {
+                    dir: "ding".into(),
+                    branch: "feat/ding-dong".into(),
+                },
+            ],
+            tabs: vec![make_tab("zelligent", true), make_tab("competition", false)],
+            ..Default::default()
+        };
+        s.recompute_sidebar_items();
+        assert_eq!(
+            s.sidebar_items
+                .iter()
+                .map(|item| item.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local", "autonomy", "competition", "ding"]
+        );
+
+        s.tabs = vec![
+            make_tab("feat-ding-dong", false),
+            make_tab("zelligent", false),
+            make_tab("plugin-snapshot-tests", true),
+            make_tab("competition", false),
+        ];
+        s.recompute_sidebar_items();
+
+        assert_eq!(
+            s.sidebar_items
+                .iter()
+                .map(|item| item.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local", "autonomy", "competition", "ding"]
+        );
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn recompute_sidebar_uses_worktree_dir_for_open_managed_tab_display() {
+        let mut s = State {
+            worktrees: vec![Worktree {
+                dir: "autonomy".into(),
+                branch: "plugin-snapshot-tests".into(),
+            }],
+            tabs: vec![make_tab("plugin-snapshot-tests", true)],
+            ..Default::default()
+        };
+        s.recompute_sidebar_items();
+        assert_eq!(s.sidebar_items[0].tab_name, "plugin-snapshot-tests");
+        assert_eq!(s.sidebar_items[0].display_name, "autonomy");
+        assert_eq!(
+            s.sidebar_items[0].matched_branch,
+            Some("plugin-snapshot-tests".into())
         );
     }
 

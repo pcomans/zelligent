@@ -551,6 +551,7 @@ check "no args with plugin: exits 0" "0" "$code"
 contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
 contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
+contains "no args with plugin: layout names sidebar pane" 'pane name="zelligent"' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
 count_equals "no args with plugin: session layout has one shared sidebar split" 'split_direction="Vertical"' 1 "$out"
 contains "no args with plugin: startup honors SHELL" 'agent_cmd "/bin/zsh"' "$out"
@@ -874,6 +875,8 @@ echo "Install script contract:"
 
 DEV_INSTALL_CONTENT=$(cat "$REPO_ROOT/dev-install.sh")
 contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
+contains "dev-install creates user layout if missing" 'USER_LAYOUT_DST' "$DEV_INSTALL_CONTENT"
+contains "dev-install preserves existing user layout" 'Preserved existing user layout' "$DEV_INSTALL_CONTENT"
 contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 
@@ -989,6 +992,7 @@ contains "outside zellij (new): session named after repo"        "$REPO_NAME"   
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
 contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
+contains "outside zellij (new): layout names sidebar pane"       'pane name="zelligent"'             "$out"
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 // leading comment before outer layout
