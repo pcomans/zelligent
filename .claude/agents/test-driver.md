@@ -103,7 +103,8 @@ Use plain-text capture for text assertions and `capture-pane -e -J` via the tmux
 
 - Send UI keys to the `view` window when the plan describes interactive input
 - Send shell commands to the `ctrl` window when the plan describes setup or external control
-- Prefer running control commands with `ZELLIJ=1 ZELLIJ_SESSION_NAME=$SESSION_NAME` when they need to target the live session
+- Prefer running control commands with `zellij --session $SESSION_NAME ...` when they need to target the live session from the control window
+- Reserve `ZELLIJ=1 ZELLIJ_SESSION_NAME=$SESSION_NAME ...` for commands that intentionally emulate a process already running inside a live Zellij pane
 
 ### High-Resolution Proof Capture
 

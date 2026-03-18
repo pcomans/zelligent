@@ -3,6 +3,10 @@
 This document captures how follow-up fixes should land across the stacked
 persistent-sidebar PRs.
 
+This file is retained as rollout history for the original stacked branch plan.
+Current behavior on `main` may differ; use the current source-of-truth docs and
+harness plans for the shipped contract.
+
 ## Summary
 
 Fix the stacked PRs directly, in stack order, by editing each PR branch itself
