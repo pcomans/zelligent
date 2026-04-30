@@ -166,6 +166,24 @@ fn render_sidebar_with_user_tab() {
 }
 
 #[test]
+fn render_sidebar_with_local_row() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "zelligent".into(),
+        worktrees: vec![
+            Worktree { dir: "agent-test-mouse".into(), branch: "agent/test-mouse".into() },
+        ],
+        tabs: vec![
+            make_tab_info("zelligent", false),
+            make_tab_info("agent-test-mouse", true),
+        ],
+        ..Default::default()
+    };
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 20, 44));
+}
+
+#[test]
 fn render_sidebar_with_branch_subtitle() {
     let s = State {
         mode: Mode::BrowseWorktrees,
@@ -180,6 +198,28 @@ fn render_sidebar_with_branch_subtitle() {
                 tab_name: "notes".into(),
                 display_name: "notes".into(),
                 matched_branch: None,
+            },
+        ],
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_sidebar_with_redundant_branch_shows_subtitle_text() {
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        repo_name: "myrepo".into(),
+        sidebar_items: vec![
+            SidebarItem {
+                tab_name: "feature-a".into(),
+                display_name: "feature-a".into(),
+                matched_branch: Some("feature-a".into()),
+            },
+            SidebarItem {
+                tab_name: "feature-cool".into(),
+                display_name: "feature-cool".into(),
+                matched_branch: Some("feature/cool".into()),
             },
         ],
         ..Default::default()

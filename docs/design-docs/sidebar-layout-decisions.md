@@ -107,7 +107,11 @@ floating-plugin keybinding from a previous version, should it remove that stale
 keybinding automatically, or just stop adding it and leave existing config
 untouched?
 
-A: Just stop adding it and leave existing config untouched.
+A: Stop adding it. There are no external users yet, so the only stale binding
+in existence was on the maintainer's own machine and was removed manually.
+`Ctrl-y` was rebound to `LaunchOrFocusPlugin` with `floating false` so the same
+key now focuses the persistent sidebar pane instead of opening a duplicate
+floating instance.
 
 ## 12. No-args startup requirement
 

@@ -18,7 +18,7 @@ Verifies PR 83 startup behavior in a git repo with no managed worktrees.
 
 ## Test 3: Empty-state sidebar is visible
 - Action: Read the sidebar buffer
-- Expected: The sidebar renders the zelligent UI without requiring `Ctrl-y`
+- Expected: The sidebar renders the zelligent UI
 
 ## Test 4: Version is displayed
 - Action: Read the terminal buffer

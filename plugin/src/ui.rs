@@ -82,15 +82,6 @@ pub fn sidebar_viewport(selected: usize, rows: usize, total_items: usize) -> Sid
     }
 }
 
-fn status_indicator(status: &AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Idle => "  ",
-        AgentStatus::Working => "● ",
-        AgentStatus::NeedsInput => "● ",
-        AgentStatus::Done => "✓ ",
-    }
-}
-
 fn status_color(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "",
@@ -100,11 +91,19 @@ fn status_color(status: &AgentStatus) -> &'static str {
     }
 }
 
+fn status_symbol(status: &AgentStatus) -> Option<&'static str> {
+    match status {
+        AgentStatus::Idle => None,
+        AgentStatus::Working | AgentStatus::NeedsInput => Some("●"),
+        AgentStatus::Done => Some("✓"),
+    }
+}
+
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
-    let title = if repo_name.is_empty() {
+    let title = if repo_name.is_empty() || repo_name == "zelligent" {
         " zelligent ".to_string()
     } else {
-        format!(" {repo_name} ")
+        format!(" zelligent / {repo_name} ")
     };
     let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
@@ -127,6 +126,7 @@ pub fn render_sidebar_list(
     w: &mut impl Write,
     items: &[SidebarItem],
     agent_statuses: &BTreeMap<String, AgentStatus>,
+    repo_name: &str,
     active_tab_name: Option<&str>,
     selected: usize,
     rows: usize,
@@ -139,8 +139,7 @@ pub fn render_sidebar_list(
     }
 
     let viewport = sidebar_viewport(selected, rows, items.len());
-    let content_width = cols.saturating_sub(4).max(1);
-    let title_width = content_width.saturating_sub(4).max(1);
+    let content_width = cols.saturating_sub(2).max(1);
 
     writeln!(w).unwrap();
     for (idx, item) in items
@@ -154,37 +153,48 @@ pub fn render_sidebar_list(
         let status = agent_statuses
             .get(&item.tab_name)
             .unwrap_or(&AgentStatus::Idle);
-        let indicator = if item.matched_branch.is_none() {
-            "  "
+        let indicator = if item.matched_branch.is_some() {
+            status_symbol(status)
         } else {
-            status_indicator(status)
+            None
         };
         let color = status_color(status);
-        let title = fit_text(&item.display_name, title_width);
+        let inline_indicator_width = if active_row || selected_row || indicator.is_none() {
+            0
+        } else {
+            2
+        };
+        let trailing_arrow_width = if active_row || selected_row { 1 } else { 0 };
+        let title = fit_text(
+            &item.display_name,
+            content_width
+                .saturating_sub(inline_indicator_width + trailing_arrow_width)
+                .max(1),
+        );
         let subtitle = match item.matched_branch.as_deref() {
-            Some(branch) if branch != item.display_name => {
-                fit_text(&format!("branch: {branch}"), content_width)
+            Some(branch) => fit_text(&format!("branch: {branch}"), content_width),
+            None if !repo_name.is_empty() && item.tab_name == repo_name => {
+                fit_text("current repo", content_width)
             }
-            Some(_) => " ".repeat(content_width),
             None => fit_text("user tab", content_width),
         };
 
         if active_row && selected_row {
-            writeln!(
-                w,
-                "  {BG_CYAN}{FG_BLACK}{indicator}{title} {RESET}{CYAN}{RESET}"
-            )
-            .unwrap();
-            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
+            writeln!(w, " {BG_CYAN}{FG_BLACK}{title}{RESET}{CYAN}{RESET}").unwrap();
+            writeln!(w, "  {CYAN}{subtitle}{RESET}").unwrap();
         } else if active_row {
-            writeln!(w, "  {BOLD}{CYAN}{indicator}{title} {RESET}{CYAN}{RESET}").unwrap();
-            writeln!(w, "    {CYAN}{subtitle}{RESET}").unwrap();
+            writeln!(w, " {BOLD}{CYAN}{title}{RESET}{CYAN}{RESET}").unwrap();
+            writeln!(w, "  {CYAN}{subtitle}{RESET}").unwrap();
         } else if selected_row {
-            writeln!(w, "  {INVERSE}{indicator}{title} {RESET}{RESET}").unwrap();
-            writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
+            writeln!(w, " {INVERSE}{title}{RESET}{RESET}").unwrap();
+            writeln!(w, "  {DIM}{subtitle}{RESET}").unwrap();
         } else {
-            writeln!(w, "  {color}{indicator}{RESET} {title}").unwrap();
-            writeln!(w, "    {DIM}{subtitle}{RESET}").unwrap();
+            if let Some(indicator) = indicator {
+                writeln!(w, " {title} {color}{indicator}{RESET}").unwrap();
+            } else {
+                writeln!(w, " {title}").unwrap();
+            }
+            writeln!(w, "  {DIM}{subtitle}{RESET}").unwrap();
         }
     }
 }
@@ -231,9 +241,27 @@ pub fn render_not_git_repo(w: &mut impl Write, cwd: &str) {
     writeln!(w, "  {DIM}q{RESET}  close plugin").unwrap();
 }
 
-pub fn render_confirm(w: &mut impl Write, branch: &str) {
+pub fn render_confirm(w: &mut impl Write, branch: &str, cols: usize) {
+    // The prompt is `  Remove worktree for '<branch>'?` — 25 fixed chars plus
+    // the branch name. At narrow widths the closing `'?` would otherwise
+    // tumble onto a second line and read like garbage. Drop the prefix on
+    // narrow panes; clip the branch with `…` if even that doesn't fit.
     writeln!(w).unwrap();
-    writeln!(w, "  {YELLOW}{BOLD}Remove worktree for '{branch}'?{RESET}").unwrap();
+    let fixed = "  Remove worktree for ''?";
+    let available = cols.saturating_sub(fixed.chars().count());
+    if cols >= fixed.chars().count() + branch.chars().count().min(8) {
+        let clipped = clip_to_width(branch, available);
+        writeln!(
+            w,
+            "  {YELLOW}{BOLD}Remove worktree for '{clipped}'?{RESET}"
+        )
+        .unwrap();
+    } else {
+        let short_prefix = "  Remove '";
+        let short_avail = cols.saturating_sub(short_prefix.chars().count() + 2);
+        let clipped = clip_to_width(branch, short_avail);
+        writeln!(w, "  {YELLOW}{BOLD}Remove '{clipped}'?{RESET}").unwrap();
+    }
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
@@ -257,16 +285,29 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
                     "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open"
                 )
                 .unwrap();
-                writeln!(w, "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} refresh").unwrap();
+                writeln!(
+                    w,
+                    "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} ↻"
+                )
+                .unwrap();
             }
         }
         Mode::SelectBranch => {
-            writeln!(
-                w,
-                "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  \
-                 {DIM}Enter{RESET} create  {DIM}Esc{RESET} back"
-            )
-            .unwrap();
+            if cols >= 44 {
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  \
+                     {DIM}Enter{RESET} create  {DIM}Esc{RESET} back"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} create"
+                )
+                .unwrap();
+                writeln!(w, "  {DIM}Esc{RESET} back").unwrap();
+            }
         }
         Mode::InputBranch => {
             writeln!(w, "  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back").unwrap();
