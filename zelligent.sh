@@ -903,8 +903,23 @@ SESSION_NAME="${BRANCH_NAME//\//-}"
 # Strip any characters outside the safe set for session/tab names
 SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
 
-# Detect default base branch
-if BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
+# Pick the base branch for the new worktree.
+#
+# Branch off the caller's CURRENT branch — that's typically what you want
+# when you spawn from inside an existing worktree (continuing on top of work
+# in progress). This works for both invocation paths:
+#   - From a worktree's shell (typical CLI use): cwd is the worktree, so
+#     HEAD points at that worktree's branch.
+#   - From the persistent sidebar plugin: it runs the spawn command from
+#     the main repo root, so HEAD points at the main branch — still a
+#     sensible default.
+#
+# Fallbacks: detached HEAD or unresolvable HEAD → origin/HEAD's target →
+# `main`.
+BASE_BRANCH=""
+if CURRENT_REF=$(git symbolic-ref --quiet --short HEAD 2>/dev/null); then
+  BASE_BRANCH="$CURRENT_REF"
+elif BASE_REF=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
   BASE_BRANCH="${BASE_REF#refs/remotes/origin/}"
 else
   BASE_BRANCH="main"
