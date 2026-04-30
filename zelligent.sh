@@ -212,34 +212,74 @@ validate_layout_source() {
 sidebar_plugin_content() {
   local plugin_path="$1"
   local raw_agent_cmd="$2"
-  local plugin_path_kdl zelligent_path_cmd zelligent_path_cmd_kdl raw_agent_cmd_kdl
+  local cwd_value="$3"
+  local plugin_path_kdl zelligent_path_cmd zelligent_path_cmd_kdl raw_agent_cmd_kdl cwd_kdl
 
   plugin_path_kdl=$(escape_kdl_string "$plugin_path")
   zelligent_path_cmd=$(command -v zelligent 2>/dev/null || echo "$0")
   zelligent_path_cmd_kdl=$(escape_kdl_string "$zelligent_path_cmd")
   raw_agent_cmd_kdl=$(escape_kdl_string "$raw_agent_cmd")
+  cwd_kdl=$(escape_kdl_string "$cwd_value")
 
+  # `cwd` on the plugin block sets `RunPlugin.initial_cwd` for the live
+  # session. Zellij's resurrection serializer drops the plugin cwd, though,
+  # so we ALSO pass `repo_root` inside the user-config block — that field
+  # IS preserved verbatim across resurrection. The plugin reads `repo_root`
+  # in load() and prefers it whenever the resolved cwd looks bogus (e.g.
+  # `/` after a resurrect). See docs/design-docs/session-resurrection.md.
   cat <<EOF
-plugin location="file:$plugin_path_kdl" {
+plugin location="file:$plugin_path_kdl" cwd="$cwd_kdl" {
     zelligent_path "$zelligent_path_cmd_kdl"
     agent_cmd "$raw_agent_cmd_kdl"
+    repo_root "$cwd_kdl"
 }
 EOF
+}
+
+pane_name_for_agent_cmd() {
+  # Derive a short, stable pane title from the user's agent command.
+  # Defaults to "shell" for empty input or bare-shell invocations so the
+  # Zellij pane title doesn't fall back to the raw `bash -lc …` incantation.
+  local agent_cmd="$1"
+  local first_word base
+
+  if [ -z "$agent_cmd" ]; then
+    echo "shell"
+    return
+  fi
+
+  # First whitespace-separated token, then strip a directory component.
+  first_word="${agent_cmd%% *}"
+  base="${first_word##*/}"
+
+  case "$base" in
+    "" | sh | bash | zsh | fish | dash | ksh | tcsh)
+      echo "shell"
+      ;;
+    *)
+      echo "$base"
+      ;;
+  esac
 }
 
 default_tab_children_content() {
   local cwd_value="$1"
   local agent_cmd_kdl="$2"
-  local cwd_kdl
+  local pane_name="$3"
+  local cwd_kdl pane_name_kdl
 
   cwd_kdl=$(escape_kdl_string "$cwd_value")
+  if [ -z "$pane_name" ]; then
+    pane_name="shell"
+  fi
+  pane_name_kdl=$(escape_kdl_string "$pane_name")
 
   cat <<EOF
 pane {
-    pane command="bash" cwd="$cwd_kdl" size="70%" {
+    pane name="$pane_name_kdl" command="bash" cwd="$cwd_kdl" size="70%" {
         args "-lc" "$agent_cmd_kdl"
     }
-    pane command="lazygit" cwd="$cwd_kdl" size="30%"
+    pane name="lazygit" command="lazygit" cwd="$cwd_kdl" size="30%"
 }
 EOF
 }
@@ -711,8 +751,9 @@ if [ -z "$1" ]; then
 
     STARTUP_AGENT_CMD="$SHELL"
     STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
-    STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD")
-    STARTUP_CHILDREN=$(default_tab_children_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER")
+    STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD" "$REPO_ROOT")
+    STARTUP_PANE_NAME=$(pane_name_for_agent_cmd "$STARTUP_AGENT_CMD")
+    STARTUP_CHILDREN=$(default_tab_children_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_PANE_NAME")
     render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_TEMPLATE" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "children"
     printf '%s\n' "$STARTUP_CHILDREN" > "$RENDERED_STARTUP_CHILDREN"
     write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$REPO_NAME"
@@ -832,6 +873,26 @@ else
   exit 1
 fi
 
+# When invoked outside a running Zellij, the spawn ultimately calls
+# `zellij attach` or `zellij --new-session-with-layout`, both of which need a
+# controlling terminal. Refuse early — before we create the worktree on disk
+# — so a non-interactive caller doesn't leave orphan worktrees behind.
+# `ZELLIGENT_SKIP_TTY_CHECK=1` is honored for test harnesses that stub zellij.
+require_tty_or_die() {
+  if [ -n "${ZELLIGENT_SKIP_TTY_CHECK:-}" ]; then
+    return 0
+  fi
+  if [ ! -t 0 ] && [ ! -t 1 ]; then
+    echo "Error: 'zelligent spawn' must run from a TTY when not already inside" >&2
+    echo "       a Zellij session. Attach to the session first (e.g. 'zelligent')," >&2
+    echo "       then run 'zelligent spawn $BRANCH_NAME' from inside it." >&2
+    exit 1
+  fi
+}
+if [ -z "$ZELLIJ" ]; then
+  require_tty_or_die
+fi
+
 # Check zellij is available before creating any worktrees
 if ! command -v zellij &>/dev/null; then
   echo "Error: zellij not found. Run 'zelligent doctor' to set up." >&2
@@ -900,12 +961,21 @@ trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE"' EXI
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 AGENT_CMD_RENDER=$(build_agent_command_value "$AGENT_CMD" "$SESSION_NAME" "$REPO_ROOT" "$WORKTREE_PATH" "$SETUP_SCRIPT" "$NEW_WORKTREE")
 SESSION_AGENT_RENDER=$(build_agent_command_value "$AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
-SIDEBAR_RENDER=$(sidebar_plugin_content "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD")
-TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER")
+SIDEBAR_RENDER=$(sidebar_plugin_content "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD" "$REPO_ROOT")
+TAB_PANE_NAME=$(pane_name_for_agent_cmd "$AGENT_CMD")
+TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$TAB_PANE_NAME")
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"
 
+# Inside Zellij we hand `zellij action new-tab` a fragment layout (panes at
+# root). Outside Zellij we hand `zellij --new-session-with-layout` a full
+# session layout. The previous code wrote a session layout in the
+# already-running-session branch and then fed it to `new-tab --layout`, which
+# expects a fragment — that mismatch caused the sidebar pane to be grafted
+# into the existing tab instead of opening a new tab cleanly.
 if [ -n "$ZELLIJ" ]; then
+  write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
+elif zellij_list_sessions | grep -qxF "$REPO_NAME"; then
   write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
 else
   write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME"

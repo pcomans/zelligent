@@ -241,9 +241,27 @@ pub fn render_not_git_repo(w: &mut impl Write, cwd: &str) {
     writeln!(w, "  {DIM}q{RESET}  close plugin").unwrap();
 }
 
-pub fn render_confirm(w: &mut impl Write, branch: &str) {
+pub fn render_confirm(w: &mut impl Write, branch: &str, cols: usize) {
+    // The prompt is `  Remove worktree for '<branch>'?` — 25 fixed chars plus
+    // the branch name. At narrow widths the closing `'?` would otherwise
+    // tumble onto a second line and read like garbage. Drop the prefix on
+    // narrow panes; clip the branch with `…` if even that doesn't fit.
     writeln!(w).unwrap();
-    writeln!(w, "  {YELLOW}{BOLD}Remove worktree for '{branch}'?{RESET}").unwrap();
+    let fixed = "  Remove worktree for ''?";
+    let available = cols.saturating_sub(fixed.chars().count());
+    if cols >= fixed.chars().count() + branch.chars().count().min(8) {
+        let clipped = clip_to_width(branch, available);
+        writeln!(
+            w,
+            "  {YELLOW}{BOLD}Remove worktree for '{clipped}'?{RESET}"
+        )
+        .unwrap();
+    } else {
+        let short_prefix = "  Remove '";
+        let short_avail = cols.saturating_sub(short_prefix.chars().count() + 2);
+        let clipped = clip_to_width(branch, short_avail);
+        writeln!(w, "  {YELLOW}{BOLD}Remove '{clipped}'?{RESET}").unwrap();
+    }
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
@@ -267,16 +285,29 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
                     "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open"
                 )
                 .unwrap();
-                writeln!(w, "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} refresh").unwrap();
+                writeln!(
+                    w,
+                    "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} ↻"
+                )
+                .unwrap();
             }
         }
         Mode::SelectBranch => {
-            writeln!(
-                w,
-                "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  \
-                 {DIM}Enter{RESET} create  {DIM}Esc{RESET} back"
-            )
-            .unwrap();
+            if cols >= 44 {
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  \
+                     {DIM}Enter{RESET} create  {DIM}Esc{RESET} back"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    w,
+                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} create"
+                )
+                .unwrap();
+                writeln!(w, "  {DIM}Esc{RESET} back").unwrap();
+            }
         }
         Mode::InputBranch => {
             writeln!(w, "  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back").unwrap();

@@ -832,6 +832,15 @@ impl State {
     }
 
     pub fn render_to(&self, w: &mut impl Write, rows: usize, cols: usize) {
+        // Reset the pane each frame: enter alt screen + cursor home + clear.
+        // Without this, Zellij treats every `writeln!` as new scrollback and
+        // the pane title bar shows a `SCROLL: 0/N` counter that climbs with
+        // every re-render. The alt-screen sequence (\x1b[?1049h) signals to
+        // Zellij's terminal grid that no scrollback should be retained for
+        // this pane's content; combined with cursor-home + clear, each frame
+        // overwrites the previous in-place.
+        write!(w, "\x1b[?1049h\x1b[H\x1b[2J").unwrap();
+
         match self.mode {
             Mode::Loading => {
                 ui::render_header(w, "loading...", cols);
@@ -934,7 +943,7 @@ impl State {
                     0
                 };
                 if let Some(branch) = self.selected_sidebar_branch() {
-                    ui::render_confirm(w, branch);
+                    ui::render_confirm(w, branch, cols);
                 }
                 let used_lines = 1 + confirm_height + 2;
                 let padding = rows.saturating_sub(used_lines);
@@ -959,7 +968,23 @@ impl ZellijPlugin for State {
             .cloned()
             .unwrap_or_else(|| "zelligent".to_string());
 
-        self.initial_cwd = get_plugin_ids().initial_cwd;
+        // Resolve initial cwd. Zellij's `RunPlugin.initial_cwd` is the source
+        // of truth for a freshly-launched session, but on resurrection it is
+        // dropped during layout serialization and we receive `/` instead.
+        // `repo_root` from the plugin's user-config block IS preserved across
+        // resurrection, so prefer it whenever the resolved cwd is empty or
+        // points at the filesystem root.
+        let runtime_cwd = get_plugin_ids().initial_cwd;
+        let cfg_repo_root = configuration.get("repo_root").map(PathBuf::from);
+        self.initial_cwd = match cfg_repo_root {
+            Some(p) if runtime_cwd.as_os_str().is_empty()
+                || runtime_cwd == PathBuf::from("/")
+                || runtime_cwd == PathBuf::from(".") =>
+            {
+                p
+            }
+            _ => runtime_cwd,
+        };
         self.session_name = std::env::var("ZELLIJ_SESSION_NAME").ok();
 
         request_permission(&[

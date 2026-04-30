@@ -2,7 +2,7 @@
 source: tests/render_snapshots.rs
 expression: "render_to_string(&s, 10, 80)"
 ---
-[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
+[?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
  branch-14                                                                     
   [2mbranch: branch-14                                                             [0m
