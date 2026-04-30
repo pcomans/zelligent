@@ -982,30 +982,51 @@ TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"
 
-# Inside Zellij we hand `zellij action new-tab` a fragment layout (panes at
-# root). Outside Zellij we hand `zellij --new-session-with-layout` a full
-# session layout. The previous code wrote a session layout in the
-# already-running-session branch and then fed it to `new-tab --layout`, which
-# expects a fragment — that mismatch caused the sidebar pane to be grafted
-# into the existing tab instead of opening a new tab cleanly.
+# Decide spawn mode ONCE. We used to call `zellij_list_sessions` twice — once
+# to choose the layout shape, once to choose the launch command — and a
+# session that exited between those probes (or a stale-socket recovery)
+# could feed a fragment to `--new-session-with-layout` or a full session
+# layout to `new-tab --layout`. That race lands AFTER `git worktree add` has
+# already mutated disk, so the user is left with an orphan worktree and a
+# malformed tab. Cache the decision and use it for both the layout writer
+# and the launch command.
+#
+# Modes:
+#   inside-zellij       — already attached, use `action new-tab` with fragment
+#   attach-session      — outside zellij, repo session exists: `action new-tab` then `attach`
+#   new-session         — outside zellij, no session: `--new-session-with-layout`
 if [ -n "$ZELLIJ" ]; then
-  write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
+  SPAWN_MODE="inside-zellij"
 elif zellij_list_sessions | grep -qxF "$REPO_NAME"; then
-  write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
+  SPAWN_MODE="attach-session"
 else
-  write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME"
+  SPAWN_MODE="new-session"
 fi
 
-# Inside Zellij: open as a new tab in the current session.
-# Outside Zellij: create or attach to a repo-named session, open worktree as a tab.
-if [ -n "$ZELLIJ" ]; then
-  echo "🪟 Opening tab '$SESSION_NAME'..."
-  zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
-elif zellij_list_sessions | grep -qxF "$REPO_NAME"; then
-  echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
-  ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
-  zellij attach "$REPO_NAME"
-else
-  echo "🪟 Creating Zellij session '$REPO_NAME'..."
-  zellij --new-session-with-layout "$LAYOUT" --session "$REPO_NAME"
-fi
+# Inside Zellij and attach-session both want a fragment layout (panes at
+# root) for `new-tab --layout`. Only new-session wants the full session
+# layout for `--new-session-with-layout`.
+case "$SPAWN_MODE" in
+  inside-zellij | attach-session)
+    write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
+    ;;
+  new-session)
+    write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME"
+    ;;
+esac
+
+case "$SPAWN_MODE" in
+  inside-zellij)
+    echo "🪟 Opening tab '$SESSION_NAME'..."
+    zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+    ;;
+  attach-session)
+    echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
+    ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+    zellij attach "$REPO_NAME"
+    ;;
+  new-session)
+    echo "🪟 Creating Zellij session '$REPO_NAME'..."
+    zellij --new-session-with-layout "$LAYOUT" --session "$REPO_NAME"
+    ;;
+esac
