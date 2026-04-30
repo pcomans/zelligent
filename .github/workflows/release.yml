@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate tag matches VERSION file
         run: |
@@ -49,7 +49,7 @@ jobs:
           echo "SHA256 for Homebrew formula: $SHA256"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.TARBALL }}
           generate_release_notes: true
