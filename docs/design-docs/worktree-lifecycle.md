@@ -3,17 +3,18 @@
 ## Spawn (`zelligent spawn <branch> [agent-cmd]`)
 
 1. **Resolve repo root** — even from inside a worktree, finds the main repo via `git rev-parse --git-common-dir`
-2. **Detect base branch** — uses `git symbolic-ref refs/remotes/origin/HEAD`, falls back to `main`
-3. **Create worktree** — at `~/.zelligent/worktrees/<repo>/<branch>`
+2. **TTY guard (outside Zellij only)** — `zellij attach` and `zellij --new-session-with-layout` need a controlling terminal. If neither stdin nor stdout is a TTY, spawn refuses early with a friendly error before creating any worktree state. Set `ZELLIGENT_SKIP_TTY_CHECK=1` in test harnesses that use mock zellij stubs.
+3. **Detect base branch** — picks the *current* branch (`git symbolic-ref --short HEAD`) so spawning from inside an existing worktree branches off the work in progress. Falls back to `origin/HEAD`'s target, then `main`, when HEAD is detached or unresolvable.
+4. **Create worktree** — at `~/.zelligent/worktrees/<repo>/<branch>`
    - If branch exists: `git worktree add <path> <branch>`
    - If new branch: `git worktree add -b <branch> <path> <base>`
    - If worktree dir already exists: skips creation, just opens the tab
-4. **Run setup hook** — if `.zelligent/setup.sh` exists and this is a new worktree, it runs before the agent command. Setup receives `$REPO_ROOT` and `$WORKTREE_PATH` as args.
-5. **Generate layout** — builds a KDL layout file with agent pane (70%) and lazygit pane (30%)
-6. **Open tab** — behavior depends on context:
-   - Inside Zellij: `zellij action new-tab --layout <file> --name <session-name>`
-   - Outside Zellij, session exists: `ZELLIJ_SESSION_NAME=<repo> zellij action new-tab ...` then `zellij attach`
-   - Outside Zellij, no session: `zellij --new-session-with-layout <file> --session <repo>`
+5. **Run setup hook** — if `.zelligent/setup.sh` exists and this is a new worktree, it runs before the agent command. Setup receives `$REPO_ROOT` and `$WORKTREE_PATH` as args.
+6. **Generate layout** — builds a KDL layout file with agent pane (70%) and lazygit pane (30%). Inside Zellij and the existing-session-outside branches both write a *fragment* layout (panes at root); only the new-session branch writes a full session layout. Feeding `new-tab --layout` a session layout would graft the sidebar pane into the existing tab instead of opening a new one.
+7. **Open tab** — behavior depends on context:
+   - Inside Zellij: `zellij action new-tab --layout <fragment> --name <session-name>`
+   - Outside Zellij, session exists: `ZELLIJ_SESSION_NAME=<repo> zellij action new-tab --layout <fragment> ...` then `zellij attach`
+   - Outside Zellij, no session: `zellij --new-session-with-layout <session-layout> --session <repo>`
 
 ## Remove (`zelligent remove <branch>`)
 

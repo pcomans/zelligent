@@ -61,8 +61,8 @@ The sequence is:
 
 - Bring docs and harness plans in sync with the actual final sidebar behavior
   from PRs 84 through 87.
-- Remove remaining floating-plugin language and stale `Ctrl-y` assumptions from
-  source-of-truth docs.
+- Floating-plugin language and stale `Ctrl-y` assumptions removed from
+  source-of-truth docs (see `sidebar-rewrite-history.md` for context).
 - Document the persistent-sidebar interaction model, including keyboard and
   mouse behavior as actually shipped.
 - Update harness plans and design docs only after the runtime behavior in lower

@@ -46,7 +46,7 @@ Spawn an agent in a new worktree:
 zelligent spawn feature/my-feature claude
 ```
 
-This creates a git worktree branched from your default branch, opens a new Zellij tab, and runs `claude` (Claude Code) in it. The tab is split 70/30 between the agent and lazygit.
+This creates a git worktree branched from the branch you're currently on (so spawning from inside an existing worktree continues on top of that work in progress), opens a new Zellij tab, and runs `claude` (Claude Code) in it. The tab is split 70/30 between the agent and lazygit.
 
 On first launch, Zellij will ask you to grant the plugin permissions. Select `y` — the plugin needs these to manage worktrees and tabs.
 
@@ -60,7 +60,7 @@ The `zelligent` command handles worktree creation, layout generation, and sessio
 
 When you run `zelligent spawn feature/auth claude`:
 
-1. It creates a git worktree at `~/.zelligent/worktrees/<repo>/<branch>/`, branched from your default branch (usually `main`)
+1. It creates a git worktree at `~/.zelligent/worktrees/<repo>/<branch>/`, branched from your *current* branch (or `origin/HEAD` / `main` if HEAD is detached)
 2. It generates a Zellij layout file (KDL format) with an embedded left sidebar plus the main tab body
 3. If you're inside Zellij, it opens a new tab. If you're outside, it creates or attaches to the repo's session
 
@@ -145,7 +145,7 @@ Example:
 
 ```kdl
 pane split_direction="Vertical" {
-    pane size="24%" {
+    pane name="zelligent" size=36 {
         {{zelligent_sidebar}}
     }
     pane {

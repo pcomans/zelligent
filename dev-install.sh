@@ -48,6 +48,16 @@ fi
 cp "$DEFAULT_LAYOUT_SRC" "$DEFAULT_LAYOUT_DST"
 echo "Installed default layout to $DEFAULT_LAYOUT_DST"
 
+USER_LAYOUT_DIR="$HOME/.zelligent"
+USER_LAYOUT_DST="$USER_LAYOUT_DIR/layout.kdl"
+mkdir -p "$USER_LAYOUT_DIR"
+if [ ! -f "$USER_LAYOUT_DST" ]; then
+  cp "$DEFAULT_LAYOUT_DST" "$USER_LAYOUT_DST"
+  echo "Created user layout at $USER_LAYOUT_DST"
+else
+  echo "Preserved existing user layout at $USER_LAYOUT_DST"
+fi
+
 # Install Claude Code plugin (marketplace directory) for `zelligent doctor`
 PLUGIN_SRC="claude-plugin"
 PLUGIN_DST="$SHARE_DIR/claude-plugin"

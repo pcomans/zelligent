@@ -14,6 +14,10 @@ REPO_NAME="$(basename "$REPO_ROOT")"
 # Spawn now requires a resolvable plugin path and layout asset.
 export ZELLIGENT_PLUGIN_SRC="${ZELLIGENT_PLUGIN_SRC:-$SCRIPT}"
 export ZELLIGENT_DEFAULT_LAYOUT_SRC="${ZELLIGENT_DEFAULT_LAYOUT_SRC:-$REPO_ROOT/share/default-layout.kdl}"
+# The test harness drives zelligent without a controlling terminal (commands
+# are captured via `$(...)`), so the production-only TTY guard at the spawn
+# entrypoint must be skipped — the mock zellij stubs never read the terminal.
+export ZELLIGENT_SKIP_TTY_CHECK=1
 
 TEST_REPO_LAYOUT="$REPO_ROOT/.zelligent/layout.kdl"
 TEST_REPO_LAYOUT_BAK="$REPO_ROOT/.zelligent/layout.kdl.test-bak"
@@ -551,6 +555,7 @@ check "no args with plugin: exits 0" "0" "$code"
 contains "no args with plugin: uses session layout" "--new-session-with-layout" "$out"
 contains "no args with plugin: sets default tab template" "default_tab_template" "$out"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
+contains "no args with plugin: layout names sidebar pane" 'pane name="zelligent"' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
 count_equals "no args with plugin: session layout has one shared sidebar split" 'split_direction="Vertical"' 1 "$out"
 contains "no args with plugin: startup honors SHELL" 'agent_cmd "/bin/zsh"' "$out"
@@ -874,6 +879,8 @@ echo "Install script contract:"
 
 DEV_INSTALL_CONTENT=$(cat "$REPO_ROOT/dev-install.sh")
 contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
+contains "dev-install creates user layout if missing" 'USER_LAYOUT_DST' "$DEV_INSTALL_CONTENT"
+contains "dev-install preserves existing user layout" 'Preserved existing user layout' "$DEV_INSTALL_CONTENT"
 contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 
@@ -989,6 +996,7 @@ contains "outside zellij (new): session named after repo"        "$REPO_NAME"   
 contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-session-with-layout"   "$out"
 contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
+contains "outside zellij (new): layout names sidebar pane"       'pane name="zelligent"'             "$out"
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 // leading comment before outer layout
@@ -1029,6 +1037,18 @@ cleanup_test_branch
 contains "outside zellij (existing): attaches to repo session" "Attaching to session '$REPO_NAME'" "$out"
 contains "outside zellij (existing): calls action new-tab"     "action new-tab"                   "$out"
 contains "outside zellij (existing): calls attach"             "zellij attach $REPO_NAME"         "$out"
+# new-tab --layout expects a fragment (panes at root), not a full session
+# layout. Feeding it a session layout grafted the sidebar pane into the
+# existing tab (visible as duplicated sidebars in the UI).
+excludes "outside zellij (existing): layout is a fragment, no default_tab_template" "default_tab_template" "$out"
+excludes "outside zellij (existing): layout is a fragment, no tab wrapper"          'tab name='           "$out"
+
+# TTY guard: outside Zellij, with TTY check enabled, spawn should refuse and
+# exit nonzero with a friendly error rather than panicking inside zellij.
+out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" ZELLIGENT_SKIP_TTY_CHECK="" PATH="$MOCK_BIN2:$PATH" "$SCRIPT" spawn some-branch 2>&1); code=$?
+cleanup_test_branch
+check    "tty guard: refuses spawn outside zellij without a tty" "1" "$code"
+contains "tty guard: prints friendly error" "must run from a TTY" "$out"
 
 rm -rf "$MOCK_BIN" "$MOCK_BIN2"
 

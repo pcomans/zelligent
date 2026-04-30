@@ -19,20 +19,16 @@ The `serialization_interval` config controls how frequently Zellij snapshots the
 
 **Fix:** `grep -v '^\s*//' "$CONFIG" | grep -qF ...` to skip comment lines before checking.
 
-### Bug 2: Plugin gets wrong cwd on resurrection (confirmed, open)
+### Bug 2: Plugin gets wrong cwd on resurrection (worked around in plugin)
 
-**Problem:** After session resurrection, the WASM plugin gets `$HOME` as its `initial_cwd` instead of the repo directory. This causes a `NotGitRepo` error.
+**Problem:** After session resurrection, the WASM plugin gets `/` (or `$HOME`) as its `initial_cwd` instead of the repo directory. The plugin then runs `git rev-parse` from that bogus cwd and reports `NotGitRepo`.
 
 **Root cause chain:**
 
-1. Plugin launched via Ctrl-Y keybinding has no `cwd` property in keybinding config
-2. `PluginConfig.initial_cwd` = `None`
-3. At runtime, `FillPluginCwd` resolves cwd from the focused pane (works correctly)
-4. But layout serialization (`plugin_map.rs:242`) reads the static `plugin_config.initial_cwd` = `None`
-5. Saved `session-layout.kdl` has NO cwd for the zelligent plugin pane
-6. On resurrection: `RunPlugin.initial_cwd` = `None`
-7. Fallback: `wasm_bridge.rs:139` uses `zellij_cwd` = server process `current_dir()` at startup
-8. If `current_dir()` is `$HOME` (not the repo), the plugin gets the wrong cwd
+1. Plugin launched via the persistent sidebar layout. Even with `cwd` set on the `plugin {}` block, Zellij's resurrection serializer (`plugin_map.rs:242`) reads static `plugin_config.initial_cwd` and writes the saved `session-layout.kdl` *without* a cwd attribute on the plugin.
+2. On resurrection: `RunPlugin.initial_cwd` = `None`.
+3. Fallback (`wasm_bridge.rs:139`): `zellij_cwd` = server process `current_dir()` at startup. The Zellij server daemonizes early, so this often ends up as `/`.
+4. The plugin's `get_plugin_ids().initial_cwd` returns `/`.
 
 **Plugin cwd resolution path:**
 
@@ -43,7 +39,9 @@ load() -> get_plugin_ids().initial_cwd
   -> zellij_cwd = std::env::current_dir() when Zellij server starts
 ```
 
-**Potential upstream fix:** In `plugin_map.rs:242`, fall back to `plugin_env.plugin_cwd` (the runtime-resolved value) when `initial_cwd` is None:
+**Workaround (`plugin/src/lib.rs::load`):** Pass `repo_root` through the plugin user-config block. That block IS preserved verbatim across resurrection. The plugin reads `repo_root` and prefers it whenever the resolved cwd is empty, `/`, or `.`. CLI emits `repo_root "<repo>"` from `sidebar_plugin_content` in `zelligent.sh`.
+
+**Potential upstream fix (not blocked on us):** In `plugin_map.rs:242`, fall back to `plugin_env.plugin_cwd` (the runtime-resolved value) when `initial_cwd` is None:
 
 ```rust
 plugin_config.initial_cwd.clone()

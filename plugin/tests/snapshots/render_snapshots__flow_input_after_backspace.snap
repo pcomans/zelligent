@@ -2,7 +2,7 @@
 source: tests/render_snapshots.rs
 expression: after_bs
 ---
-[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
+[?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
   [1mNew branch name:[0m
 
