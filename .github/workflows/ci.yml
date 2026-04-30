@@ -7,7 +7,7 @@ jobs:
   test-shell:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -20,7 +20,7 @@ jobs:
   test-plugin:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install wasm target
         run: rustup target add wasm32-wasip1
