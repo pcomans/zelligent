@@ -746,7 +746,13 @@ if [ -z "$1" ]; then
     mkdir -p "$ZELLIGENT_USER_DIR/tmp"
     RENDERED_STARTUP_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-template-XXXXXX")
     RENDERED_STARTUP_CHILDREN=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-children-XXXXXX")
-    STARTUP_LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-session-XXXXXX")
+    # `zellij --new-session-with-layout` treats an extension-less argument as a
+    # layout NAME (looked up against built-ins) rather than a path, and silently
+    # falls back to the default built-in layout on miss. Force a `.kdl` suffix
+    # so zellij parses the file as a path.
+    STARTUP_LAYOUT_RAW=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-session-XXXXXX")
+    STARTUP_LAYOUT="${STARTUP_LAYOUT_RAW}.kdl"
+    mv "$STARTUP_LAYOUT_RAW" "$STARTUP_LAYOUT"
     trap 'rm -f "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$STARTUP_LAYOUT"' EXIT
 
     STARTUP_AGENT_CMD="$SHELL"
@@ -968,7 +974,13 @@ fi
 
 # Generate temp layout files
 mkdir -p "$ZELLIGENT_USER_DIR/tmp"
-LAYOUT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-XXXXXX")
+# `zellij --new-session-with-layout` treats an extension-less argument as a
+# layout NAME and silently falls back to the built-in default on miss. Force a
+# `.kdl` suffix so the path is parsed as a file. (`new-tab --layout` accepts
+# either, but we keep both consistent.)
+LAYOUT_RAW=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-XXXXXX")
+LAYOUT="${LAYOUT_RAW}.kdl"
+mv "$LAYOUT_RAW" "$LAYOUT"
 RENDERED_TAB_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-fragment-XXXXXX")
 RENDERED_SESSION_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-session-template-XXXXXX")
 trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE"' EXIT
