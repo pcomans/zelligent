@@ -98,3 +98,81 @@ if [ -f "$CONFIG" ]; then
   sed -i.bak "s|file:[^ ]*zelligent-plugin\.wasm|file:$SHARE_DIR/zelligent-plugin.wasm|g" "$CONFIG" && rm "$CONFIG.bak"
   echo "Updated $CONFIG to reference $SHARE_DIR/zelligent-plugin.wasm"
 fi
+
+# Grant Zellij plugin permissions for the dev plugin path. Zellij will
+# otherwise refuse RunCommands and the sidebar's actions silently fail. If the
+# user previously dismissed the in-session prompt, zellij persists an empty
+# block (`"…wasm" { }`) — rewrite it idempotently rather than appending.
+if [ "$(uname)" = "Darwin" ]; then
+  PERM_FILE="$HOME/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"
+else
+  PERM_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/zellij/permissions.kdl"
+fi
+mkdir -p "$(dirname "$PERM_FILE")"
+touch "$PERM_FILE"
+DEV_PLUGIN_PATH="$SHARE_DIR/zelligent-plugin.wasm"
+if grep -qF "\"$DEV_PLUGIN_PATH\"" "$PERM_FILE"; then
+  PLUGIN_PATH="$DEV_PLUGIN_PATH" perl -i -0pe '
+    my $path = quotemeta($ENV{PLUGIN_PATH});
+    my $block = qq{"$ENV{PLUGIN_PATH}" \{\n    ChangeApplicationState\n    ReadApplicationState\n    RunCommands\n    ReadCliPipes\n\}\n};
+    if (/"$path"\s*\{([^}]*)\}/s) {
+      my $body = $1;
+      my $needs = $body !~ /ChangeApplicationState/
+               || $body !~ /ReadApplicationState/
+               || $body !~ /RunCommands/
+               || $body !~ /ReadCliPipes/;
+      s/"$path"\s*\{[^}]*\}\s*\n?/$block/s if $needs;
+    }
+  ' "$PERM_FILE"
+else
+  cat >> "$PERM_FILE" <<PERMS
+"$DEV_PLUGIN_PATH" {
+    ChangeApplicationState
+    ReadApplicationState
+    RunCommands
+    ReadCliPipes
+}
+PERMS
+fi
+echo "Granted plugin permissions in $PERM_FILE"
+
+# Make sure the dev binary actually wins on PATH. Homebrew installs into
+# /opt/homebrew/bin (or /usr/local/bin on Intel) which typically precedes
+# ~/.local/bin, so a `brew install pcomans/zelligent/zelligent` will silently
+# shadow this dev install. Detect that case and unlink the brew shim — `brew
+# link zelligent` reverses it cleanly.
+DEV_BIN="$INSTALL_DIR/zelligent"
+RESOLVED=$(command -v zelligent 2>/dev/null || true)
+if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$DEV_BIN" ]; then
+  REAL_RESOLVED=$(readlink -f "$RESOLVED" 2>/dev/null || echo "$RESOLVED")
+  if command -v brew >/dev/null 2>&1 && [[ "$REAL_RESOLVED" == *"/Cellar/zelligent/"* ]]; then
+    echo "Unlinking Homebrew zelligent so the dev install takes precedence on PATH..."
+    brew unlink zelligent >/dev/null
+    echo "  (run 'brew link zelligent' to switch back to the released version.)"
+  else
+    echo "Warning: '$RESOLVED' shadows the dev install at $DEV_BIN." >&2
+    echo "         Adjust your PATH so $INSTALL_DIR comes first, or remove the shadowing binary." >&2
+  fi
+fi
+
+# Re-resolve after any unlink. The current shell's command hash is stale; tell
+# the user to refresh it (we can't do this from a child process).
+NEW_RESOLVED=$(PATH="$PATH" command -v zelligent 2>/dev/null || true)
+if [ "$NEW_RESOLVED" = "$DEV_BIN" ]; then
+  echo "✓ 'zelligent' on PATH now points at the dev install."
+  echo "  In an open shell, run 'hash -r' (or open a new terminal) to drop the cached path."
+fi
+
+# Heads-up: zellij resurrects sessions by name, so an existing session created
+# by an older zelligent will reattach with its old layout. Mention how to
+# start fresh.
+if command -v zellij >/dev/null 2>&1; then
+  EXISTING=$(zellij list-sessions --no-formatting --short 2>/dev/null || true)
+  if [ -n "$EXISTING" ]; then
+    echo
+    echo "Note: zellij resurrects sessions by name. To pick up dev changes in an"
+    echo "existing session, delete it first: 'zellij delete-session <name> --force'."
+    echo "Active sessions:"
+    printf '%s\n' "$EXISTING" | sed 's/^/  /'
+  fi
+fi

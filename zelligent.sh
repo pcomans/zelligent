@@ -553,16 +553,23 @@ if [ "$1" = "doctor" ]; then
   mkdir -p "$(dirname "$PERM_FILE")"
   touch "$PERM_FILE"
 
-  if grep -qF "$PLUGIN_PATH" "$PERM_FILE"; then
-    # Ensure ReadCliPipes is present (added in agent-status-notifications)
-    if ! grep -qF "ReadCliPipes" "$PERM_FILE"; then
-      # Append ReadCliPipes inside the existing plugin permissions block
-      sed -i.bak "/$PLUGIN_PATH/,/}/ s/}/    ReadCliPipes\\
-}/" "$PERM_FILE" && rm -f "$PERM_FILE.bak"
-      echo "  permissions: added ReadCliPipes to $PERM_FILE"
-    else
-      echo "  permissions: ok"
-    fi
+  # Zellij can persist a *blocked* prompt as an entry with an empty body
+  # (`"…wasm" { }`), which the previous grep-only check treated as already
+  # configured and skipped. Rewrite a present-but-empty/incomplete block in
+  # place, append a fresh block when no entry exists.
+  if grep -qF "\"$PLUGIN_PATH\"" "$PERM_FILE"; then
+    PLUGIN_PATH="$PLUGIN_PATH" perl -i -0pe '
+      my $path = quotemeta($ENV{PLUGIN_PATH});
+      my $block = qq{"$ENV{PLUGIN_PATH}" \{\n    ChangeApplicationState\n    ReadApplicationState\n    RunCommands\n    ReadCliPipes\n\}\n};
+      if (/"$path"\s*\{([^}]*)\}/s) {
+        my $body = $1;
+        my $needs = $body !~ /ChangeApplicationState/
+                 || $body !~ /ReadApplicationState/
+                 || $body !~ /RunCommands/
+                 || $body !~ /ReadCliPipes/;
+        s/"$path"\s*\{[^}]*\}\s*\n?/$block/s if $needs;
+      }
+    ' "$PERM_FILE"
   else
     cat >> "$PERM_FILE" <<PERMS
 "$PLUGIN_PATH" {
@@ -572,8 +579,8 @@ if [ "$1" = "doctor" ]; then
     ReadCliPipes
 }
 PERMS
-    echo "  permissions: granted for $PLUGIN_PATH"
   fi
+  echo "  permissions: granted for $PLUGIN_PATH"
 
   # 7. Install Claude Code plugin (skill + hooks)
   if ! command -v claude &>/dev/null; then
