@@ -263,6 +263,16 @@ pane_name_for_agent_cmd() {
 }
 
 default_tab_children_content() {
+  # Flat-siblings form. Used to substitute {{zelligent_children}} in the
+  # sidebar layout fragment, where the outer wrapper is already
+  # `pane split_direction="Vertical" { sidebar, ... }` — so emitting two
+  # bare panes here makes them direct siblings of the sidebar pane and
+  # inherit its left/right split, putting lazygit on the right of the
+  # agent pane.
+  #
+  # Note: this form only works inside that outer Vertical wrapper.
+  # `default_tab_body_content` is the form used inside a `tab { }` body
+  # (session-layout mode), where panes need their own explicit wrapper.
   local cwd_value="$1"
   local agent_cmd_kdl="$2"
   local pane_name="$3"
@@ -275,7 +285,30 @@ default_tab_children_content() {
   pane_name_kdl=$(escape_kdl_string "$pane_name")
 
   cat <<EOF
-pane {
+pane name="$pane_name_kdl" command="bash" cwd="$cwd_kdl" size="70%" {
+    args "-lc" "$agent_cmd_kdl"
+}
+pane name="lazygit" command="lazygit" cwd="$cwd_kdl" size="30%"
+EOF
+}
+
+default_tab_body_content() {
+  # Wrapped form for use inside a `tab { }` block. zellij auto-wraps
+  # multi-pane tab bodies with a horizontal-split wrapper (lazygit ends up
+  # below the agent), so we emit our own vertical-split wrapper.
+  local cwd_value="$1"
+  local agent_cmd_kdl="$2"
+  local pane_name="$3"
+  local cwd_kdl pane_name_kdl
+
+  cwd_kdl=$(escape_kdl_string "$cwd_value")
+  if [ -z "$pane_name" ]; then
+    pane_name="shell"
+  fi
+  pane_name_kdl=$(escape_kdl_string "$pane_name")
+
+  cat <<EOF
+pane split_direction="vertical" {
     pane name="$pane_name_kdl" command="bash" cwd="$cwd_kdl" size="70%" {
         args "-lc" "$agent_cmd_kdl"
     }
@@ -766,7 +799,9 @@ if [ -z "$1" ]; then
     STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
     STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD" "$REPO_ROOT")
     STARTUP_PANE_NAME=$(pane_name_for_agent_cmd "$STARTUP_AGENT_CMD")
-    STARTUP_CHILDREN=$(default_tab_children_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_PANE_NAME")
+    # Startup tab body: bare shell+lazygit go directly into `tab { … }`
+    # without an outer Vertical wrapper, so use the wrapped body form.
+    STARTUP_CHILDREN=$(default_tab_body_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_PANE_NAME")
     render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_TEMPLATE" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "children"
     printf '%s\n' "$STARTUP_CHILDREN" > "$RENDERED_STARTUP_CHILDREN"
     write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$REPO_NAME"
