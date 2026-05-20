@@ -39,7 +39,9 @@ load() -> get_plugin_ids().initial_cwd
   -> zellij_cwd = std::env::current_dir() when Zellij server starts
 ```
 
-**Workaround (`plugin/src/lib.rs::load`):** Pass `repo_root` through the plugin user-config block. That block IS preserved verbatim across resurrection. The plugin reads `repo_root` and prefers it whenever the resolved cwd is empty, `/`, or `.`. CLI emits `repo_root "<repo>"` from `sidebar_plugin_content` in `zelligent.sh`.
+**Workaround (`plugin/src/lib.rs::load`):** Pass `repo_root` through the plugin user-config block. That block IS preserved verbatim across resurrection. When `repo_root` is set, it is **authoritative** — the plugin uses it as `initial_cwd` regardless of what the runtime cwd looks like. Runtime cwd is consulted only as a fallback for the manual-launch case where `repo_root` is absent (plugin loaded by hand without `zelligent.sh`). CLI emits `repo_root "<repo>"` from `sidebar_plugin_content` in `zelligent.sh`.
+
+An earlier version of this workaround only fell back to `repo_root` when runtime cwd was `""`, `/`, or `.`. The upstream code path (step 3 above) can leak literally any directory the server happened to start in — `$HOME`, the worktree of another open tab, anything — so there is no finite list of "bogus" values to enumerate. See zelligent issue #105 for the investigation.
 
 **Potential upstream fix (not blocked on us):** In `plugin_map.rs:242`, fall back to `plugin_env.plugin_cwd` (the runtime-resolved value) when `initial_cwd` is None:
 
