@@ -968,23 +968,16 @@ impl ZellijPlugin for State {
             .cloned()
             .unwrap_or_else(|| "zelligent".to_string());
 
-        // Resolve initial cwd. Zellij's `RunPlugin.initial_cwd` is the source
-        // of truth for a freshly-launched session, but on resurrection it is
-        // dropped during layout serialization and we receive `/` instead.
-        // `repo_root` from the plugin's user-config block IS preserved across
-        // resurrection, so prefer it whenever the resolved cwd is empty or
-        // points at the filesystem root.
+        // Resolve initial cwd. Zellij drops `RunPlugin.initial_cwd` during
+        // layout serialization, so on resurrection the loader falls back to
+        // the server's startup `current_dir()` — any directory at all, often
+        // `$HOME`. See zellij-org/zellij#2978, #3041, #4129. The user-config
+        // block IS preserved across resurrection, so when `repo_root` is set
+        // by `zelligent.sh` it is authoritative; runtime cwd is only the
+        // fallback for the manual-launch case where `repo_root` is absent.
         let runtime_cwd = get_plugin_ids().initial_cwd;
         let cfg_repo_root = configuration.get("repo_root").map(PathBuf::from);
-        self.initial_cwd = match cfg_repo_root {
-            Some(p) if runtime_cwd.as_os_str().is_empty()
-                || runtime_cwd == PathBuf::from("/")
-                || runtime_cwd == PathBuf::from(".") =>
-            {
-                p
-            }
-            _ => runtime_cwd,
-        };
+        self.initial_cwd = cfg_repo_root.unwrap_or(runtime_cwd);
         self.session_name = std::env::var("ZELLIJ_SESSION_NAME").ok();
 
         request_permission(&[
