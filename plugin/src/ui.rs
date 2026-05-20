@@ -7,8 +7,6 @@ pub const GREEN: &str = "\x1b[32m";
 pub const RED: &str = "\x1b[31m";
 pub const CYAN: &str = "\x1b[36m";
 pub const YELLOW: &str = "\x1b[33m";
-pub const BG_CYAN: &str = "\x1b[46m";
-pub const FG_BLACK: &str = "\x1b[30m";
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -138,8 +136,12 @@ pub fn render_sidebar_list(
         return;
     }
 
+    // Two pieces of state live on different visual axes so they can't compete:
+    //   left gutter (▌ / blank) = navigation cursor
+    //   title color/weight       = active tab in Zellij (bold cyan)
+    //   right gutter (●/✓ / blank) = agent status
     let viewport = sidebar_viewport(selected, rows, items.len());
-    let content_width = cols.saturating_sub(2).max(1);
+    let content_width = cols.saturating_sub(4).max(1);
 
     writeln!(w).unwrap();
     for (idx, item) in items
@@ -158,19 +160,22 @@ pub fn render_sidebar_list(
         } else {
             None
         };
-        let color = status_color(status);
-        let inline_indicator_width = if active_row || selected_row || indicator.is_none() {
-            0
-        } else {
-            2
+        let status_gutter = match indicator {
+            Some(glyph) => format!(" {}{glyph}{RESET}", status_color(status)),
+            None => "  ".to_string(),
         };
-        let trailing_arrow_width = if active_row || selected_row { 1 } else { 0 };
-        let title = fit_text(
-            &item.display_name,
-            content_width
-                .saturating_sub(inline_indicator_width + trailing_arrow_width)
-                .max(1),
-        );
+        let cursor_gutter = if selected_row {
+            format!("{CYAN}▌{RESET} ")
+        } else {
+            "  ".to_string()
+        };
+
+        let title_text = fit_text(&item.display_name, content_width);
+        let title = if active_row {
+            format!("{BOLD}{CYAN}{title_text}{RESET}")
+        } else {
+            title_text
+        };
         let subtitle = match item.matched_branch.as_deref() {
             Some(branch) => fit_text(&format!("branch: {branch}"), content_width),
             None if !repo_name.is_empty() && item.tab_name == repo_name => {
@@ -179,23 +184,8 @@ pub fn render_sidebar_list(
             None => fit_text("user tab", content_width),
         };
 
-        if active_row && selected_row {
-            writeln!(w, " {BG_CYAN}{FG_BLACK}{title}{RESET}{CYAN}{RESET}").unwrap();
-            writeln!(w, "  {CYAN}{subtitle}{RESET}").unwrap();
-        } else if active_row {
-            writeln!(w, " {BOLD}{CYAN}{title}{RESET}{CYAN}{RESET}").unwrap();
-            writeln!(w, "  {CYAN}{subtitle}{RESET}").unwrap();
-        } else if selected_row {
-            writeln!(w, " {INVERSE}{title}{RESET}{RESET}").unwrap();
-            writeln!(w, "  {DIM}{subtitle}{RESET}").unwrap();
-        } else {
-            if let Some(indicator) = indicator {
-                writeln!(w, " {title} {color}{indicator}{RESET}").unwrap();
-            } else {
-                writeln!(w, " {title}").unwrap();
-            }
-            writeln!(w, "  {DIM}{subtitle}{RESET}").unwrap();
-        }
+        writeln!(w, "{cursor_gutter}{title}{status_gutter}").unwrap();
+        writeln!(w, "{cursor_gutter}{DIM}{subtitle}{RESET}").unwrap();
     }
 }
 
@@ -219,8 +209,12 @@ pub fn render_branch_list(w: &mut impl Write, branches: &[String], selected: usi
     };
 
     for (idx, branch) in branches.iter().enumerate().skip(start).take(max_visible) {
-        let cursor = if idx == selected { INVERSE } else { "" };
-        writeln!(w, "  {cursor} {branch} {RESET}").unwrap();
+        let cursor_gutter = if idx == selected {
+            format!("{CYAN}▌{RESET} ")
+        } else {
+            "  ".to_string()
+        };
+        writeln!(w, "{cursor_gutter}{branch}").unwrap();
     }
 }
 

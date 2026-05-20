@@ -4,12 +4,12 @@ expression: initial
 ---
 [?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
- [46m[30mfeat-a                                                                       [0m[36m[0m
-  [36mbranch: feat-a                                                                [0m
- feat-b                                                                        
-  [2mbranch: feat-b                                                                [0m
- feat-c                                                                        
-  [2mbranch: feat-c                                                                [0m
+[36m▌[0m [1m[36mfeat-a                                                                      [0m  
+[36m▌[0m [2mbranch: feat-a                                                              [0m
+  feat-b                                                                        
+  [2mbranch: feat-b                                                              [0m
+  feat-c                                                                        
+  [2mbranch: feat-c                                                              [0m
 
 
 

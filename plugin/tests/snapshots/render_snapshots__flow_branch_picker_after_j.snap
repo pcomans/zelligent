@@ -6,10 +6,10 @@ expression: picker_moved
 
   [1mSelect a branch:[0m
 
-   main [0m
-  [7m feat-a [0m
-   feat-b [0m
-   dev [0m
+  main
+[36m▌[0m feat-a
+  feat-b
+  dev
 
 
 

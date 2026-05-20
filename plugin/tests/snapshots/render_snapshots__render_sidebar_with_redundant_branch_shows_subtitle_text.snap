@@ -4,10 +4,10 @@ expression: "render_to_string(&s, 20, 80)"
 ---
 [?1049h[H[2J[1m[36m zelligent / myrepo ────────────────────────────────────────────────────────────[0m
 
- [7mfeature-a                                                                    [0m[0m
-  [2mbranch: feature-a                                                             [0m
- feature-cool                                                                  
-  [2mbranch: feature/cool                                                          [0m
+[36m▌[0m feature-a                                                                     
+[36m▌[0m [2mbranch: feature-a                                                           [0m
+  feature-cool                                                                  
+  [2mbranch: feature/cool                                                        [0m
 
 
 
