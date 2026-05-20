@@ -21,7 +21,17 @@ Use the CLI flow only. Do not use the interactive plugin UI.
 zelligent
 ```
 
-3. For each subagent task, choose a branch name and spawn a new tab:
+3. For each subagent task, choose a branch name and spawn a new tab, embedding the task description as a quoted argument to `claude`:
+
+```bash
+zelligent spawn <branch-name> 'claude "<task description for the subagent>"'
+```
+
+The third argument is a **single shell-quoted string** — the entire `claude "..."` invocation must be wrapped in outer single quotes so the spawn CLI passes it through verbatim. Without the outer quotes, the prompt is lost and the new tab launches a bare `claude` with no task.
+
+If the task description itself contains a single quote or `$`, escape it inside the outer single quotes (e.g. `'claude "it'\''s broken"'`).
+
+To launch a bare interactive `claude` with no task, omit the inner string:
 
 ```bash
 zelligent spawn <branch-name> claude
@@ -29,7 +39,7 @@ zelligent spawn <branch-name> claude
 
 4. Repeat step 3 for additional subagents, one branch per task.
 
-If `$ARGUMENTS` is provided, parse branch names and task descriptions from it and spawn accordingly.
+If `$ARGUMENTS` is provided, parse branch names and task descriptions from it and spawn accordingly, always using the quoted-prompt form above.
 
 ## Conventions
 
