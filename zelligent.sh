@@ -907,7 +907,11 @@ if [ "$1" = "remove" ]; then
   # gone but Zellij still holds the tab). Return the user to the tab they
   # came from after closing.
   if [ -n "$ZELLIJ" ] && command -v zellij &>/dev/null; then
-    ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | awk -F': ' 'NR==1 && $1=="name" { print $2 }')
+    # Capture the full remainder of the `name:` line — tab names can be
+    # user-renamed (Ctrl-t r) to include `: `, in which case `-F': '` would
+    # truncate at the second separator. Use `sed` to strip only the leading
+    # `name: ` and keep everything else verbatim.
+    ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | sed -n '1{s/^name: //p;}')
     if zellij action go-to-tab-name "$SESSION_NAME" 2>/dev/null; then
       zellij action close-tab 2>/dev/null || true
       if [ -n "$ORIGIN_TAB" ] && [ "$ORIGIN_TAB" != "$SESSION_NAME" ]; then
