@@ -879,11 +879,23 @@ fi
 
 # Handle remove subcommand
 if [ "$1" = "remove" ]; then
-  if [ -z "$2" ]; then
-    echo "Usage: zelligent remove <branch-name>"
+  shift
+  # --plugin-driven is set ONLY by the sidebar plugin's `fire_remove`. It
+  # tells us to skip the auto-close block below because the plugin will close
+  # the worktree's tab itself via `Action::CloseTabAndRefresh` once we
+  # return. An env var was tried first (see issue #121 review) but is too
+  # easy for a user to leak into their shell, silently breaking manual
+  # `zelligent remove`. A CLI flag has tighter blast radius.
+  PLUGIN_DRIVEN=
+  if [ "${1:-}" = "--plugin-driven" ]; then
+    PLUGIN_DRIVEN=1
+    shift
+  fi
+  if [ -z "${1:-}" ]; then
+    echo "Usage: zelligent remove [--plugin-driven] <branch-name>"
     exit 1
   fi
-  BRANCH_NAME=$2
+  BRANCH_NAME=$1
   SESSION_NAME="${BRANCH_NAME//\//-}"
   SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
   WORKTREE_PATH=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v branch="branch refs/heads/$BRANCH_NAME" '
@@ -918,15 +930,23 @@ if [ "$1" = "remove" ]; then
   # gone but Zellij still holds the tab). Return the user to the tab they
   # came from after closing.
   if [ -n "$ZELLIJ" ] && command -v zellij &>/dev/null; then
-    # Capture the full remainder of the `name:` line — tab names can be
-    # user-renamed (Ctrl-t r) to include `: `, in which case `-F': '` would
-    # truncate at the second separator. Use `sed` to strip only the leading
-    # `name: ` and keep everything else verbatim.
-    ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | sed -n '1{s/^name: //p;}')
-    if zellij action go-to-tab-name "$SESSION_NAME" 2>/dev/null; then
-      zellij action close-tab 2>/dev/null || true
-      if [ -n "$ORIGIN_TAB" ] && [ "$ORIGIN_TAB" != "$SESSION_NAME" ]; then
-        zellij action go-to-tab-name "$ORIGIN_TAB" 2>/dev/null || true
+    # When the plugin invoked us with `--plugin-driven`, it will close the
+    # tab itself via `Action::CloseTabAndRefresh` after this CLI returns.
+    # Doing it twice races: the CLI's `go-to-tab-name` + `close-tab` runs
+    # first, the plugin's `close_focused_tab` then lands on whatever Zellij
+    # focused next — potentially the user's main repo tab. Defer to the
+    # plugin in that case. See issue #121.
+    if [ -z "$PLUGIN_DRIVEN" ]; then
+      # Capture the full remainder of the `name:` line — tab names can be
+      # user-renamed (Ctrl-t r) to include `: `, in which case `-F': '` would
+      # truncate at the second separator. Use `sed` to strip only the leading
+      # `name: ` and keep everything else verbatim.
+      ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | sed -n '1{s/^name: //p;}')
+      if zellij action go-to-tab-name "$SESSION_NAME" 2>/dev/null; then
+        zellij action close-tab 2>/dev/null || true
+        if [ -n "$ORIGIN_TAB" ] && [ "$ORIGIN_TAB" != "$SESSION_NAME" ]; then
+          zellij action go-to-tab-name "$ORIGIN_TAB" 2>/dev/null || true
+        fi
       fi
     fi
   else
