@@ -522,7 +522,7 @@ cat > "$MOCK_NOARGS_BIN_NONE/git" <<'MOCK'
 /usr/bin/git "$@"
 MOCK
 chmod +x "$MOCK_NOARGS_BIN_NONE/git"
-out=$(HOME="$MOCK_NOARGS_HOME_NONE" ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN_NONE:/usr/bin:/bin" "$SCRIPT" 2>&1); code=$?
+out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" HOME="$MOCK_NOARGS_HOME_NONE" ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_NOARGS_BIN_NONE:/usr/bin:/bin" "$SCRIPT" 2>&1); code=$?
 check "no args without plugin exits non-zero" "1" "$code"
 contains "no args without plugin: suggests doctor" "zelligent doctor" "$out"
 rm -rf "$MOCK_NOARGS_BIN_NONE" "$MOCK_NOARGS_HOME_NONE"
@@ -936,6 +936,69 @@ git -C "$REPO_ROOT" branch -D "$TEST_WT_BRANCH" &>/dev/null || true
 out=$("$SCRIPT" remove "no-such-branch-$$" 2>&1); code=$?
 check "remove nonexistent branch exits non-zero" "1" "$code"
 contains "remove nonexistent branch: prints error" "no worktree found" "$out"
+
+# remove inside Zellij: closes the worktree's tab so the sidebar doesn't show
+# it as an orphaned "user tab"
+TEST_WT_INSIDE_BRANCH="test-inside-$$"
+TEST_WT_INSIDE_SESSION="${TEST_WT_INSIDE_BRANCH//\//-}"
+TEST_WT_INSIDE_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/$TEST_WT_INSIDE_BRANCH"
+register_cleanup_worktree "$TEST_WT_INSIDE_DIR" "$TEST_WT_INSIDE_BRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_INSIDE_BRANCH" "$TEST_WT_INSIDE_DIR" HEAD &>/dev/null
+# Mock zellij records its full argv to a log so we can verify the close
+MOCK_BIN_REMOVE=$(mktemp -d)
+REMOVE_LOG=$(mktemp)
+cat > "$MOCK_BIN_REMOVE/zellij" <<MOCK
+#!/bin/bash
+echo "zellij \$*" >> "$REMOVE_LOG"
+if [ "\$1" = "action" ] && [ "\$2" = "current-tab-info" ]; then
+  echo "name: origin-tab"
+  echo "id: 1"
+fi
+MOCK
+chmod +x "$MOCK_BIN_REMOVE/zellij"
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_REMOVE:$PATH" "$SCRIPT" remove "$TEST_WT_INSIDE_BRANCH" 2>&1); code=$?
+check "remove inside zellij exits 0" "0" "$code"
+contains "remove inside zellij: prints success" "Removed" "$out"
+ACTIONS=$(cat "$REMOVE_LOG")
+contains "remove inside zellij: queries current tab"  "action current-tab-info"                     "$ACTIONS"
+contains "remove inside zellij: switches to target"   "action go-to-tab-name $TEST_WT_INSIDE_SESSION" "$ACTIONS"
+contains "remove inside zellij: closes the tab"       "action close-tab"                              "$ACTIONS"
+contains "remove inside zellij: returns to origin"    "action go-to-tab-name origin-tab"             "$ACTIONS"
+excludes "remove inside zellij: no manual-close hint" "Close the '$TEST_WT_INSIDE_SESSION' tab manually" "$out"
+git -C "$REPO_ROOT" branch -D "$TEST_WT_INSIDE_BRANCH" &>/dev/null || true
+rm -rf "$MOCK_BIN_REMOVE" "$REMOVE_LOG"
+
+# remove inside Zellij: when go-to-tab-name fails (tab already gone), the
+# script should still exit 0 and skip the close-tab call instead of erroring
+TEST_WT_TABGONE_BRANCH="test-tabgone-$$"
+TEST_WT_TABGONE_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/$TEST_WT_TABGONE_BRANCH"
+register_cleanup_worktree "$TEST_WT_TABGONE_DIR" "$TEST_WT_TABGONE_BRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_TABGONE_BRANCH" "$TEST_WT_TABGONE_DIR" HEAD &>/dev/null
+MOCK_BIN_TABGONE=$(mktemp -d)
+TABGONE_LOG=$(mktemp)
+cat > "$MOCK_BIN_TABGONE/zellij" <<MOCK
+#!/bin/bash
+echo "zellij \$*" >> "$TABGONE_LOG"
+if [ "\$1" = "action" ] && [ "\$2" = "current-tab-info" ]; then
+  echo "name: origin-tab"
+  echo "id: 1"
+  exit 0
+fi
+# Simulate the worktree's tab having already been closed externally:
+# go-to-tab-name fails when the target tab no longer exists.
+if [ "\$1" = "action" ] && [ "\$2" = "go-to-tab-name" ] && [ "\$3" = "$TEST_WT_TABGONE_BRANCH" ]; then
+  exit 1
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN_TABGONE/zellij"
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_TABGONE:$PATH" "$SCRIPT" remove "$TEST_WT_TABGONE_BRANCH" 2>&1); code=$?
+check "remove inside zellij (tab already gone): still exits 0" "0" "$code"
+contains "remove inside zellij (tab already gone): prints success" "Removed" "$out"
+ACTIONS=$(cat "$TABGONE_LOG")
+excludes "remove inside zellij (tab already gone): skips close-tab" "action close-tab" "$ACTIONS"
+git -C "$REPO_ROOT" branch -D "$TEST_WT_TABGONE_BRANCH" &>/dev/null || true
+rm -rf "$MOCK_BIN_TABGONE" "$TABGONE_LOG"
 
 # remove refuses to act on non-zelligent-managed worktree (safety check)
 TEST_WT_UNMANAGED_BRANCH="test-unmanaged-$$"
