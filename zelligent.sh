@@ -902,7 +902,21 @@ if [ "$1" = "remove" ]; then
     exit 1
   fi
   echo "✅ Removed worktree for '$BRANCH_NAME'"
-  echo "ℹ️  Close the '$SESSION_NAME' tab manually if still open."
+  # When running inside Zellij, also close the worktree's tab so the sidebar
+  # plugin doesn't show an orphaned tab labeled "user tab" (the worktree is
+  # gone but Zellij still holds the tab). Return the user to the tab they
+  # came from after closing.
+  if [ -n "$ZELLIJ" ] && command -v zellij &>/dev/null; then
+    ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | awk -F': ' 'NR==1 && $1=="name" { print $2 }')
+    if zellij action go-to-tab-name "$SESSION_NAME" 2>/dev/null; then
+      zellij action close-tab 2>/dev/null || true
+      if [ -n "$ORIGIN_TAB" ] && [ "$ORIGIN_TAB" != "$SESSION_NAME" ]; then
+        zellij action go-to-tab-name "$ORIGIN_TAB" 2>/dev/null || true
+      fi
+    fi
+  else
+    echo "ℹ️  Close the '$SESSION_NAME' tab manually if still open."
+  fi
   echo "ℹ️  Local branch '$BRANCH_NAME' was not deleted."
   exit 0
 fi
