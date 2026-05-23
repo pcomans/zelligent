@@ -22,7 +22,8 @@
 2. **Validate ownership** — confirms the worktree is under `~/.zelligent/worktrees/<repo>/`
 3. **Run teardown hook** — if `.zelligent/teardown.sh` exists, runs it first. Aborts if it fails.
 4. **Remove worktree** — `git worktree remove <path>` (fails if uncommitted changes)
-5. **Print instructions** — reminds user to close the tab manually and notes the branch is preserved
+5. **Close the tab when running inside Zellij** — `zelligent` checks `$ZELLIJ`; if set, records the current tab via `zellij action current-tab-info`, switches to the worktree's tab via `zellij action go-to-tab-name <sanitized-branch>`, runs `zellij action close-tab`, then returns to the original tab. This stops the sidebar from showing the stale row as an orphaned "user tab". When invoked outside Zellij, prints a hint to close the tab manually instead.
+6. **Note the branch is preserved** — `git worktree remove` does not delete the local branch.
 
 ## Nuke (`zelligent nuke`)
 

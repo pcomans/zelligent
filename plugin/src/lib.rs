@@ -531,6 +531,14 @@ impl State {
                 let tab_name = Self::tab_name_for_branch(&branch);
                 self.agent_statuses.remove(&tab_name);
                 let return_to = self.tabs.iter().find(|t| t.active).map(|t| t.name.clone());
+                // Drop the closed tab from our cache up front. The host fires
+                // a TabUpdate after the close completes, but the worktree-list
+                // refresh that follows races against it: if the worktree list
+                // lands first, recompute_sidebar_items still sees the closed
+                // tab in self.tabs, fails to match it to any worktree, and
+                // surfaces it as an orphaned "user tab" until TabUpdate
+                // catches up.
+                self.tabs.retain(|t| t.name != tab_name);
                 return Action::CloseTabAndRefresh {
                     tab_name,
                     return_to,
@@ -1834,6 +1842,14 @@ mod tests {
                 tab_name: "feat-a".into(),
                 return_to: Some("zelligent".into()),
             }
+        );
+        // The closed tab must be removed from our cached tab list immediately,
+        // so that any sidebar recompute triggered by the worktree-list refresh
+        // doesn't mislabel it as an orphaned "user tab" before the host's
+        // TabUpdate event catches up.
+        assert!(
+            s.tabs.iter().all(|t| t.name != "feat-a"),
+            "closed tab 'feat-a' should be dropped from self.tabs cache"
         );
     }
 
