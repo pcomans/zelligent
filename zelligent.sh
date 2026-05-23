@@ -238,13 +238,24 @@ EOF
 
 pane_name_for_agent_cmd() {
   # Derive a short, stable pane title from the user's agent command.
-  # Defaults to "shell" for empty input or bare-shell invocations so the
-  # Zellij pane title doesn't fall back to the raw `bash -lc …` incantation.
+  # For shell-like invocations there's no useful command name to surface, so
+  # fall back to the tab/session name when one is provided (keeps the pane
+  # frame consistent with the sidebar and tab title) — or to literal "shell"
+  # as a last resort.
   local agent_cmd="$1"
+  local session_name="${2:-}"
   local first_word base
 
+  shell_fallback() {
+    if [ -n "$session_name" ]; then
+      echo "$session_name"
+    else
+      echo "shell"
+    fi
+  }
+
   if [ -z "$agent_cmd" ]; then
-    echo "shell"
+    shell_fallback
     return
   fi
 
@@ -254,7 +265,7 @@ pane_name_for_agent_cmd() {
 
   case "$base" in
     "" | sh | bash | zsh | fish | dash | ksh | tcsh)
-      echo "shell"
+      shell_fallback
       ;;
     *)
       echo "$base"
@@ -798,7 +809,7 @@ if [ -z "$1" ]; then
     STARTUP_AGENT_CMD="$SHELL"
     STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
     STARTUP_SIDEBAR=$(sidebar_plugin_content "$PLUGIN_PATH_STARTUP" "$STARTUP_AGENT_CMD" "$REPO_ROOT")
-    STARTUP_PANE_NAME=$(pane_name_for_agent_cmd "$STARTUP_AGENT_CMD")
+    STARTUP_PANE_NAME=$(pane_name_for_agent_cmd "$STARTUP_AGENT_CMD" "$REPO_NAME")
     # Startup tab body: bare shell+lazygit go directly into `tab { … }`
     # without an outer Vertical wrapper, so use the wrapped body form.
     STARTUP_CHILDREN=$(default_tab_body_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_PANE_NAME")
@@ -1031,7 +1042,7 @@ SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 AGENT_CMD_RENDER=$(build_agent_command_value "$AGENT_CMD" "$SESSION_NAME" "$REPO_ROOT" "$WORKTREE_PATH" "$SETUP_SCRIPT" "$NEW_WORKTREE")
 SESSION_AGENT_RENDER=$(build_agent_command_value "$AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
 SIDEBAR_RENDER=$(sidebar_plugin_content "$PLUGIN_PATH_LAYOUT" "$AGENT_CMD" "$REPO_ROOT")
-TAB_PANE_NAME=$(pane_name_for_agent_cmd "$AGENT_CMD")
+TAB_PANE_NAME=$(pane_name_for_agent_cmd "$AGENT_CMD" "$SESSION_NAME")
 TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$TAB_PANE_NAME")
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"

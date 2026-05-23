@@ -986,6 +986,9 @@ cleanup_test_branch
 contains "inside zellij: prints tab message"        "Opening tab"       "$out"
 contains "inside zellij: calls action new-tab"      "action new-tab"    "$out"
 excludes "inside zellij: layout has no tab wrapper" 'tab name='         "$out"
+# Bare-shell agent: pane should be named after the tab/session, not literal "shell"
+contains "inside zellij: shell agent pane uses session name" 'pane name="some-branch"' "$out"
+excludes "inside zellij: shell agent pane is not 'shell'"    'pane name="shell"'       "$out"
 
 # Outside Zellij, no existing repo session: create session named after repo
 register_managed_cleanup "$HOME" some-branch
