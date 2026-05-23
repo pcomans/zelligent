@@ -990,6 +990,34 @@ excludes "inside zellij: layout has no tab wrapper" 'tab name='         "$out"
 contains "inside zellij: shell agent pane uses session name" 'pane name="some-branch"' "$out"
 excludes "inside zellij: shell agent pane is not 'shell'"    'pane name="shell"'       "$out"
 
+# Regression: a non-shell agent command must still drive the pane name
+# (the `*) echo "$base" ;;` arm in pane_name_for_agent_cmd). With agent_cmd
+# `claude`, the pane should be named "claude", not "some-branch" or "shell".
+register_managed_cleanup "$HOME" some-branch
+out_claude=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch claude 2>&1)
+cleanup_test_branch
+contains "inside zellij: claude agent pane uses 'claude'"          'pane name="claude"'       "$out_claude"
+excludes "inside zellij: claude agent pane is not the session"     'pane name="some-branch"'  "$out_claude"
+excludes "inside zellij: claude agent pane is not 'shell'"         'pane name="shell"'        "$out_claude"
+
+# pane_name_for_agent_cmd unit tests: source the function from zelligent.sh
+# and exercise the empty-agent-cmd branches directly. Codex review flagged
+# that the end-to-end tests can't reach the `[ -z "$agent_cmd" ]` arm,
+# since `spawn` defaults agent_cmd to `$SHELL`.
+PANE_NAME_FN=$(
+  awk '/^pane_name_for_agent_cmd\(\) \{/,/^\}$/' "$SCRIPT"
+)
+result=$(bash -c "$PANE_NAME_FN; pane_name_for_agent_cmd '' ''" 2>&1)
+check "pane_name fn: empty agent+empty session falls back to 'shell'" "shell" "$result"
+result=$(bash -c "$PANE_NAME_FN; pane_name_for_agent_cmd '' 'my-branch'" 2>&1)
+check "pane_name fn: empty agent+session falls back to session name"  "my-branch" "$result"
+result=$(bash -c "$PANE_NAME_FN; pane_name_for_agent_cmd 'bash' ''" 2>&1)
+check "pane_name fn: bash agent+empty session falls back to 'shell'"  "shell" "$result"
+result=$(bash -c "$PANE_NAME_FN; pane_name_for_agent_cmd 'bash' 'my-branch'" 2>&1)
+check "pane_name fn: bash agent+session falls back to session name"   "my-branch" "$result"
+result=$(bash -c "$PANE_NAME_FN; pane_name_for_agent_cmd 'claude --foo' 'my-branch'" 2>&1)
+check "pane_name fn: non-shell agent always wins over session name"   "claude" "$result"
+
 # Outside Zellij, no existing repo session: create session named after repo
 register_managed_cleanup "$HOME" some-branch
 out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn some-branch 2>&1)
