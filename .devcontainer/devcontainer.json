@@ -9,7 +9,7 @@
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "mounts": [
-    "source=/run/user/1000/ssh-agent.socket,target=/ssh-auth-sock,type=bind,relabel=shared"
+    "source=${localEnv:HOST_SSH_AUTH_SOCK},target=/ssh-auth-sock,type=bind,relabel=shared"
   ],
   "containerEnv": {
     "SSH_AUTH_SOCK": "/ssh-auth-sock"
