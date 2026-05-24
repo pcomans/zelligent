@@ -12,14 +12,14 @@
     "source=/run/user/1000/ssh-agent.socket,target=/ssh-auth-sock,type=bind,relabel=shared"
   ],
   "containerEnv": {
-    "SSH_AUTH_SOCK": "/ssh-auth-sock",
-    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-    "DEEPSEEK_API_KEY": "${localEnv:DEEPSEEK_API_KEY}"
+    "SSH_AUTH_SOCK": "/ssh-auth-sock"
   },
   "runArgs": [
     "--userns=keep-id",
     "--dns=1.1.1.1",
-    "--dns=8.8.8.8"
+    "--dns=8.8.8.8",
+    "--env=ANTHROPIC_API_KEY",
+    "--env=DEEPSEEK_API_KEY"
   ],
   "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
 }
