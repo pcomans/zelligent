@@ -9,8 +9,7 @@
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "mounts": [
-    "source=/run/user/1000/ssh-agent.socket,target=/ssh-auth-sock,type=bind,relabel=shared",
-    "source=/home/philipp/.config/devpod/api-keys.env,target=/etc/devpod-keys.env,type=bind,relabel=shared,readonly"
+    "source=/run/user/1000/ssh-agent.socket,target=/ssh-auth-sock,type=bind,relabel=shared"
   ],
   "containerEnv": {
     "SSH_AUTH_SOCK": "/ssh-auth-sock"
@@ -20,5 +19,5 @@
     "--dns=1.1.1.1",
     "--dns=8.8.8.8"
   ],
-  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && grep -q devpod-keys.env ~/.bashrc || echo '[ -r /etc/devpod-keys.env ] && set -a && . /etc/devpod-keys.env && set +a' >> ~/.bashrc"
+  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
 }
