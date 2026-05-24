@@ -8,16 +8,9 @@
     },
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "mounts": [
-    "source=/run/user/1000/ssh-agent.socket,target=/ssh-auth-sock,type=bind,relabel=shared"
-  ],
-  "containerEnv": {
-    "SSH_AUTH_SOCK": "/ssh-auth-sock"
-  },
   "runArgs": [
-    "--userns=keep-id",
     "--dns=1.1.1.1",
     "--dns=8.8.8.8"
   ],
-  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
+  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && sudo apt-get update -qq && sudo apt-get install -y -qq pipx && pipx ensurepath && pipx install aider-chat"
 }
