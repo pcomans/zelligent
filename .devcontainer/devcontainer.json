@@ -12,7 +12,8 @@
     "source=${localEnv:SSH_AUTH_SOCK},target=/ssh-auth-sock,type=bind,relabel=shared"
   ],
   "containerEnv": {
-    "SSH_AUTH_SOCK": "/ssh-auth-sock"
+    "SSH_AUTH_SOCK": "/ssh-auth-sock",
+    "PATH": "${containerEnv:HOME}/.local/bin:${containerEnv:PATH}"
   },
   "runArgs": [
     "--security-opt=no-new-privileges",
