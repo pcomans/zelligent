@@ -1,0 +1,23 @@
+{
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind,relabel=private",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "targets": "wasm32-wasip1"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "mounts": [
+    "source=${localEnv:SSH_AUTH_SOCK},target=/ssh-auth-sock,type=bind,relabel=shared"
+  ],
+  "containerEnv": {
+    "SSH_AUTH_SOCK": "/ssh-auth-sock"
+  },
+  "runArgs": [
+    "--security-opt=no-new-privileges",
+    "--dns=1.1.1.1",
+    "--dns=8.8.8.8"
+  ],
+  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash"
+}
