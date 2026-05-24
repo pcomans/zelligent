@@ -1,6 +1,6 @@
 pub mod ui;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -55,9 +55,15 @@ pub enum Action {
     Spawn(String),
     Remove(String),
     /// Close a tab by name, optionally returning to another tab, then refresh.
+    /// `we_initiated` is true when the plugin itself drove the close (the
+    /// usual path from `handle_remove_result`). When false, the action was
+    /// somehow synthesised after the target's tab had already been removed
+    /// from `self.tabs` — we only run `close_focused_tab` if the tab is
+    /// still present, so we don't close an unrelated focused tab. See #121.
     CloseTabAndRefresh {
         tab_name: String,
         return_to: Option<String>,
+        we_initiated: bool,
     },
     SwitchToTab(String),
     Refresh,
@@ -94,6 +100,13 @@ pub struct State {
     pub agent_statuses: BTreeMap<String, AgentStatus>,
     /// Last rendered row count, used to map mouse clicks to sidebar rows.
     pub last_rows: usize,
+    /// Tab names we've asked the host to close. Until the host's `TabUpdate`
+    /// confirms the close, any incoming `tab_info` that still contains a
+    /// pending tab is stale (a focus-change event, etc.) and that tab must
+    /// be filtered out so the sidebar doesn't briefly resurrect it as an
+    /// orphan row. A set (rather than `Option`) so rapid sequential removes
+    /// don't lose the earlier pending names. See issue #121.
+    pub pending_close: BTreeSet<String>,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -268,8 +281,16 @@ impl State {
         let mut ctx = Self::ctx(CMD_REMOVE);
         ctx.insert("branch".to_string(), branch.to_string());
 
+        // `--plugin-driven` tells the CLI to skip its own tab-close block —
+        // the plugin will close the worktree's tab via
+        // `Action::CloseTabAndRefresh` after this command returns. Without
+        // the flag, both the CLI and the plugin would call `close-tab`, and
+        // the second close can land on the user's origin tab. A flag rather
+        // than an env var so a user who exported `ZELLIGENT_PLUGIN_DRIVEN=1`
+        // in their shell can't accidentally break manual `zelligent remove`.
+        // See issue #121.
         run_command_with_env_variables_and_cwd(
-            &[&self.zelligent_path, "remove", branch],
+            &[&self.zelligent_path, "remove", "--plugin-driven", branch],
             env,
             PathBuf::from(&self.repo_root),
             ctx,
@@ -285,9 +306,29 @@ impl State {
             Action::CloseTabAndRefresh {
                 tab_name,
                 return_to,
+                we_initiated,
             } => {
-                go_to_tab_name(tab_name);
-                close_focused_tab();
+                // Defense in depth against issue #121. Run the close when
+                // either:
+                //   - we_initiated is true (this action was emitted by
+                //     `handle_remove_result`, which optimistically retains
+                //     the tab out of `self.tabs` — so the still_present
+                //     check below would wrongly say "skip"), OR
+                //   - the tab is still in our cache (cosmetic safety net
+                //     for any future call site that constructs this action
+                //     without we_initiated=true and the tab still around).
+                // If neither, the tab was closed externally before we got
+                // here; running `close_focused_tab` would close whatever
+                // pane Zellij happens to be focused on, often the user's
+                // origin tab. The we_initiated flag is carried in the
+                // payload (not read from `self.pending_close`) so the
+                // close decision is decoupled from any subsequent state
+                // mutation between emission and execution.
+                let still_present = self.tabs.iter().any(|t| t.name == *tab_name);
+                if *we_initiated || still_present {
+                    go_to_tab_name(tab_name);
+                    close_focused_tab();
+                }
                 if let Some(name) = return_to {
                     go_to_tab_name(name);
                 }
@@ -473,6 +514,21 @@ impl State {
 
     pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) {
         let had_tabs = !self.tabs.is_empty();
+        // Race guard: for each tab we asked the host to close, filter it
+        // out of any incoming snapshot that still includes it. Once a
+        // `TabUpdate` arrives that no longer contains a pending tab, the
+        // close has propagated — remove it from the set. Iterate over a
+        // cloned key list because we may mutate the set in the loop.
+        // See issue #121.
+        let mut tab_info = tab_info;
+        let pending: Vec<String> = self.pending_close.iter().cloned().collect();
+        for name in pending {
+            if tab_info.iter().any(|t| t.name == name) {
+                tab_info.retain(|t| t.name != name);
+            } else {
+                self.pending_close.remove(&name);
+            }
+        }
         self.tabs = tab_info;
         self.recompute_sidebar_items();
 
@@ -539,9 +595,17 @@ impl State {
                 // surfaces it as an orphaned "user tab" until TabUpdate
                 // catches up.
                 self.tabs.retain(|t| t.name != tab_name);
+                // Pending-close handshake: any TabUpdate arriving before the
+                // host actually closes the tab (e.g. a focus-change event
+                // fired by `go_to_tab_name` below) would re-introduce the
+                // closed tab via the `self.tabs = tab_info` assignment in
+                // `handle_tab_update`. Marking pending_close lets that
+                // handler filter the stale entry until the close lands.
+                self.pending_close.insert(tab_name.clone());
                 return Action::CloseTabAndRefresh {
                     tab_name,
                     return_to,
+                    we_initiated: true,
                 };
             }
         } else {
@@ -1841,6 +1905,7 @@ mod tests {
             Action::CloseTabAndRefresh {
                 tab_name: "feat-a".into(),
                 return_to: Some("zelligent".into()),
+                we_initiated: true,
             }
         );
         // The closed tab must be removed from our cached tab list immediately,
@@ -1851,6 +1916,99 @@ mod tests {
             s.tabs.iter().all(|t| t.name != "feat-a"),
             "closed tab 'feat-a' should be dropped from self.tabs cache"
         );
+        // Pending-close handshake: an inbound TabUpdate arriving before the
+        // close propagates must be filtered. The mark stays set until that
+        // happens.
+        assert!(
+            s.pending_close.contains("feat-a"),
+            "pending_close should be marked so handle_tab_update filters stale snapshots"
+        );
+    }
+
+    #[test]
+    fn tab_update_filters_pending_close_when_tab_still_present() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("zelligent", true)];
+        s.pending_close.insert("feat-a".into());
+        // Simulate a stale TabUpdate (e.g. fired by `go_to_tab_name` before
+        // `close_focused_tab` lands) that still contains the closing tab.
+        s.handle_tab_update(vec![
+            make_tab("zelligent", false),
+            make_tab("feat-a", true),
+        ]);
+        assert!(
+            s.tabs.iter().all(|t| t.name != "feat-a"),
+            "pending_close target must be filtered out of stale TabUpdate snapshots"
+        );
+        assert!(
+            s.pending_close.contains("feat-a"),
+            "pending_close stays set until a TabUpdate confirms the close"
+        );
+    }
+
+    #[test]
+    fn tab_update_clears_pending_close_when_tab_is_gone() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        s.pending_close.insert("feat-a".into());
+        // TabUpdate confirming the close: the pending tab is no longer in
+        // the snapshot. handle_tab_update should accept the snapshot
+        // verbatim AND clear pending_close so a future tab with the same
+        // name (after re-spawn) isn't accidentally filtered.
+        s.handle_tab_update(vec![make_tab("zelligent", true)]);
+        assert!(
+            s.pending_close.is_empty(),
+            "pending_close must clear once the host confirms the close"
+        );
+        assert_eq!(s.tabs.len(), 1, "snapshot is accepted as-is");
+    }
+
+    // Codex review of PR #122 flagged rapid sequential removes: the old
+    // `Option<String>` lost the earlier pending name when the second
+    // remove fired. With a `BTreeSet` both stay pending, both are
+    // filtered out of stale snapshots, and both clear independently as
+    // their respective `TabUpdate`s land.
+    #[test]
+    fn tab_update_handles_two_concurrent_pending_closes() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("zelligent", true)];
+        // Two removes in flight: feat-a (close already propagated, not in
+        // the incoming snapshot) and feat-b (close hasn't landed yet,
+        // still in the snapshot).
+        s.pending_close.insert("feat-a".into());
+        s.pending_close.insert("feat-b".into());
+        s.handle_tab_update(vec![
+            make_tab("zelligent", true),
+            make_tab("feat-b", false),
+        ]);
+        assert!(
+            !s.pending_close.contains("feat-a"),
+            "feat-a clears once its close lands"
+        );
+        assert!(
+            s.pending_close.contains("feat-b"),
+            "feat-b stays pending because the stale snapshot still contains it"
+        );
+        assert!(
+            s.tabs.iter().all(|t| t.name != "feat-b"),
+            "feat-b is filtered out of the stale snapshot"
+        );
+    }
+
+    #[test]
+    fn tab_update_pending_close_does_not_filter_other_tabs() {
+        let mut s = State::default();
+        s.pending_close.insert("feat-a".into());
+        // A TabUpdate with feat-a still present should drop ONLY feat-a,
+        // not any other tab in the snapshot.
+        s.handle_tab_update(vec![
+            make_tab("zelligent", true),
+            make_tab("feat-a", false),
+            make_tab("feat-b", false),
+        ]);
+        assert_eq!(s.tabs.len(), 2);
+        assert!(s.tabs.iter().any(|t| t.name == "zelligent"));
+        assert!(s.tabs.iter().any(|t| t.name == "feat-b"));
     }
 
     #[test]
@@ -2521,6 +2679,7 @@ mod tests {
             Action::CloseTabAndRefresh {
                 tab_name: "tab".into(),
                 return_to: Some("other".into()),
+                we_initiated: true,
             },
             Action::SwitchToTab("tab".into()),
             Action::Refresh,
@@ -2565,14 +2724,17 @@ mod tests {
         let action = Action::CloseTabAndRefresh {
             tab_name: "feat-a".into(),
             return_to: Some("zelligent".into()),
+            we_initiated: true,
         };
         if let Action::CloseTabAndRefresh {
             tab_name,
             return_to,
+            we_initiated,
         } = &action
         {
             assert_eq!(tab_name, "feat-a");
             assert_eq!(return_to, &Some("zelligent".into()));
+            assert!(*we_initiated);
         } else {
             panic!("expected Action::CloseTabAndRefresh");
         }
