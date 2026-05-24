@@ -968,6 +968,58 @@ excludes "remove inside zellij: no manual-close hint" "Close the '$TEST_WT_INSID
 git -C "$REPO_ROOT" branch -D "$TEST_WT_INSIDE_BRANCH" &>/dev/null || true
 rm -rf "$MOCK_BIN_REMOVE" "$REMOVE_LOG"
 
+# remove inside Zellij with --plugin-driven flag: CLI must SKIP its own
+# tab-close action sequence and defer to the plugin (which will emit
+# Action::CloseTabAndRefresh). Issue #121.
+TEST_WT_PLUGINDRIVEN_BRANCH="test-plugindriven-$$"
+TEST_WT_PLUGINDRIVEN_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/$TEST_WT_PLUGINDRIVEN_BRANCH"
+register_cleanup_worktree "$TEST_WT_PLUGINDRIVEN_DIR" "$TEST_WT_PLUGINDRIVEN_BRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_PLUGINDRIVEN_BRANCH" "$TEST_WT_PLUGINDRIVEN_DIR" HEAD &>/dev/null
+MOCK_BIN_PLUGINDRIVEN=$(mktemp -d)
+PLUGINDRIVEN_LOG=$(mktemp)
+cat > "$MOCK_BIN_PLUGINDRIVEN/zellij" <<MOCK
+#!/bin/bash
+echo "zellij \$*" >> "$PLUGINDRIVEN_LOG"
+exit 0
+MOCK
+chmod +x "$MOCK_BIN_PLUGINDRIVEN/zellij"
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_PLUGINDRIVEN:$PATH" "$SCRIPT" remove --plugin-driven "$TEST_WT_PLUGINDRIVEN_BRANCH" 2>&1); code=$?
+check "remove plugin-driven exits 0" "0" "$code"
+contains "remove plugin-driven: prints success" "Removed" "$out"
+ACTIONS=$(cat "$PLUGINDRIVEN_LOG")
+excludes "remove plugin-driven: skips current-tab-info" "action current-tab-info" "$ACTIONS"
+excludes "remove plugin-driven: skips go-to-tab-name"   "action go-to-tab-name"   "$ACTIONS"
+excludes "remove plugin-driven: skips close-tab"        "action close-tab"        "$ACTIONS"
+excludes "remove plugin-driven: no manual-close hint"   "Close the '$TEST_WT_PLUGINDRIVEN_BRANCH' tab manually" "$out"
+git -C "$REPO_ROOT" branch -D "$TEST_WT_PLUGINDRIVEN_BRANCH" &>/dev/null || true
+rm -rf "$MOCK_BIN_PLUGINDRIVEN" "$PLUGINDRIVEN_LOG"
+
+# remove with a stray env var ZELLIGENT_PLUGIN_DRIVEN=1 must NOT skip the
+# auto-close (the env var is meaningless to the CLI; only the explicit
+# --plugin-driven flag matters). Guards against a user accidentally
+# exporting the var in their shell. Issue #121 / PR #122 review.
+TEST_WT_ENVNOOP_BRANCH="test-envnoop-$$"
+TEST_WT_ENVNOOP_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/$TEST_WT_ENVNOOP_BRANCH"
+register_cleanup_worktree "$TEST_WT_ENVNOOP_DIR" "$TEST_WT_ENVNOOP_BRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_ENVNOOP_BRANCH" "$TEST_WT_ENVNOOP_DIR" HEAD &>/dev/null
+MOCK_BIN_ENVNOOP=$(mktemp -d)
+ENVNOOP_LOG=$(mktemp)
+cat > "$MOCK_BIN_ENVNOOP/zellij" <<MOCK
+#!/bin/bash
+echo "zellij \$*" >> "$ENVNOOP_LOG"
+if [ "\$1" = "action" ] && [ "\$2" = "current-tab-info" ]; then
+  echo "name: origin-tab"
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN_ENVNOOP/zellij"
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake ZELLIGENT_PLUGIN_DRIVEN=1 PATH="$MOCK_BIN_ENVNOOP:$PATH" "$SCRIPT" remove "$TEST_WT_ENVNOOP_BRANCH" 2>&1); code=$?
+check "remove with stray env var: exits 0" "0" "$code"
+ACTIONS=$(cat "$ENVNOOP_LOG")
+contains "remove with stray env var: still closes the tab" "action close-tab" "$ACTIONS"
+git -C "$REPO_ROOT" branch -D "$TEST_WT_ENVNOOP_BRANCH" &>/dev/null || true
+rm -rf "$MOCK_BIN_ENVNOOP" "$ENVNOOP_LOG"
+
 # remove inside Zellij: when go-to-tab-name fails (tab already gone), the
 # script should still exit 0 and skip the close-tab call instead of erroring
 TEST_WT_TABGONE_BRANCH="test-tabgone-$$"
