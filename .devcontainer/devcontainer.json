@@ -8,9 +8,6 @@
     },
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "containerEnv": {
-    "PATH": "${containerEnv:HOME}/.local/bin:${containerEnv:PATH}"
-  },
   "runArgs": [
     "--security-opt=no-new-privileges",
     "--dns=1.1.1.1",
