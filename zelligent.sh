@@ -439,7 +439,7 @@ build_agent_command_value() {
   local is_new_worktree="$6"
   local command
 
-  command="export ZELLIGENT_TAB_NAME=$(shell_quote "$session_name"); "
+  command="export ZELLIGENT_SPAWN_DEPTH=$(( ${ZELLIGENT_SPAWN_DEPTH:-0} + 1 )); export ZELLIGENT_TAB_NAME=$(shell_quote "$session_name"); "
   if [ "$is_new_worktree" = "true" ] && [ -f "$setup_script" ]; then
     command="${command}bash $(shell_quote "$setup_script") $(shell_quote "$repo_root") $(shell_quote "$worktree_path") || { echo 'Setup failed (exit '\$?'). Press Enter to close.'; read; exit 1; }; "
   fi
@@ -493,7 +493,16 @@ usage() {
 }
 
 if [ "$1" = "--version" ]; then
-  echo "zelligent __COMMIT_SHA__"
+  VERSION="zelligent __COMMIT_SHA__"
+  if [ "$VERSION" != "${VERSION%__COMMIT_SHA__*}" ]; then
+    SHA=$(git -C "$(dirname "$0")" rev-parse --short HEAD 2>/dev/null)
+    if [ -n "$SHA" ]; then
+      VERSION="zelligent $SHA"
+    else
+      VERSION="zelligent (dev build, unknown commit)"
+    fi
+  fi
+  echo "$VERSION"
   exit 0
 fi
 
@@ -722,6 +731,10 @@ if [ "$1" = "nuke" ]; then
     echo "Error: cannot nuke from inside a Zellij session. Detach first." >&2
     exit 1
   fi
+  if [ ! -d "$HOME/.zelligent/worktrees/$REPO_NAME" ]; then
+    echo "Error: No zelligent worktrees found for '$REPO_NAME'. Refusing to nuke — this doesn't appear to be a zelligent-managed session." >&2
+    exit 1
+  fi
   # Kill the session if it's currently active
   zellij delete-session --force "$REPO_NAME" 2>/dev/null || true
   # Also kill any lingering server/client processes for this session.
@@ -942,10 +955,10 @@ if [ "$1" = "remove" ]; then
       # truncate at the second separator. Use `sed` to strip only the leading
       # `name: ` and keep everything else verbatim.
       ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | sed -n '1{s/^name: //p;}')
-      if zellij action go-to-tab-name "$SESSION_NAME" 2>/dev/null; then
-        zellij action close-tab 2>/dev/null || true
+      if zellij action go-to-tab-name "$SESSION_NAME" >/dev/null 2>/dev/null; then
+        zellij action close-tab >/dev/null 2>/dev/null || true
         if [ -n "$ORIGIN_TAB" ] && [ "$ORIGIN_TAB" != "$SESSION_NAME" ]; then
-          zellij action go-to-tab-name "$ORIGIN_TAB" 2>/dev/null || true
+          zellij action go-to-tab-name "$ORIGIN_TAB" >/dev/null 2>/dev/null || true
         fi
       fi
     fi
@@ -996,9 +1009,24 @@ if ! command -v zellij &>/dev/null; then
   exit 1
 fi
 
+# Recursion guard: refuse to spawn from within an already-spawned agent.
+_DEPTH_MAX="${ZELLIGENT_SPAWN_DEPTH_MAX:-1}"
+_DEPTH="${ZELLIGENT_SPAWN_DEPTH:-0}"
+if [ "$_DEPTH" -ge "$_DEPTH_MAX" ]; then
+  echo "Error: spawn depth limit reached (depth=$_DEPTH, max=$_DEPTH_MAX)." >&2
+  echo "       Refusing to spawn from within a spawned session to prevent exponential fan-out." >&2
+  echo "       Set ZELLIGENT_SPAWN_DEPTH_MAX higher if you need deeper nesting." >&2
+  exit 1
+fi
+
 SESSION_NAME="${BRANCH_NAME//\//-}"
 # Strip any characters outside the safe set for session/tab names
 SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
+if [ -z "$SESSION_NAME" ]; then
+  echo "Error: branch name '$BRANCH_NAME' sanitizes to an empty session/tab name." >&2
+  echo "       Use a name containing at least one [a-zA-Z0-9_-] character." >&2
+  exit 1
+fi
 
 # Pick the base branch for the new worktree.
 #

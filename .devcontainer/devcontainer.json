@@ -1,0 +1,17 @@
+{
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind,relabel=private",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "targets": "wasm32-wasip1"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {}
+  },
+  "runArgs": [
+    "--dns=1.1.1.1",
+    "--dns=8.8.8.8"
+  ],
+  "postCreateCommand": "bash -c 'source /usr/local/share/nvm/nvm.sh && curl -fsSL https://claude.ai/install.sh | bash && npm install -g opencode-ai@latest'"
+}

@@ -491,6 +491,7 @@ echo "Version and help:"
 out=$("$SCRIPT" --version 2>&1); code=$?
 check "--version exits 0" "0" "$code"
 contains "--version prints zelligent" "zelligent" "$out"
+excludes "--version does not contain placeholder" "__COMMIT_SHA__" "$out"
 
 out=$("$SCRIPT" --help 2>&1); code=$?
 check "--help exits 0" "0" "$code"
@@ -680,6 +681,7 @@ exit 0
 MOCK
 chmod +x "$MOCK_NUKE/zellij" "$MOCK_NUKE/ps" "$MOCK_NUKE/kill" "$MOCK_NUKE/sleep"
 FAKE_HOME=$(mktemp -d)
+mkdir -p "$FAKE_HOME/.zelligent/worktrees/$REPO_NAME"
 out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME" XDG_CACHE_HOME="$FAKE_HOME/.cache" TMPDIR="$FAKE_HOME/tmp" PATH="$MOCK_NUKE:$PATH" "$SCRIPT" nuke 2>&1); code=$?
 check "nuke no session exits 0" "0" "$code"
 contains "nuke no session prints success" "start fresh" "$out"
@@ -706,6 +708,7 @@ exit 0
 MOCK
 chmod +x "$MOCK_NUKE2/zellij" "$MOCK_NUKE2/ps" "$MOCK_NUKE2/kill" "$MOCK_NUKE2/sleep"
 FAKE_HOME2=$(mktemp -d)
+mkdir -p "$FAKE_HOME2/.zelligent/worktrees/$REPO_NAME"
 out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME2" XDG_CACHE_HOME="$FAKE_HOME2/.cache" TMPDIR="$FAKE_HOME2/tmp" PATH="$MOCK_NUKE2:$PATH" "$SCRIPT" nuke 2>&1); code=$?
 check "nuke existing session exits 0" "0" "$code"
 contains "nuke existing session prints success" "start fresh" "$out"
@@ -716,6 +719,25 @@ NONGIT_NUKE=$(mktemp -d)
 out=$(cd "$NONGIT_NUKE" && "$SCRIPT" nuke 2>&1); code=$?
 check "nuke non-git dir exits non-zero" "1" "$code"
 rm -rf "$NONGIT_NUKE"
+
+# nuke without worktrees dir: refuses (safety guard for non-zelligent-managed repos)
+MOCK_NUKE_NO_WT=$(mktemp -d)
+cat > "$MOCK_NUKE_NO_WT/zellij" <<'MOCK'
+#!/bin/bash
+echo "unexpected zellij call: $*" >&2
+exit 1
+MOCK
+cat > "$MOCK_NUKE_NO_WT/ps" <<'MOCK'
+#!/bin/bash
+echo ""
+MOCK
+chmod +x "$MOCK_NUKE_NO_WT/zellij" "$MOCK_NUKE_NO_WT/ps"
+FAKE_HOME_NO_WT=$(mktemp -d)
+# Make the fake home's worktrees dir NOT exist
+out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME_NO_WT" PATH="$MOCK_NUKE_NO_WT:$PATH" "$SCRIPT" nuke 2>&1); code=$?
+check "nuke no worktrees dir exits non-zero" "1" "$code"
+contains "nuke no worktrees dir: prints refusal" "doesn't appear to be a zelligent-managed session" "$out"
+rm -rf "$MOCK_NUKE_NO_WT" "$FAKE_HOME_NO_WT"
 
 # --help lists nuke
 out=$("$SCRIPT" --help 2>&1)
@@ -1052,6 +1074,48 @@ excludes "remove inside zellij (tab already gone): skips close-tab" "action clos
 git -C "$REPO_ROOT" branch -D "$TEST_WT_TABGONE_BRANCH" &>/dev/null || true
 rm -rf "$MOCK_BIN_TABGONE" "$TABGONE_LOG"
 
+# remove inside Zellij: stray stdout from Zellij actions must not leak (Bug #118)
+TEST_WT_STRAY_BRANCH="test-stray-$$"
+TEST_WT_STRAY_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/$TEST_WT_STRAY_BRANCH"
+register_cleanup_worktree "$TEST_WT_STRAY_DIR" "$TEST_WT_STRAY_BRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_STRAY_BRANCH" "$TEST_WT_STRAY_DIR" HEAD &>/dev/null
+MOCK_BIN_STRAY=$(mktemp -d)
+cat > "$MOCK_BIN_STRAY/zellij" <<MOCK
+#!/bin/bash
+if [ "\$1" = "action" ] && [ "\$2" = "current-tab-info" ]; then
+  echo "name: origin-tab"
+  echo "id: 1"
+  exit 0
+fi
+# Real Zellij outputs stray numbers like "5" and "0" on go-to-tab-name and close-tab
+if [ "\$1" = "action" ] && [ "\$2" = "go-to-tab-name" ]; then
+  echo "5"
+  exit 0
+fi
+if [ "\$1" = "action" ] && [ "\$2" = "close-tab" ]; then
+  echo "0"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN_STRAY/zellij"
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_STRAY:$PATH" "$SCRIPT" remove "$TEST_WT_STRAY_BRANCH" 2>&1); code=$?
+check "remove stray stdout: exits 0" "0" "$code"
+contains "remove stray stdout: prints success" "Removed" "$out"
+# Verify no lines are exactly "5" or "0" (stray numbers leaked by zellij actions)
+if echo "$out" | grep -qx '5'; then
+  fail "remove stray stdout: stray '5' from go-to-tab-name leaked"
+else
+  pass "remove stray stdout: no stray '5' from go-to-tab-name"
+fi
+if echo "$out" | grep -qx '0'; then
+  fail "remove stray stdout: stray '0' from close-tab leaked"
+else
+  pass "remove stray stdout: no stray '0' from close-tab"
+fi
+git -C "$REPO_ROOT" branch -D "$TEST_WT_STRAY_BRANCH" &>/dev/null || true
+rm -rf "$MOCK_BIN_STRAY"
+
 # remove refuses to act on non-zelligent-managed worktree (safety check)
 TEST_WT_UNMANAGED_BRANCH="test-unmanaged-$$"
 TEST_WT_UNMANAGED_DIR=$(mktemp -d)
@@ -1068,7 +1132,8 @@ git -C "$REPO_ROOT" branch -D "$TEST_WT_UNMANAGED_BRANCH" &>/dev/null || true
 # list-branches
 out=$("$SCRIPT" list-branches 2>&1); code=$?
 check "list-branches exits 0" "0" "$code"
-contains "list-branches includes main or master" "main" "$out"
+current_branch=$(git -C "$REPO_ROOT" symbolic-ref --short HEAD)
+contains "list-branches shows current branch ($current_branch)" "$current_branch" "$out"
 
 # ── Launch mode selection ─────────────────────────────────────────────────────
 echo "Launch mode:"
@@ -1089,9 +1154,10 @@ chmod +x "$MOCK_BIN/zellij" "$MOCK_BIN/lazygit"
 
 # Shared cleanup for worktrees created during launch-mode tests
 cleanup_test_branch() {
+  local branch="${1:-some-branch}"
   git -C "$REPO_ROOT" worktree remove --force \
-    "$HOME/.zelligent/worktrees/$REPO_NAME/some-branch" &>/dev/null || true
-  git -C "$REPO_ROOT" branch -D some-branch &>/dev/null || true
+    "$HOME/.zelligent/worktrees/$REPO_NAME/$branch" &>/dev/null || true
+  git -C "$REPO_ROOT" branch -D "$branch" &>/dev/null || true
 }
 
 # Inside Zellij: new-tab, no tab wrapper in layout
@@ -1196,6 +1262,28 @@ cleanup_test_branch
 check    "tty guard: refuses spawn outside zellij without a tty" "1" "$code"
 contains "tty guard: prints friendly error" "must run from a TTY" "$out"
 
+# Recursion guard: spawn with ZELLIGENT_SPAWN_DEPTH=1 should be refused
+out=$(ZELLIJ=1 ZELLIGENT_SPAWN_DEPTH=1 PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn recursion-guard-test-branch 2>&1); code=$?
+# Cleanup in case worktree was created despite error (early guard should prevent it)
+cleanup_test_branch recursion-guard-test-branch
+check    "recursion guard: refuses spawn when depth limit reached" "1" "$code"
+contains "recursion guard: prints error about depth limit" "spawn depth limit reached" "$out"
+
+# Recursion guard: spawn with ZELLIGENT_SPAWN_DEPTH=0 should work normally
+out=$(ZELLIJ=1 ZELLIGENT_SPAWN_DEPTH=0 PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn recursion-guard-depth-zero-branch 2>&1); code=$?
+cleanup_test_branch recursion-guard-depth-zero-branch
+check    "recursion guard: allows spawn at depth 0" "0" "$code"
+
+# Recursion guard: depth increment appears in rendered layout
+out=$(ZELLIJ=1 ZELLIGENT_SPAWN_DEPTH=0 PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn recursion-guard-depth-zero-branch 2>&1)
+cleanup_test_branch recursion-guard-depth-zero-branch
+contains "recursion guard: layout exports ZELLIGENT_SPAWN_DEPTH=1" "ZELLIGENT_SPAWN_DEPTH=1" "$out"
+
+# Spawn with branch name that sanitizes to empty session name: must refuse (Bug #113)
+out=$(ZELLIJ=1 PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn '!!' 2>&1); code=$?
+check "spawn empty sanitized branch exits non-zero" "1" "$code"
+contains "spawn empty sanitized branch: prints error" "sanitizes to an empty" "$out"
+
 rm -rf "$MOCK_BIN" "$MOCK_BIN2"
 
 # ── Integration: layout loading via background session ────────────────────────
@@ -1205,7 +1293,12 @@ if ! command -v zellij &>/dev/null; then
   echo "  ⚠️  Zellij not found, skipping integration tests"
 else
   TEST_SESSION="zelligent-test-$$"
+  # Clean up stale state from previous failed runs
+  git -C "$REPO_ROOT" worktree remove --force \
+    "$HOME/.zelligent/worktrees/$REPO_NAME/integration-test-branch" &>/dev/null || true
+  git -C "$REPO_ROOT" branch -D integration-test-branch &>/dev/null || true
   zellij attach --create-background "$TEST_SESSION" 2>/dev/null
+  sleep 0.5
 
   # Mock lazygit so the script can pass the dependency check
   MOCK_BIN_INT=$(mktemp -d)
@@ -1217,9 +1310,12 @@ MOCK
   # Call the script in inside-Zellij mode; it will call `zellij action new-tab`
   # targeting the background test session via ZELLIJ_SESSION_NAME
   register_managed_cleanup "$HOME" integration-test-branch
-  int_out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME="$TEST_SESSION" PATH="$MOCK_BIN_INT:$PATH" \
+  int_out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME="$TEST_SESSION" ZELLIGENT_PLUGIN_SRC="" PATH="$MOCK_BIN_INT:$PATH" \
     "$SCRIPT" spawn integration-test-branch 2>&1)
   int_code=$?
+  if [ "$int_code" -ne 0 ]; then
+    echo "  DEBUG integration spawn output: $int_out" >&2
+  fi
   check "script exits 0 (integration)" "0" "$int_code"
 
   git -C "$REPO_ROOT" worktree remove --force \
