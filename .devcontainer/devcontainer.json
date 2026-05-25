@@ -6,11 +6,12 @@
     "ghcr.io/devcontainers/features/rust:1": {
       "targets": "wasm32-wasip1"
     },
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {}
   },
   "runArgs": [
     "--dns=1.1.1.1",
     "--dns=8.8.8.8"
   ],
-  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && curl -LsSf https://aider.chat/install.sh | sh"
+  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && npm install -g opencode-ai@latest"
 }
