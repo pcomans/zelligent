@@ -510,6 +510,9 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.branches = parse_branches(&output);
+        if self.mode == Mode::SelectBranch {
+            self.filtered_branches = self.branches.clone();
+        }
     }
 
     pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) {
@@ -739,6 +742,7 @@ impl State {
                     self.filtered_branches = self.branches.clone();
                     self.mode = Mode::SelectBranch;
                     self.selected_index = 0;
+                    return Action::FetchWorktreesAndBranches;
                 }
                 BareKey::Char('i') => {
                     self.mode = Mode::InputBranch;
@@ -1104,7 +1108,11 @@ impl ZellijPlugin for State {
             }
             Event::TabUpdate(tab_info) => {
                 self.handle_tab_update(tab_info);
-                Action::None
+                if !self.repo_root.is_empty() {
+                    Action::FetchWorktreesAndBranches
+                } else {
+                    Action::None
+                }
             }
             Event::Key(key) => match self.mode {
                 Mode::Loading => Action::None,
@@ -1450,7 +1458,8 @@ mod tests {
     fn browse_n_switches_to_select_branch() {
         let mut s = state_with_sidebar();
         s.selected_index = 2;
-        s.handle_key_browse(&key(BareKey::Char('n')));
+        let action = s.handle_key_browse(&key(BareKey::Char('n')));
+        assert_eq!(action, Action::FetchWorktreesAndBranches);
         assert_eq!(s.mode, Mode::SelectBranch);
         assert_eq!(s.selected_index, 0);
         assert_eq!(s.filtered_branches, s.branches);
