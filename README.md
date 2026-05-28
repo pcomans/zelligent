@@ -1,17 +1,6 @@
-```
-  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄
- █▀▀▀▀▀██▀       ██ ██                      █▄
-      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄
-    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██
-  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██
- ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██
-                             ██
-                           ▀▀▀
-```
-
 Zelligent runs AI coding agents in isolated git worktrees, each in its own [Zellij](https://zellij.dev) tab.
 
-[![Zelligent demo](https://img.youtube.com/vi/I3KFKoZpPTs/hqdefault.jpg)](https://youtu.be/I3KFKoZpPTs)
+[![Zelligent demo — click to watch on YouTube](./demo.gif)](https://youtu.be/I3KFKoZpPTs)
 
 You give it a branch name and an agent command. It creates a worktree, opens a new tab with a persistent sidebar on the left and an agent plus [lazygit](https://github.com/jesseduffield/lazygit) on the right. When you're done, it cleans up the worktree.
 
