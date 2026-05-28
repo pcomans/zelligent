@@ -529,6 +529,13 @@ impl State {
                 self.pending_close.remove(&name);
             }
         }
+
+        // Snapshot the previous tab names before we overwrite. Used below to
+        // detect which tabs in the new snapshot are *newly appeared* — only
+        // those should drive a worktree refresh.
+        let previously_known: BTreeSet<String> =
+            self.tabs.iter().map(|t| t.name.clone()).collect();
+
         self.tabs = tab_info;
         self.recompute_sidebar_items();
 
@@ -538,20 +545,29 @@ impl State {
             self.select_active_sidebar_item();
         }
 
-        // Refresh worktrees if any tab in the new snapshot is unmatched. This
-        // self-heals the "user tab" mislabel that appears when our cached
-        // `self.worktrees` is stale relative to the actual tabs — happens when
-        // a worktree is created out-of-band (e.g. agent runs `zelligent spawn`
-        // via bash) or when our last refresh raced with a spawn and missed the
-        // new entry.
-        let has_unmatched = self.tabs.iter().any(|t| {
-            t.name != self.repo_name
-                && !self
-                    .worktrees
-                    .iter()
-                    .any(|wt| Self::tab_name_for_branch(&wt.branch) == t.name)
+        // Refresh worktrees only when a *newly-appeared* tab has no matching
+        // worktree. This self-heals the "user tab" mislabel that appears when
+        // our cached `self.worktrees` is stale relative to the actual tabs —
+        // happens when a worktree is created out-of-band (e.g. agent runs
+        // `zelligent spawn` via bash) or when the last refresh raced with a
+        // spawn and missed the new entry.
+        //
+        // Without the "newly-appeared" check, a legitimate persistent
+        // user-created tab (one with no underlying worktree) would drive a
+        // Refresh on *every* TabUpdate forever — including focus changes.
+        // Restricting to new tabs keeps the refresh one-shot per tab and
+        // closes any theoretical TabUpdate→Refresh feedback path.
+        let worktree_tab_names: BTreeSet<String> = self
+            .worktrees
+            .iter()
+            .map(|wt| Self::tab_name_for_branch(&wt.branch))
+            .collect();
+        let has_new_unmatched = self.tabs.iter().any(|t| {
+            !previously_known.contains(&t.name)
+                && t.name != self.repo_name
+                && !worktree_tab_names.contains(&t.name)
         });
-        if has_unmatched {
+        if has_new_unmatched {
             Action::Refresh
         } else {
             Action::None
@@ -2182,6 +2198,32 @@ mod tests {
             make_tab("feat-a", false),
         ]);
         assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn tab_update_with_persistent_unmatched_tab_only_refreshes_once() {
+        // Reviewer concern: a legitimate persistent user-created tab (no
+        // underlying worktree) must NOT drive a Refresh on every subsequent
+        // TabUpdate (focus changes etc.). The "newly-appeared" gate makes
+        // refresh one-shot per such tab.
+        let mut s = State::default();
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+
+        // First sighting of the user tab: Refresh fires so we can confirm
+        // there's no worktree we missed.
+        let first = s.handle_tab_update(vec![
+            make_tab("feat-a", false),
+            make_tab("notes", true),
+        ]);
+        assert_eq!(first, Action::Refresh);
+
+        // Worktrees still don't include "notes". The next TabUpdate (focus
+        // moved back to feat-a) must NOT trigger another Refresh.
+        let second = s.handle_tab_update(vec![
+            make_tab("feat-a", true),
+            make_tab("notes", false),
+        ]);
+        assert_eq!(second, Action::None);
     }
 
     #[test]
