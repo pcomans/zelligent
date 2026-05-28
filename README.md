@@ -1,3 +1,14 @@
+```
+  ▄▄▄▄▄▄▄▄      ▄▄ ▄▄
+ █▀▀▀▀▀██▀       ██ ██                      █▄
+      ▄█▀        ██ ██ ▀▀    ▄▄       ▄    ▄██▄
+    ▄█▀    ▄█▀█▄ ██ ██ ██ ▄████ ▄█▀█▄ ████▄ ██
+  ▄█▀    ▄ ██▄█▀ ██ ██ ██ ██ ██ ██▄█▀ ██ ██ ██
+ ████████▀▄▀█▄▄▄▄██▄██▄██▄▀████▄▀█▄▄▄▄██ ▀█▄██
+                             ██
+                           ▀▀▀
+```
+
 Zelligent runs AI coding agents in isolated git worktrees, each in its own [Zellij](https://zellij.dev) tab.
 
 [![Watch the Zelligent demo on YouTube](./demo-poster.png)](https://youtu.be/I3KFKoZpPTs)
