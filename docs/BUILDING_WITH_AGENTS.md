@@ -35,7 +35,7 @@ training catches different things. Empirically on this repo:
 
 ```mermaid
 flowchart TD
-    A["Spawn — zelligent spawn fix/issue-N 'claude fix-the-issue'"] --> B["Claude works in the worktree<br/>can spawn sub-agents, can consult Codex"]
+    A["Spawn — zelligent spawn fix/issue-N 'claude &quot;fix the issue&quot;'"] --> B["Claude works in the worktree<br/>can spawn sub-agents, can consult Codex"]
     B --> C["Push gate — DOCS_VERIFIED=1 git push<br/>pre-push hook enforces"]
     C --> D["CI runs — test-shell + test-plugin (.github/workflows/ci.yml)"]
     D --> E["Manual Gemini review<br/>gemini -p, headless"]
