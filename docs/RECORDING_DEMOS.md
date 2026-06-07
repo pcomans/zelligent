@@ -112,7 +112,12 @@ Trade-offs:
 
 ## Where the artifacts live
 
-The `demo*.mp4` / `demo*.gif` / `DEMO_SCRIPT.md` files sit at the repo root
-and are untracked — they're build artifacts, not source. Don't commit them.
-The `.gitignore` doesn't currently exclude them by name; if you want
+`DEMO_SCRIPT.md` at the repo root is **source documentation** (the narration
+script and pre-record checklist) and is fine to commit when you've made
+meaningful edits.
+
+The `demo*.mp4` and `demo*.gif` files at the repo root are **rendered
+artifacts** — they're outputs of the pipeline above. Don't commit them;
+they're large binaries and they change every recording session. The
+`.gitignore` doesn't currently exclude them by name; if you want
 belt-and-braces protection add a line like `demo*.mp4` and `demo*.gif`.
