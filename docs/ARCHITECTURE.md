@@ -148,8 +148,10 @@ sequenceDiagram
     Z->>P: PipeMessage broadcast to all plugins
     P->>P: filter on msg.name zelligent-status, then update AgentStatus
     P->>P: render gutter (green dot / yellow dot / green check)
-    P->>OS: osascript notification (Done, NeedsInput)
-    P->>OS: afplay Glass.aiff (NeedsInput only)
+    P->>Z: run_command osascript (Done, NeedsInput)
+    Z->>OS: spawn osascript notification process
+    P->>Z: run_command afplay Glass.aiff (NeedsInput only)
+    Z->>OS: spawn afplay process
 ```
 
 See [design-docs/agent-notifications.md](design-docs/agent-notifications.md)

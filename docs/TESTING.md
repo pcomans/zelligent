@@ -111,7 +111,7 @@ What it covers (one section per topic):
 
 | Section                       | What it checks                                                                  |
 |-------------------------------|---------------------------------------------------------------------------------|
-| Session name generation       | Branch → tab name sanitization (`/` → `-`, strip non-alnum).                    |
+| Session name generation       | Branch → sanitized name (`/` → `-`, strip non-alnum). The label is historical: the sanitized output is what becomes the *tab* name; session names are the repo's basename. |
 | Layout file generation        | Spawned-tab layout has sidebar, lazygit, status-bar, the right `cwd`, setup.sh. |
 | Layout source resolution      | `.zelligent/layout.kdl` precedence over user layout, validation of placeholders.|
 | Quoted agent command          | Single-quotes in agent args escape through the perl renderer and KDL emitter.   |
