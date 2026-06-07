@@ -244,8 +244,9 @@ For these we rely on:
 - **Release checklists.** The `release` skill walks through
   bump → tag → CI → release notes → Homebrew formula.
 - **Demo recording.** The README demo is regenerated when behavior
-  changes; the act of recording it surfaces UI rough edges
-  ([RECORDING_DEMOS.md](RECORDING_DEMOS.md)).
+  changes; the act of recording it surfaces UI rough edges (the
+  pipeline for that lives in `docs/RECORDING_DEMOS.md` on the
+  recording-demos branch).
 
 ---
 
