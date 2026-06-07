@@ -266,11 +266,13 @@ For these we rely on:
 ## Push gate
 
 Not strictly a test layer, but worth knowing: `.claude/hooks/pre-push-block.sh`
-blocks `git push` unless the command is prefixed with `DOCS_VERIFIED=1`.
-It exists so the human pushing is forced to acknowledge that
-`docs/` and `AGENTS.md` are up to date — *or* explicitly state they
-don't need updates. CI is the contract; this hook is the cultural
-contract.
+is a Claude Code `PreToolUse` hook that blocks `Bash` invocations of
+`git push` unless the command also contains `DOCS_VERIFIED=1`. It
+forces the agent (or developer working inside Claude Code) to
+acknowledge that `docs/` and `AGENTS.md` are up to date — *or*
+explicitly state they don't need updates. Pushing from a normal
+shell isn't blocked; CI is the contract, this hook is the cultural
+contract for agent-driven pushes.
 
 ## Related docs
 
