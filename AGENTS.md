@@ -69,6 +69,7 @@ A `.claude/hooks/pre-push-block.sh` hook blocks `git push` unless prefixed with 
 | Product & UX conventions | [docs/PRODUCT_SENSE.md](docs/PRODUCT_SENSE.md) |
 | Code conventions & Zellij gotchas | [docs/CONVENTIONS.md](docs/CONVENTIONS.md) |
 | Quality scoring | [docs/QUALITY_SCORE.md](docs/QUALITY_SCORE.md) |
+| Recording demo videos | [docs/RECORDING_DEMOS.md](docs/RECORDING_DEMOS.md) |
 | Worktree spawn/remove lifecycle | [docs/design-docs/worktree-lifecycle.md](docs/design-docs/worktree-lifecycle.md) |
 | Tab creation & index vs position bug | [docs/design-docs/tab-management.md](docs/design-docs/tab-management.md) |
 | Agent status notifications | [docs/design-docs/agent-notifications.md](docs/design-docs/agent-notifications.md) |
