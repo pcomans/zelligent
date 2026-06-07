@@ -83,8 +83,10 @@ What the plugin does NOT do:
 
 - It does not create or remove worktrees or mutate git refs directly.
   Worktree lifecycle (create, delete) goes through CLI
-  `spawn` / `remove`. The plugin does call host actions like
-  `dump_session_layout` and `osascript`/`afplay` for notifications.
+  `spawn` / `remove`. The plugin can invoke host actions like
+  `dump_session_layout` and external processes (`osascript`/`afplay`
+  for notifications) — but always via Zellij's plugin API, never by
+  calling `libc` directly.
 - It does not bundle binaries or fonts. ANSI + Unicode only; the
   earlier powerline-glyph dependency was removed (commit `4238cff`)
   because it complicates installs and breaks string matching in tools
