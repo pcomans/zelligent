@@ -1,65 +1,214 @@
 # Architecture
 
-Zelligent has two components that work together:
+## What zelligent is, in one paragraph
 
-## CLI (`zelligent.sh`)
+Zelligent runs AI coding agents in isolated git worktrees, one per branch,
+each in its own [Zellij](https://zellij.dev) tab with a persistent left
+sidebar and a lazygit pane. It is a thin Bash CLI plus a Rust/WASM plugin
+that lives inside Zellij. The CLI handles git, layouts, and process
+lifecycle. The plugin handles the in-terminal UI — the sidebar, agent
+status, and tab navigation. Together they turn "spawn an agent on this
+branch" into a single tab in a Zellij session named after the repo.
 
-A Bash script installed as `zelligent`. Handles:
+## Why two components, not one
 
-- **Session management** — creates/attaches Zellij sessions named after the git repo (`basename` of repo root)
-- **Worktree lifecycle** — `spawn` creates git worktrees under `~/.zelligent/worktrees/<repo>/`, `remove` cleans them up
-- **Layout generation** — builds fragment-based KDL layouts for Zellij tabs (persistent sidebar + main tab body + status bar)
-- **Doctor** — `zelligent doctor` sets up Zellij config, plugin permissions, the default user layout, and the Claude Code plugin
-- **Nuke** — `zelligent nuke` force-deletes the session, its server processes, and resurrection cache
+Zellij hosts plugins inside a WASI sandbox. A plugin can render to a pane
+and call back into Zellij (open tabs, focus panes, run commands), but it
+cannot shell out arbitrarily, fork processes, or block the host. So the
+work splits naturally:
 
-The CLI resolves the main repo root even when run from a worktree (`git rev-parse --git-common-dir`).
+- **Things that need the host shell** (`git worktree add`, layout
+  generation, environment variable propagation into the agent process) live
+  in the **CLI**, which Zellij invokes via its `RunCommand` API.
+- **Things that need to live with the tab** (always-visible sidebar UI,
+  click and keyboard handling, real-time agent status from hooks) live in
+  the **WASM plugin**, which Zellij hosts inside the sidebar pane.
 
-## Zellij WASM Plugin (`plugin/`)
+This boundary is the single biggest design constraint and shows up in
+nearly every feature. Treating it as a strict separation is how the
+codebase stays small.
 
-A Rust plugin compiled to `wasm32-wasip1`. Provides the persistent sidebar UI embedded in zelligent-managed layouts. Handles:
+## The two components
 
-- **Worktree browsing** — lists worktrees, lets you switch tabs or spawn/remove worktrees
-- **Branch selection** — browse existing branches or type a new branch name
-- **Tab management** — switches to worktree tabs, closes tabs (name-based, not index-based)
-- **Agent status** — reads CLI pipe messages to show agent status (idle/working/needs-input/done) and sends OS notifications. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md).
-- **Session awareness** — gets session name via `std::env::var("ZELLIJ_SESSION_NAME")` (WASI inherits host env vars)
+### CLI — `zelligent.sh` (~1300 lines of Bash)
 
-### Key file paths
+A Bash script installed as `zelligent`. Subcommands:
 
-| File | Purpose |
-|------|---------|
-| `zelligent.sh` | CLI entry point |
-| `plugin/src/lib.rs` | Plugin state machine, event handling, command dispatch |
-| `plugin/src/ui.rs` | Plugin UI rendering |
-| `plugin/tests/render_snapshots.rs` | Insta snapshot tests for UI |
-| `dev-install.sh` | Build + install CLI and WASM plugin locally |
-| `test.sh` | Full test suite runner |
-| `claude-plugin/` | Claude Code plugin (hooks for agent status notifications) |
+| Subcommand        | What it does                                                                                |
+|-------------------|---------------------------------------------------------------------------------------------|
+| `zelligent`       | Create or attach to a session named after the repo. The initial repo tab uses the sidebar layout (sidebar is a pane, not a separate tab). |
+| `spawn`           | Create a git worktree at `~/.zelligent/worktrees/<repo>/<raw-branch>`, open a new tab named after the sanitized branch. |
+| `remove`          | Delete the worktree and (when running inside Zellij) close its tab.                         |
+| `doctor`          | One-shot setup: Zellij plugin permissions, default user layout, Claude Code hook plugin.    |
+| `nuke`            | Force-kill the session, server, and resurrection cache. For "nothing else works" recovery. |
+| `list-worktrees`  | Internal — emits a TSV the plugin parses via `RunCommand`.                                  |
+| `list-branches`   | Internal — same idea, for the branch-picker UI.                                             |
+| `show-repo`       | Internal — emits repo metadata for the plugin.                                              |
 
-### How they interact
+Key invariants the CLI enforces:
 
+- **One repo = one session.** Session name = `basename(repo root)`, with
+  the repo root resolved via `git rev-parse --git-common-dir` so it works
+  identically from any worktree of the repo.
+- **One branch maps to one managed worktree path.** Tab names are
+  derived from the branch with `/` → `-` and non-`[A-Za-z0-9_-]`
+  stripped; the plugin uses the same sanitization for best-effort
+  identity. Worktrees can exist without an open tab, and user-created
+  tabs can sit alongside managed ones.
+- **Layouts are fragment-based.** The runtime layout source is
+  per-repo `.zelligent/layout.kdl` if present, else the user-level
+  `~/.zelligent/layout.kdl` (normally copied from
+  `share/default-layout.kdl` by `doctor`). The layout contains
+  placeholders `{{zelligent_sidebar}}` and `{{zelligent_children}}`,
+  plus optional `{{cwd}}` and `{{agent_cmd}}`. See
+  [references/zellij-kdl-layout.md](references/zellij-kdl-layout.md).
+
+### Plugin — `plugin/` (Rust, compiled to `wasm32-wasip1`)
+
+A Zellij plugin that renders the persistent left sidebar pane. ~3700 lines
+of Rust split across `lib.rs` (state machine, event handling) and `ui.rs`
+(ANSI rendering, viewport math).
+
+State machine modes:
+
+- `Loading` — bootstrap; waiting for first tab/worktree update
+- `BrowseWorktrees` — the default; lists worktrees, lets you switch
+  or spawn/remove
+- `SelectBranch` — pick from existing branches to make a new worktree
+- `InputBranch` — type a new branch name
+- `Confirming` — `y/n` confirmation for destructive ops
+- `NotGitRepo` — graceful fallback when sidebar loads outside a repo
+
+What the plugin does NOT do:
+
+- It does not create or remove worktrees or mutate git refs directly.
+  Worktree lifecycle (create, delete) goes through CLI
+  `spawn` / `remove`. The plugin does call host actions like
+  `dump_session_layout` and `osascript`/`afplay` for notifications.
+- It does not bundle binaries or fonts. ANSI + Unicode only; the
+  earlier powerline-glyph dependency was removed (commit `4238cff`)
+  because it complicates installs and breaks string matching in tools
+  that strip non-printable bytes.
+
+## How the components interact
+
+Spawn from inside Zellij (the simplest case; the CLI also handles
+outside-Zellij + existing-session and outside-Zellij + no-session
+modes — see `SPAWN_MODE` in `zelligent.sh`):
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant CLI as zelligent.sh
+    participant Z as Zellij
+    participant P as Sidebar plugin
+    participant A as Agent pane
+    U->>CLI: zelligent spawn feat/x claude
+    CLI->>CLI: git worktree add ~/.zelligent/worktrees/{repo}/feat/x
+    CLI->>CLI: render KDL layout into ~/.zelligent/tmp/layout-{rand}.kdl
+    CLI->>Z: zellij action new-tab --layout {file} --name feat-x
+    Z->>P: load WASM plugin into the left pane
+    Z->>A: bash -lc with ZELLIGENT_TAB_NAME=feat-x, then exec claude
+    Z-->>U: tab feat-x focused, sidebar + agent + lazygit visible
 ```
-User runs `zelligent spawn feature/foo claude`
-  -> CLI creates git worktree at ~/.zelligent/worktrees/<repo>/feature/foo
-  -> CLI renders the layout fragment into a tab layout with sidebar + tab body
-  -> CLI calls `zellij action new-tab --layout <file> --name feature-foo`
 
-User starts `zelligent` or opens a zelligent-managed tab
-  -> Zellij loads the WASM plugin as the left sidebar pane in the rendered layout
-  -> Plugin calls `zelligent list-worktrees` and `zelligent list-branches` via RunCommand
-  -> Plugin calls `zelligent spawn/remove` via RunCommand when user selects an action
+Note the path/name asymmetry: the worktree on disk uses the **raw**
+branch name (`feat/x` → `.../{repo}/feat/x`), but the Zellij tab name
+uses the sanitized form (`feat-x`).
+
+Sidebar-driven spawn (from inside the sidebar):
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant P as Sidebar plugin
+    participant Z as Zellij host
+    participant CLI as zelligent.sh
+    U->>P: press i (InputBranch), type feat/y, Enter
+    P->>P: Action Spawn(feat/y)
+    P->>Z: RunCommand — zelligent spawn feat/y claude
+    Z->>CLI: spawn (same dance as above)
+    CLI-->>Z: RunCommandResult(exit 0)
+    Z-->>P: dispatch handle_spawn_result → Action Refresh
+    P->>Z: RunCommand — zelligent list-worktrees, list-branches
+    Z-->>P: TSV results
+    P-->>U: sidebar re-renders with the new entry
+    Note over P,Z: TabUpdate arrives in parallel — a separate self-heal fires list-worktrees again if it spots an unmatched new tab
 ```
 
-### WASM plugin environment
+Agent status (hooks → plugin → notifications):
 
-See [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for API details. Plugins run in a WASI sandbox but inherit the host environment (`std::env::var()` works). External operations go through Zellij's plugin API (`RunCommand`, events, pipes).
+```mermaid
+sequenceDiagram
+    participant H as Claude Code hook
+    participant Z as Zellij
+    participant P as Sidebar plugin
+    participant OS as macOS
+    H->>Z: zellij pipe --name zelligent-status --args event=Stop,tab=feat-x
+    Z->>P: PipeMessage broadcast to all plugins
+    P->>P: filter on msg.name zelligent-status, then update AgentStatus
+    P->>P: render gutter (green dot / yellow dot / green check)
+    P->>OS: osascript notification (Done, NeedsInput)
+    P->>OS: afplay Glass.aiff (NeedsInput only)
+```
 
-## Glossary
+See [design-docs/agent-notifications.md](design-docs/agent-notifications.md)
+for the full pipeline and the `ZELLIGENT_TAB_NAME` propagation trick.
 
-- **Harness tests** (`tests/harness/`): UI acceptance tests driven by a tmux session and the `test-driver` agent. Run manually, not in CI.
-- **Test harness** (general): the overall scaffolding that lets agents validate their own work — `test.sh`, CI jobs, lints, snapshot tests.
-- **Agent** (zelligent context): a Claude Code instance running in an isolated git worktree tab, not the zelligent plugin itself.
+## Key files
 
-## Claude Code Plugin (`claude-plugin/`)
+| File                                       | Purpose                                                       |
+|--------------------------------------------|---------------------------------------------------------------|
+| `zelligent.sh`                             | CLI entry point. All git and zellij-process invocations.      |
+| `plugin/src/lib.rs`                        | Plugin state machine, event handling, command dispatch.       |
+| `plugin/src/ui.rs`                         | ANSI rendering, viewport math, color/glyph constants.         |
+| `share/default-layout.kdl`                 | Shipped default sidebar layout fragment.                       |
+| `claude-plugin/plugins/zelligent/hooks/`   | Claude Code hooks that emit `zellij pipe` status events.       |
+| `claude-plugin/plugins/zelligent/skills/`  | Bundled Claude skill: `zelligent-spawn-claude`.                |
+| `.claude/skills/`                          | Project-local Claude skills: `dev-install`, `release`, `tmux`. |
+| `.claude/agents/`                          | Specialized subagents: `rust-zellij-reviewer`, `test-driver`.  |
+| `.claude/hooks/pre-push-block.sh`          | Push gate: requires `DOCS_VERIFIED=1` prefix on `git push`.    |
+| `dev-install.sh`                           | Build wasm + symlink CLI to `~/.local/bin`. Local development. |
 
-A Claude Code plugin installed by `zelligent doctor`. Provides hooks that send agent status events to the Zellij plugin via `zellij pipe`. See [design-docs/agent-notifications.md](design-docs/agent-notifications.md) for the full pipeline.
+## Cross-cutting constraints worth knowing
+
+These are the gotchas that have bitten us most often. Each has a dedicated
+design doc.
+
+- **Tab position ≠ tab index.** Zellij has an internal tab index, but
+  what `TabUpdate` exposes via `TabInfo.position` is the visual
+  position; APIs like `close_tab_with_index` expect the internal
+  index, which the plugin can't get reliably from `TabUpdate`. The
+  workaround is name-based tab operations everywhere. See
+  [design-docs/tab-management.md](design-docs/tab-management.md).
+- **Per-plugin `cwd=` is dropped on session resurrection.** Upstream
+  Zellij's KDL emitter doesn't preserve it; on rehydrate the plugin gets
+  the server's startup `cwd` instead. Worked around with a `repo_root`
+  config field that the CLI always sets. See
+  [design-docs/session-resurrection.md](design-docs/session-resurrection.md).
+- **`kill_sessions(&[&name])` kills the plugin process.** Anything after
+  that call in the same handler doesn't run.
+- **WASM plugins inherit host env.** `std::env::var("ZELLIJ_SESSION_NAME")`
+  works inside the plugin because Zellij calls `builder.inherit_env()` on
+  the WASI engine. This is how the plugin discovers its session.
+
+## Where things live in the worktree
+
+| Path                                       | What                                                        |
+|--------------------------------------------|-------------------------------------------------------------|
+| `~/.zelligent/worktrees/<repo>/<branch>`   | The actual worktree directories.                            |
+| `~/.zelligent/tmp/`                        | Temporary rendered fragment/session layout files passed to Zellij (`--new-session-with-layout` and `action new-tab --layout`). |
+| `~/.config/zellij/config.kdl`              | Plugin permissions wired up by `zelligent doctor`.          |
+| `~/.config/zellij/layouts/zelligent.kdl`   | Default user layout, also installed by `doctor`.            |
+| `~/.local/share/zelligent/zelligent-plugin.wasm` | Where the plugin wasm is installed.                    |
+| `~/Library/Caches/org.Zellij-Contributors.Zellij/...` | Upstream resurrection cache (we don't write to it). |
+
+## Related docs
+
+- [BUILD.md](BUILD.md) — build & test commands, push gate.
+- [TESTING.md](TESTING.md) — every test layer, what it catches, what it doesn't.
+- [BUILDING_WITH_AGENTS.md](BUILDING_WITH_AGENTS.md) — how Claude / Codex /
+  Gemini participate in the dev loop.
+- [PRODUCT_SENSE.md](PRODUCT_SENSE.md) — UX rules and conventions.
+- [CONVENTIONS.md](CONVENTIONS.md) — code conventions, Zellij gotchas.
+- [design-docs/index.md](design-docs/index.md) — full design-doc index.
