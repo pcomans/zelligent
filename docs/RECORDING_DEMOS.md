@@ -2,7 +2,8 @@
 
 How the `demo.mp4` / `demo.gif` shipped at the repo root were produced, with the
 exact tooling and rough recipes. The script that drives the recording itself
-lives in [`DEMO_SCRIPT.md`](../DEMO_SCRIPT.md) — this doc covers the
+lives in a local `DEMO_SCRIPT.md` at the repo root (kept per-recording, not
+checked in) — this doc covers the
 post-production side only.
 
 ## Tools we actually used
@@ -25,7 +26,7 @@ different run; it isn't the source of the shipped clips.
 ### 1. Record
 
 QuickTime, region capture over the Zellij window. Follow the beats in
-[`DEMO_SCRIPT.md`](../DEMO_SCRIPT.md). Stop on `⌘⌃Esc`. Save as `demo-raw.mov`.
+your local `DEMO_SCRIPT.md`. Stop on `⌘⌃Esc`. Save as `demo-raw.mov`.
 
 ### 2. Trim + mute (if needed)
 
@@ -112,9 +113,10 @@ Trade-offs:
 
 ## Where the artifacts live
 
-`DEMO_SCRIPT.md` at the repo root is **source documentation** (the narration
-script and pre-record checklist) and is fine to commit when you've made
-meaningful edits.
+`DEMO_SCRIPT.md` at the repo root holds the narration script and pre-record
+checklist for the currently-being-recorded demo. It's kept untracked because
+it changes with every recording session — copy the previous one if you want
+a starting point.
 
 The `demo*.mp4` and `demo*.gif` files at the repo root are **rendered
 artifacts** — they're outputs of the pipeline above. Don't commit them;
