@@ -66,6 +66,8 @@ A `.claude/hooks/pre-push-block.sh` hook blocks `git push` unless prefixed with 
 |-------|-----|
 | Build, test & push instructions | [docs/BUILD.md](docs/BUILD.md) |
 | Architecture & file map | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Test layers & what each catches | [docs/TESTING.md](docs/TESTING.md) |
+| How we develop with AI agents | [docs/BUILDING_WITH_AGENTS.md](docs/BUILDING_WITH_AGENTS.md) |
 | Product & UX conventions | [docs/PRODUCT_SENSE.md](docs/PRODUCT_SENSE.md) |
 | Code conventions & Zellij gotchas | [docs/CONVENTIONS.md](docs/CONVENTIONS.md) |
 | Quality scoring | [docs/QUALITY_SCORE.md](docs/QUALITY_SCORE.md) |
