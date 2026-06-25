@@ -734,10 +734,8 @@ impl State {
             Mouse::LeftClick(line, _col) => {
                 let line = (*line).max(0) as usize;
                 if let Some(idx) = self.sidebar_index_at_line(line, self.last_rows) {
-                    if idx == self.selected_index {
-                        return self.action_for_sidebar_item(idx);
-                    }
                     self.selected_index = idx;
+                    return self.action_for_sidebar_item(idx);
                 }
             }
             _ => {}
@@ -1561,7 +1559,7 @@ mod tests {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
-        assert_eq!(action, Action::None);
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
         assert_eq!(s.selected_index, 1);
     }
 
@@ -1570,7 +1568,7 @@ mod tests {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         let action = s.handle_mouse_browse(&Mouse::LeftClick(3, 5));
-        assert_eq!(action, Action::None);
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
         assert_eq!(s.selected_index, 1);
     }
 
@@ -1628,6 +1626,16 @@ mod tests {
         assert_eq!(s.handle_mouse_browse(&Mouse::ScrollDown(0)), Action::None);
         assert_eq!(s.handle_mouse_browse(&Mouse::LeftClick(2, 5)), Action::None);
         assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn browse_mouse_single_click_activates_unselected_item() {
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        s.selected_index = 0;
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
+        assert_eq!(s.selected_index, 1);
     }
 
     // --- SelectBranch key handler tests ---
