@@ -479,14 +479,20 @@ impl State {
     /// Serialize this instance's known statuses — its live `agent_statuses`
     /// plus its buffered `pending_statuses` (see #141) — for a
     /// `PIPE_STATUS_REPLAY` broadcast. Format: `tab:code` entries joined by
-    /// `;`, e.g. `feat-a:Working;feat-b:Done`. Tab names are sanitized
-    /// branch names restricted to `[a-zA-Z0-9_-]` (zelligent.sh), so `:`
-    /// and `;` need no escaping. Entries are appended only while the result
+    /// `;`, e.g. `feat-a:Working;feat-b:Done`. Worktree tab names are
+    /// sanitized branch names restricted to `[a-zA-Z0-9_-]` (zelligent.sh),
+    /// but `zelligent-status` accepts any `tab=` value, so names containing
+    /// a separator are skipped rather than emitted — a `;` inside a name
+    /// would otherwise fragment into a spurious entry for a different tab
+    /// on every receiver. Entries are appended only while the result
     /// stays within `STATUS_REPLAY_MAX_LEN`; any remainder is silently
     /// dropped (defensive cap, not expected to bite in practice).
     fn serialize_statuses(&self) -> String {
         let mut out = String::new();
         for (tab, status) in self.agent_statuses.iter().chain(self.pending_statuses.iter()) {
+            if tab.contains(':') || tab.contains(';') {
+                continue;
+            }
             let entry = format!("{tab}:{}", Self::status_code(*status));
             let extra_len = if out.is_empty() {
                 entry.len()
@@ -1291,11 +1297,14 @@ impl State {
         // request handler below returns at most one ReplayStatuses, and
         // the replay handler always returns Action::None.
         if msg.name == PIPE_STATUS_REQUEST {
-            if self.agent_statuses.is_empty() {
+            if self.agent_statuses.is_empty() && self.pending_statuses.is_empty() {
                 // Nothing to offer — replying with an empty payload would
                 // just be noise broadcast to every instance on every load.
                 return Action::None;
             }
+            // pending_statuses counts as knowledge too: an instance holding
+            // only buffered early events (#141) must still reply, or a
+            // sidebar loading before that tab exists misses them entirely.
             return Action::ReplayStatuses(self.serialize_statuses());
         }
         if msg.name == PIPE_STATUS_REPLAY {
@@ -3860,6 +3869,32 @@ mod tests {
                 ("feat-b".to_string(), AgentStatus::Done),
             ]
         );
+    }
+
+    #[test]
+    fn status_request_with_only_pending_statuses_still_replies() {
+        // An instance holding only buffered early events (#141) has real
+        // knowledge to offer — the reply gate must not require a live
+        // agent_statuses entry.
+        let mut s = State::default();
+        s.pending_statuses.insert("feat-b".to_string(), AgentStatus::Working);
+        let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
+        assert_eq!(
+            action,
+            Action::ReplayStatuses("feat-b:Working".to_string())
+        );
+    }
+
+    #[test]
+    fn serialize_statuses_skips_tab_names_containing_separators() {
+        // `zelligent-status` accepts arbitrary tab= values; a name with a
+        // `;` or `:` would fragment the replay payload into a spurious
+        // entry for a different tab on every receiver, so it is skipped.
+        let mut s = State::default();
+        s.agent_statuses.insert("bad;name".to_string(), AgentStatus::Working);
+        s.agent_statuses.insert("bad:name".to_string(), AgentStatus::Working);
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Done);
+        assert_eq!(s.serialize_statuses(), "feat-a:Done");
     }
 
     #[test]
