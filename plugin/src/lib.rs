@@ -1586,20 +1586,27 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
         ]);
 
-        // Ask any sibling instance for a replay of statuses we may have
-        // missed (#140 part B / Z-6): this instance's `agent_statuses`
-        // starts empty, and `zelligent-status` pipes sent before this
-        // instance existed are gone for good. Fire directly (not via
-        // `execute`/Action) since `load()` is already an imperative entry
-        // point (see `request_permission`/`subscribe` above); the result
-        // is unused if the request itself never gets a reply, so we don't
-        // need the RunCommandResult beyond routing it to a no-op.
-        self.fire_status_request();
+        // The status-replay request (#140 part B / Z-6) is fired from the
+        // PermissionRequestResult(Granted) branch of update(), NOT here:
+        // the RunCommands grant is asynchronous even when permissions.kdl
+        // already pre-approves the plugin, so a run_command issued during
+        // load() is deterministically denied ("permission 'RunCommands'
+        // denied" in zellij.log) and the broadcast never happens.
     }
 
     fn update(&mut self, event: Event) -> bool {
         let action = match event {
-            Event::PermissionRequestResult(PermissionStatus::Granted) => Action::FetchToplevel,
+            Event::PermissionRequestResult(PermissionStatus::Granted) => {
+                // First moment run_command is actually allowed. Ask any
+                // sibling instance for a replay of statuses this instance
+                // missed (#140 part B / Z-6): its `agent_statuses` starts
+                // empty, and `zelligent-status` pipes sent before it
+                // existed are gone for good. Duplicate requests (were this
+                // event ever delivered twice) are harmless — replies are
+                // idempotent and merges monotone.
+                self.fire_status_request();
+                Action::FetchToplevel
+            }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
                 self.status_message = "Permissions denied. Plugin cannot run commands.".to_string();
                 self.status_is_error = true;
