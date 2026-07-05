@@ -22,10 +22,12 @@ tests/harness/
 │   ├── empty-repo.md
 │   ├── sidebar-mouse-interaction.md
 │   ├── sidebar-layout-smoke.md
-│   └── with-worktrees.md
+│   ├── with-worktrees.md
+│   └── ui-audit-01..06-*.md   # exhaustive mouse/tab audit suite (2026-07)
 ├── fixtures/       # Setup scripts (one per scenario)
 │   ├── setup-empty-repo.sh
 │   ├── setup-with-worktrees.sh
+│   ├── setup-many-worktrees.sh
 │   └── teardown.sh
 └── README.md
 ```
@@ -79,6 +81,22 @@ Current plans:
   behavior in the persistent sidebar
 - `with-worktrees.md`: embedded sidebar stability in a repo with seeded
   worktrees
+- `ui-audit-01-mouse-core.md` … `ui-audit-05-agent-status-modes.md`: exhaustive
+  real-input audit of mouse selection/activation, multi-tab switching, scrolled
+  viewports, worktree lifecycle staleness, and agent-status glyphs. Written for
+  the 2026-07 UI audit (see `docs/reports/ui-audit-2026-07-05.md` if present);
+  each plan carries a "Harness corrections" section with hard-won tmux/SGR
+  driving rules — read it before running.
+- `ui-audit-06-repro-verification.md`: minimal from-clean-fixture repros for
+  every bug found in the audit (Z-1 through Z-8). Use as a regression suite
+  when fixing those bugs.
+
+Harness driving rules learned in the audit (apply to all mouse plans): enable
+`tmux set-option -g mouse on` on the harness socket before SGR click injection
+and send press/release as separate `send-keys` calls; there is no tab bar —
+verify the active tab via the main pane's frame title, the sidebar's bold-cyan
+row, and `zellij action query-tab-names`; never run `zelligent.sh spawn` from a
+control pane (it attaches a second Zellij client).
 
 ## Writing a new test plan
 
