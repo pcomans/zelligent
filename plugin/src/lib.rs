@@ -641,7 +641,41 @@ impl State {
             !self.tabs.iter().any(|t| &t.name == name) && !pending_close_before.contains(name)
         });
 
-        if has_new_unmatched || has_disappeared_known {
+        // Refresh whenever the tab SET changed at all — any addition or
+        // removal relative to `previously_known`, regardless of worktree
+        // matching. This is the trigger that heals event-starved instances.
+        // Verified live (#140, 2026-07): Zellij delivers Events (TabUpdate
+        // etc.) only to plugin instances in the *visible* tab — pipes
+        // broadcast to all instances, but a hidden instance receives no
+        // Events at all. So a hidden instance's snapshot freezes at the
+        // moment its tab lost focus; tabs spawned and/or removed while it
+        // was hidden never pass through the two gates above (a new tab that
+        // already matches the stale worktree cache is invisible to
+        // has_new_unmatched, and a tab that both appeared and vanished while
+        // hidden was never in `previously_known` for has_disappeared_known).
+        // The catch-up TabUpdate this instance receives when its tab becomes
+        // active again is exactly when the set diff fires — and since the
+        // instance is now visible, the Refresh's run_command result lands.
+        // Kept alongside the two narrower gates above: they encode
+        // separately-tested semantics and cost nothing.
+        //
+        // A pure focus switch with no set drift does NOT fire: a visible
+        // instance's cache was maintained while visible, so there's nothing
+        // to heal. Also excluded on the very first TabUpdate since startup
+        // (`had_tabs == false`): the bootstrap path already loads worktrees,
+        // so firing here too would just be a redundant double-refresh.
+        //
+        // Removals reuse `has_disappeared_known`, which carves out
+        // `pending_close_before`: a self-initiated close already drives its
+        // own Refresh via `handle_remove_result`, per the #121/#138
+        // handshake documented above.
+        let has_added_tab = self
+            .tabs
+            .iter()
+            .any(|t| !previously_known.contains(&t.name));
+        let has_tab_set_changed = had_tabs && (has_added_tab || has_disappeared_known);
+
+        if has_new_unmatched || has_disappeared_known || has_tab_set_changed {
             Action::Refresh
         } else {
             Action::None
@@ -2306,7 +2340,8 @@ mod tests {
         // Reviewer concern: a legitimate persistent user-created tab (no
         // underlying worktree) must NOT drive a Refresh on every subsequent
         // TabUpdate (focus changes etc.). The "newly-appeared" gate makes
-        // refresh one-shot per such tab.
+        // refresh one-shot per such tab, and the tab-set-change trigger
+        // (#140) doesn't fire on a pure focus switch either.
         let mut s = State::default();
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
 
@@ -2319,7 +2354,8 @@ mod tests {
         assert_eq!(first, Action::Refresh);
 
         // Worktrees still don't include "notes". The next TabUpdate (focus
-        // moved back to feat-a) must NOT trigger another Refresh.
+        // moved back to feat-a, tab set unchanged) must NOT trigger another
+        // Refresh.
         let second = s.handle_tab_update(vec![
             make_tab("feat-a", true),
             make_tab("notes", false),
@@ -2390,6 +2426,108 @@ mod tests {
             make_tab("zelligent", true),
             make_tab("feat-b", false), // new, unmatched to any worktree
         ]);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn tab_update_after_event_starvation_refreshes_even_when_new_tab_matches_cache() {
+        // The verified #140 failure scenario (2026-07 live verification):
+        // hidden plugin instances receive NO Events at all, so this
+        // instance's last snapshot predates everything that happened while
+        // it was hidden — it only knows its own tab. Meanwhile feat-b was
+        // spawned AND removed (the cache still lists it, stale) and feat-a
+        // is still open. When this instance's tab becomes active again, the
+        // catch-up TabUpdate contains a tab (feat-a) that is new to
+        // `previously_known` but MATCHES the worktree cache — so
+        // has_new_unmatched stays silent, no previously-known tab
+        // disappeared, and any active-tab comparison sees this instance's
+        // own tab active on both sides. Only a tab-SET diff detects that
+        // the instance slept through changes and must re-sync.
+        let mut s = State {
+            repo_name: "zelligent".into(),
+            ..Default::default()
+        };
+        s.tabs = vec![make_tab("zelligent", true)];
+        s.handle_list_worktrees(
+            Some(0),
+            b"feat-a\tfeat-a\nfeat-b\tfeat-b\nfeat-c\tfeat-c\n",
+            b"",
+        );
+
+        let action = s.handle_tab_update(vec![
+            make_tab("zelligent", true),
+            make_tab("feat-a", false), // new to this instance, but cache-matched
+        ]);
+        assert_eq!(
+            action,
+            Action::Refresh,
+            "an event-starved instance must re-sync when its catch-up \
+             TabUpdate shows the tab set changed, even if every tab is \
+             explained by the (stale) worktree cache"
+        );
+    }
+
+    #[test]
+    fn tab_update_focus_switch_with_unchanged_tab_set_returns_none() {
+        // Intentional #140 v2 behavior: a pure focus switch with no tab-set
+        // drift does NOT refresh. A visible instance's cache was maintained
+        // while visible (it received every Event), and a hidden instance
+        // never sees the intermediate switches anyway — the catch-up
+        // TabUpdate it gets on becoming visible carries any set drift, which
+        // is what fires. Refreshing on mere focus changes would be pure
+        // overhead.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+
+        let action = s.handle_tab_update(vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", true), // focus moved, same tab set
+        ]);
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn tab_update_with_identical_snapshot_returns_none() {
+        // Identical consecutive snapshots (same tabs, same active) must not
+        // trigger a spurious Refresh on every re-render.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+
+        let action =
+            s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn tab_update_first_sync_does_not_trigger_tab_set_change_refresh() {
+        // The very first TabUpdate since startup goes from no previously-known
+        // tabs to the full tab set — the maximal set diff. This must NOT fire
+        // the tab-set-change trigger (startup already loads worktrees via the
+        // bootstrap path). Use the repo tab (excluded from the newly-appeared
+        // gate) so the only trigger in play is the one under test; with
+        // `had_tabs == false` it must not fire, leaving Action::None.
+        let mut s = State {
+            repo_name: "zelligent".into(),
+            ..Default::default()
+        };
+        let action = s.handle_tab_update(vec![make_tab("zelligent", true)]);
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn tab_update_with_set_change_and_disappeared_tab_returns_single_refresh() {
+        // Combining the tab-set-change trigger with the disappeared-known
+        // trigger in the same update must still resolve to exactly one
+        // Refresh, not some doubled-up variant.
+        let mut s = State::default();
+        s.handle_tab_update(vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
+        ]);
+
+        // feat-b disappears AND focus moves from feat-a to feat-c.
+        let action = s.handle_tab_update(vec![make_tab("feat-a", false), make_tab("feat-c", true)]);
         assert_eq!(action, Action::Refresh);
     }
 
