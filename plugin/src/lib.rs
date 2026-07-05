@@ -42,6 +42,8 @@ pub const CMD_GIT_BRANCHES: &str = "git_branches";
 pub const CMD_SPAWN: &str = "spawn";
 pub const CMD_REMOVE: &str = "remove";
 pub const CMD_INVALIDATE_BROADCAST: &str = "invalidate_broadcast";
+pub const CMD_STATUS_REQUEST_BROADCAST: &str = "status_request_broadcast";
+pub const CMD_STATUS_REPLAY_BROADCAST: &str = "status_replay_broadcast";
 
 /// Pipe name for cross-instance cache invalidation. CLI pipes are the ONLY
 /// channel that reaches hidden plugin instances (Events don't — see
@@ -56,6 +58,28 @@ pub const PIPE_INVALIDATE: &str = "zelligent-invalidate";
 /// `State::invalidate_generation` in `handle_list_worktrees` to guard
 /// against the stale-in-flight-refresh race. See #140.
 pub const CTX_GENERATION: &str = "generation";
+
+/// Pipe name for "reply with your known agent statuses". Broadcast once by
+/// a plugin instance in `load()` so a newly-created sidebar (e.g. in a
+/// freshly spawned tab) can catch up on status glyphs it never saw —
+/// `zelligent-status` pipes only reach instances alive at send time. See
+/// #140 part B (Z-6).
+pub const PIPE_STATUS_REQUEST: &str = "zelligent-status-request";
+
+/// Pipe name for "here are my known agent statuses", sent in response to
+/// `PIPE_STATUS_REQUEST` by any instance with a non-empty `agent_statuses`
+/// map. Carries one arg, `STATUS_REPLAY_ARG`, whose value is the serialized
+/// statuses (see `State::serialize_statuses` / `State::parse_statuses`).
+pub const PIPE_STATUS_REPLAY: &str = "zelligent-status-replay";
+
+/// The single `--args` key carried by `PIPE_STATUS_REPLAY`.
+pub const STATUS_REPLAY_ARG: &str = "statuses";
+
+/// Defensive cap (bytes) on the serialized replay payload. Tab names are
+/// sanitized branch names limited to `[a-zA-Z0-9_-]` (see zelligent.sh), so
+/// `:` and `;` below are safe, unambiguous separators. Well above any real
+/// session's tab count; exists only to bound a pathological session.
+const STATUS_REPLAY_MAX_LEN: usize = 4096;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Mode {
@@ -109,6 +133,13 @@ pub enum Action {
         tab_name: String,
         status: AgentStatus,
     },
+    /// Broadcast `PIPE_STATUS_REQUEST` — fired once from `load()` so this
+    /// (possibly late-created) instance can catch up on statuses it never
+    /// saw. See #140 part B.
+    RequestStatusReplay,
+    /// Broadcast `PIPE_STATUS_REPLAY` carrying the given serialized
+    /// payload, in response to a received `PIPE_STATUS_REQUEST`.
+    ReplayStatuses(String),
 }
 
 #[derive(Default)]
@@ -375,6 +406,120 @@ impl State {
         }
     }
 
+    /// Broadcast `PIPE_STATUS_REQUEST` to every sidebar instance in this
+    /// session. Fired once from `load()`: a freshly-created instance (e.g.
+    /// the sidebar in a newly spawned tab) has an empty `agent_statuses`
+    /// map and never saw any `zelligent-status` pipe sent before it
+    /// existed. Same transport as `fire_invalidate_broadcast` and for the
+    /// same reason — see that method's doc comment. Best-effort: any
+    /// resulting replies land as ordinary `zelligent-status-replay` pipes
+    /// (see `handle_pipe`); the RunCommandResult of this broadcast itself
+    /// is ignored (CMD_STATUS_REQUEST_BROADCAST in `update`).
+    fn fire_status_request(&self) {
+        if let Some(session) = &self.session_name {
+            run_command(
+                &[
+                    "zellij",
+                    "--session",
+                    session,
+                    "pipe",
+                    "--name",
+                    PIPE_STATUS_REQUEST,
+                ],
+                Self::ctx(CMD_STATUS_REQUEST_BROADCAST),
+            );
+        }
+    }
+
+    /// Broadcast `PIPE_STATUS_REPLAY` carrying `payload` (see
+    /// `serialize_statuses`) to every sidebar instance in this session, in
+    /// response to a received `PIPE_STATUS_REQUEST`. Same transport as
+    /// `fire_invalidate_broadcast`.
+    fn fire_status_replay(&self, payload: &str) {
+        if let Some(session) = &self.session_name {
+            run_command(
+                &[
+                    "zellij",
+                    "--session",
+                    session,
+                    "pipe",
+                    "--name",
+                    PIPE_STATUS_REPLAY,
+                    "--args",
+                    &format!("{STATUS_REPLAY_ARG}={payload}"),
+                ],
+                Self::ctx(CMD_STATUS_REPLAY_BROADCAST),
+            );
+        }
+    }
+
+    /// Short, stable wire code for an `AgentStatus` — used by
+    /// `serialize_statuses`/`parse_statuses`. Not `Debug`-derived on
+    /// purpose: the wire format must not silently change if `AgentStatus`'s
+    /// derive output ever changes.
+    fn status_code(status: AgentStatus) -> &'static str {
+        match status {
+            AgentStatus::Idle => "Idle",
+            AgentStatus::Working => "Working",
+            AgentStatus::NeedsInput => "NeedsInput",
+            AgentStatus::Done => "Done",
+        }
+    }
+
+    fn parse_status_code(code: &str) -> Option<AgentStatus> {
+        match code {
+            "Idle" => Some(AgentStatus::Idle),
+            "Working" => Some(AgentStatus::Working),
+            "NeedsInput" => Some(AgentStatus::NeedsInput),
+            "Done" => Some(AgentStatus::Done),
+            _ => None,
+        }
+    }
+
+    /// Serialize this instance's known statuses — its live `agent_statuses`
+    /// plus its buffered `pending_statuses` (see #141) — for a
+    /// `PIPE_STATUS_REPLAY` broadcast. Format: `tab:code` entries joined by
+    /// `;`, e.g. `feat-a:Working;feat-b:Done`. Tab names are sanitized
+    /// branch names restricted to `[a-zA-Z0-9_-]` (zelligent.sh), so `:`
+    /// and `;` need no escaping. Entries are appended only while the result
+    /// stays within `STATUS_REPLAY_MAX_LEN`; any remainder is silently
+    /// dropped (defensive cap, not expected to bite in practice).
+    fn serialize_statuses(&self) -> String {
+        let mut out = String::new();
+        for (tab, status) in self.agent_statuses.iter().chain(self.pending_statuses.iter()) {
+            let entry = format!("{tab}:{}", Self::status_code(*status));
+            let extra_len = if out.is_empty() {
+                entry.len()
+            } else {
+                entry.len() + 1 // the joining ';'
+            };
+            if out.len() + extra_len > STATUS_REPLAY_MAX_LEN {
+                break;
+            }
+            if !out.is_empty() {
+                out.push(';');
+            }
+            out.push_str(&entry);
+        }
+        out
+    }
+
+    /// Inverse of `serialize_statuses`. Unparseable entries (bad separator,
+    /// unknown status code, empty tab name) are skipped rather than
+    /// failing the whole payload — a partial replay is still useful.
+    fn parse_statuses(payload: &str) -> Vec<(String, AgentStatus)> {
+        payload
+            .split(';')
+            .filter_map(|entry| {
+                let (tab, code) = entry.split_once(':')?;
+                if tab.is_empty() {
+                    return None;
+                }
+                Self::parse_status_code(code).map(|status| (tab.to_string(), status))
+            })
+            .collect()
+    }
+
     fn fire_spawn(&self, branch: &str) {
         let mut env = BTreeMap::new();
         if let Ok(val) = std::env::var("ZELLIJ") {
@@ -507,6 +652,8 @@ impl State {
                     );
                 }
             }
+            Action::RequestStatusReplay => self.fire_status_request(),
+            Action::ReplayStatuses(payload) => self.fire_status_replay(payload),
         }
     }
 
@@ -1134,6 +1281,54 @@ impl State {
             self.invalidate_generation += 1;
             return Action::Refresh;
         }
+        // Late-created-instance status replay (#140 part B / Z-6). A
+        // freshly-loaded instance broadcasts PIPE_STATUS_REQUEST; any
+        // instance (including the requester itself, and including hidden
+        // ones — see docs/references/zellij-plugin-api.md) that already
+        // knows some statuses replies with PIPE_STATUS_REPLAY. Loop safety:
+        // handling a request never produces another request, and handling
+        // a replay never produces a request or another replay — the
+        // request handler below returns at most one ReplayStatuses, and
+        // the replay handler always returns Action::None.
+        if msg.name == PIPE_STATUS_REQUEST {
+            if self.agent_statuses.is_empty() {
+                // Nothing to offer — replying with an empty payload would
+                // just be noise broadcast to every instance on every load.
+                return Action::None;
+            }
+            return Action::ReplayStatuses(self.serialize_statuses());
+        }
+        if msg.name == PIPE_STATUS_REPLAY {
+            let payload = msg
+                .args
+                .get(STATUS_REPLAY_ARG)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            for (tab, status) in Self::parse_statuses(payload) {
+                if self.agent_statuses.contains_key(&tab) {
+                    // Monotone merge: never clobber knowledge we already
+                    // have — a stale instance's replay must not overwrite
+                    // a status we learned more recently.
+                    continue;
+                }
+                if self.tabs.iter().any(|t| t.name == tab) {
+                    self.agent_statuses.insert(tab, status);
+                } else if !self.pending_statuses.contains_key(&tab) {
+                    // Unknown-tab entries go through the same buffer
+                    // semantics as a live `zelligent-status` event (#141):
+                    // capped at 16, evicting the lexicographically-first
+                    // key on overflow. An existing pending entry for this
+                    // tab is left alone (same monotone rule).
+                    if self.pending_statuses.len() >= 16 {
+                        self.pending_statuses.pop_first();
+                    }
+                    self.pending_statuses.insert(tab, status);
+                }
+            }
+            // No Notify, no status_message: replay is a silent catch-up,
+            // never a user-visible event. See #140 part B frozen design.
+            return Action::None;
+        }
         if msg.name != "zelligent-status" {
             return Action::None;
         }
@@ -1381,6 +1576,16 @@ impl ZellijPlugin for State {
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
         ]);
+
+        // Ask any sibling instance for a replay of statuses we may have
+        // missed (#140 part B / Z-6): this instance's `agent_statuses`
+        // starts empty, and `zelligent-status` pipes sent before this
+        // instance existed are gone for good. Fire directly (not via
+        // `execute`/Action) since `load()` is already an imperative entry
+        // point (see `request_permission`/`subscribe` above); the result
+        // is unused if the request itself never gets a reply, so we don't
+        // need the RunCommandResult beyond routing it to a no-op.
+        self.fire_status_request();
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -1418,8 +1623,10 @@ impl ZellijPlugin for State {
                         }
                         self.handle_remove_result(exit_code, &stderr, &context)
                     }
-                    Some(CMD_INVALIDATE_BROADCAST) => {
-                        // Best-effort broadcast; success or failure, there
+                    Some(CMD_INVALIDATE_BROADCAST)
+                    | Some(CMD_STATUS_REQUEST_BROADCAST)
+                    | Some(CMD_STATUS_REPLAY_BROADCAST) => {
+                        // Best-effort broadcasts; success or failure, there
                         // is nothing to do with the result.
                         Action::None
                     }
@@ -3605,6 +3812,271 @@ mod tests {
         assert_eq!(action, Action::None);
         assert!(s.status_is_error);
         assert!(s.status_message.contains("missing 'event' arg"));
+    }
+
+    // --- status replay tests (#140 part B / Z-6) ---
+
+    #[test]
+    fn status_request_with_no_known_statuses_replies_nothing() {
+        // A freshly-loaded instance that itself has nothing to offer must
+        // not broadcast an empty replay — that would just be noise on
+        // every load.
+        let mut s = State::default();
+        let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn status_request_with_known_statuses_replies_with_serialized_payload() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
+        let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
+        assert_eq!(
+            action,
+            Action::ReplayStatuses("feat-a:Working".to_string())
+        );
+    }
+
+    #[test]
+    fn status_request_reply_includes_pending_statuses() {
+        // The replay payload must carry both live `agent_statuses` and
+        // buffered `pending_statuses` (#141) entries — a late instance
+        // should catch up on both.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
+        s.pending_statuses.insert("feat-b".to_string(), AgentStatus::Done);
+        let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
+        let Action::ReplayStatuses(payload) = action else {
+            panic!("expected ReplayStatuses, got {action:?}");
+        };
+        let mut parsed = State::parse_statuses(&payload);
+        parsed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            parsed,
+            vec![
+                ("feat-a".to_string(), AgentStatus::Working),
+                ("feat-b".to_string(), AgentStatus::Done),
+            ]
+        );
+    }
+
+    #[test]
+    fn serialize_parse_statuses_round_trip() {
+        let mut s = State::default();
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
+        s.agent_statuses.insert("feat-b".to_string(), AgentStatus::NeedsInput);
+        s.pending_statuses.insert("feat-c".to_string(), AgentStatus::Done);
+        let payload = s.serialize_statuses();
+        let mut parsed = State::parse_statuses(&payload);
+        parsed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            parsed,
+            vec![
+                ("feat-a".to_string(), AgentStatus::Working),
+                ("feat-b".to_string(), AgentStatus::NeedsInput),
+                ("feat-c".to_string(), AgentStatus::Done),
+            ]
+        );
+    }
+
+    #[test]
+    fn status_replay_fills_missing_known_tab_status() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "feat-a:Working")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
+    }
+
+    #[test]
+    fn status_replay_never_overwrites_existing_agent_status() {
+        // Monotone merge: a stale instance's replay must not clobber a
+        // status this instance already learned (possibly more recent).
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Done);
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "feat-a:Working")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
+    }
+
+    #[test]
+    fn status_replay_suppresses_notify_even_for_needs_input_or_done() {
+        // Replay must never produce a user-visible side effect, unlike a
+        // live `zelligent-status` pipe carrying the same statuses.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false), make_tab("feat-b", false)];
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "feat-a:NeedsInput;feat-b:Done")],
+        ));
+        assert_eq!(action, Action::None);
+        assert!(s.status_message.is_empty());
+        assert!(!s.status_is_error);
+        assert_eq!(
+            s.agent_statuses.get("feat-a"),
+            Some(&AgentStatus::NeedsInput)
+        );
+        assert_eq!(s.agent_statuses.get("feat-b"), Some(&AgentStatus::Done));
+    }
+
+    #[test]
+    fn status_replay_routes_unknown_tab_through_pending_statuses() {
+        // A replayed entry for a tab this instance doesn't know yet must
+        // land in `pending_statuses`, using the same #141 buffer/eviction
+        // semantics as a live event for an unknown tab.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-b", false)];
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "unknown-tab:Done")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("unknown-tab"), None);
+        assert_eq!(
+            s.pending_statuses.get("unknown-tab"),
+            Some(&AgentStatus::Done)
+        );
+    }
+
+    #[test]
+    fn status_replay_never_overwrites_existing_pending_status() {
+        let mut s = State::default();
+        s.pending_statuses.insert("unknown-tab".to_string(), AgentStatus::Working);
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "unknown-tab:Done")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(
+            s.pending_statuses.get("unknown-tab"),
+            Some(&AgentStatus::Working)
+        );
+    }
+
+    #[test]
+    fn status_replay_unknown_tab_still_respects_pending_cap_of_16() {
+        let mut s = State::default();
+        for i in 0..16 {
+            s.pending_statuses
+                .insert(format!("existing-{i}"), AgentStatus::Working);
+        }
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "new-unknown-tab:Done")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.pending_statuses.len(), 16);
+    }
+
+    #[test]
+    fn status_replay_ignores_malformed_entries() {
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(
+                STATUS_REPLAY_ARG,
+                "feat-a:BogusStatus;;garbage-no-colon;:Working;feat-a:Working",
+            )],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
+    }
+
+    #[test]
+    fn status_replay_missing_arg_is_a_no_op() {
+        let mut s = State::default();
+        let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REPLAY, &[]));
+        assert_eq!(action, Action::None);
+        assert!(s.agent_statuses.is_empty());
+        assert!(s.pending_statuses.is_empty());
+    }
+
+    #[test]
+    fn status_replay_handling_never_emits_another_request_or_replay() {
+        // Loop safety: the only actions `handle_pipe` can return for
+        // PIPE_STATUS_REPLAY are Action::None — merging never re-triggers
+        // the request/replay cycle. Exercise a mix of overwrite-blocked,
+        // known-tab-filled, and unknown-tab-buffered entries in one call to
+        // make sure none of those paths sneaks out a different Action.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Done);
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(
+                STATUS_REPLAY_ARG,
+                "feat-a:Working;feat-b:NeedsInput;unknown-tab:Done",
+            )],
+        ));
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn status_replay_of_own_broadcast_is_idempotent() {
+        // An instance receiving its own PIPE_STATUS_REPLAY (broadcasts
+        // reach the sender too) must be a no-op: merging identical state
+        // into itself changes nothing and emits nothing further.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
+        let payload = s.serialize_statuses();
+        let before = s.agent_statuses.clone();
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, &payload)],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses, before);
+    }
+
+    #[test]
+    fn status_request_of_own_broadcast_is_answered_like_any_other() {
+        // The requester also receives its own PIPE_STATUS_REQUEST
+        // broadcast. That's fine (frozen design point 4): it just answers
+        // itself the same way it would answer anyone else — the merge on
+        // the reply is idempotent regardless of who sent the request.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+        s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
+        let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
+        assert_eq!(
+            action,
+            Action::ReplayStatuses("feat-a:Working".to_string())
+        );
+    }
+
+    #[test]
+    fn serialize_statuses_caps_total_payload_length() {
+        // Defensive cap: even with far more entries than any real session
+        // would have, the serialized payload never exceeds
+        // STATUS_REPLAY_MAX_LEN, and every entry actually included parses
+        // back cleanly (no truncated/corrupted last entry).
+        let mut s = State::default();
+        for i in 0..500 {
+            s.agent_statuses
+                .insert(format!("feat-tab-number-{i:04}"), AgentStatus::Working);
+        }
+        let payload = s.serialize_statuses();
+        assert!(payload.len() <= STATUS_REPLAY_MAX_LEN);
+        assert!(!payload.is_empty());
+        let parsed = State::parse_statuses(&payload);
+        // Every included entry must round-trip — no partially-written
+        // final entry from truncating mid-string.
+        assert_eq!(parsed.len(), payload.split(';').count());
+        for (tab, status) in &parsed {
+            assert!(tab.starts_with("feat-tab-number-"));
+            assert_eq!(*status, AgentStatus::Working);
+        }
     }
 
     // --- ctx() helper tests ---
