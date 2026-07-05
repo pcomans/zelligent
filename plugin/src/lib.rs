@@ -41,6 +41,14 @@ pub const CMD_LIST_WORKTREES: &str = "list_worktrees";
 pub const CMD_GIT_BRANCHES: &str = "git_branches";
 pub const CMD_SPAWN: &str = "spawn";
 pub const CMD_REMOVE: &str = "remove";
+pub const CMD_INVALIDATE_BROADCAST: &str = "invalidate_broadcast";
+
+/// Pipe name for cross-instance cache invalidation. CLI pipes are the ONLY
+/// channel that reaches hidden plugin instances (Events don't — see
+/// docs/references/zellij-plugin-api.md), so cache invalidation must ride a
+/// pipe. Broadcast by the CLI after spawn/remove and by the plugin's own
+/// spawn/remove completion. See #140/#138.
+pub const PIPE_INVALIDATE: &str = "zelligent-invalidate";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Mode {
@@ -138,6 +146,17 @@ pub struct State {
     /// 16 entries (see `handle_pipe`) so a flood of bogus tab names can't
     /// grow this unbounded. See issue #141.
     pub pending_statuses: BTreeMap<String, PendingStatus>,
+    /// The worktree cache is known-stale: a `zelligent-invalidate` pipe
+    /// arrived (someone spawned or removed a worktree) and no successful
+    /// `list-worktrees` has landed since. The pipe handler fires an
+    /// immediate Refresh, but for a hidden instance that Refresh's
+    /// `RunCommandResult` is lost (Events don't reach hidden instances) —
+    /// this bit is the durable part. It stays set until
+    /// `handle_list_worktrees` succeeds and is retried as a Refresh trigger
+    /// on every `TabUpdate`, the first of which arrives right when the
+    /// instance's tab becomes visible again — when the result CAN land.
+    /// See #140/#138.
+    pub cache_dirty: bool,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -281,6 +300,34 @@ impl State {
             PathBuf::from(&self.repo_root),
             Self::ctx(CMD_GIT_BRANCHES),
         );
+    }
+
+    /// Broadcast `zelligent-invalidate` to ALL sidebar instances in this
+    /// session — including hidden ones, which CLI pipes reach but Events do
+    /// not (see docs/references/zellij-plugin-api.md). Invoked from the
+    /// imperative shell after this instance completes a spawn or remove;
+    /// the pure handlers stay side-effect free. Uses `run_command` with the
+    /// host `zellij` binary rather than `pipe_message_to_plugin`: the
+    /// plugin-side API (zellij-tile 0.43) targets a single destination
+    /// plugin by id/url and may LAUNCH a new instance on a url miss,
+    /// whereas an un-targeted CLI pipe is the verified broadcast channel
+    /// (it's how the zelligent-status hooks already reach every instance).
+    /// Best-effort: the result is ignored (see CMD_INVALIDATE_BROADCAST in
+    /// `update`), and without a session name we skip silently.
+    fn fire_invalidate_broadcast(&self) {
+        if let Some(session) = &self.session_name {
+            run_command(
+                &[
+                    "zellij",
+                    "--session",
+                    session,
+                    "pipe",
+                    "--name",
+                    PIPE_INVALIDATE,
+                ],
+                Self::ctx(CMD_INVALIDATE_BROADCAST),
+            );
+        }
     }
 
     fn fire_spawn(&self, branch: &str) {
@@ -460,6 +507,11 @@ impl State {
         }
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
+        // Success: the cache now reflects reality, so any pending
+        // invalidation (see `cache_dirty`) is satisfied. The failure path
+        // above deliberately returns without clearing — a failed refresh
+        // proves nothing, and the next TabUpdate must retry.
+        self.cache_dirty = false;
         self.recompute_sidebar_items();
     }
 
@@ -675,7 +727,20 @@ impl State {
             .any(|t| !previously_known.contains(&t.name));
         let has_tab_set_changed = had_tabs && (has_added_tab || has_disappeared_known);
 
-        if has_new_unmatched || has_disappeared_known || has_tab_set_changed {
+        // Dirty-cache retry (#140/#138). The set-diff above cannot catch a
+        // blind-window round-trip: a worktree spawned AND removed entirely
+        // while this instance was hidden leaves zero net set drift at
+        // wake-up (verified live — prev_known == new set, trigger correctly
+        // None). The `zelligent-invalidate` pipe covers that case: pipes DO
+        // reach hidden instances, so `cache_dirty` was set at the time of
+        // the change, and this TabUpdate — the first Event the instance
+        // receives on becoming visible — is when the retried Refresh can
+        // actually complete. Deliberately NOT cleared here: only a
+        // successful `handle_list_worktrees` proves the cache is fresh
+        // again. Also deliberately not gated on `had_tabs`: at worst the
+        // bootstrap refresh and this one overlap, and the first success
+        // clears the bit.
+        if has_new_unmatched || has_disappeared_known || has_tab_set_changed || self.cache_dirty {
             Action::Refresh
         } else {
             Action::None
@@ -989,6 +1054,17 @@ impl State {
     }
 
     pub fn handle_pipe(&mut self, msg: &PipeMessage) -> Action {
+        // Cross-instance cache invalidation (#140/#138). No args needed:
+        // the message means "a worktree was spawned or removed somewhere —
+        // your cache may be stale". Mark dirty FIRST (the durable part; a
+        // hidden instance will lose the Refresh's RunCommandResult), then
+        // fire an immediate Refresh, which completes right away in visible
+        // instances. `handle_tab_update` retries the Refresh while the bit
+        // is set; a successful `handle_list_worktrees` clears it.
+        if msg.name == PIPE_INVALIDATE {
+            self.cache_dirty = true;
+            return Action::Refresh;
+        }
         if msg.name != "zelligent-status" {
             return Action::None;
         }
@@ -1257,8 +1333,27 @@ impl ZellijPlugin for State {
                         self.handle_git_branches(exit_code, &stdout, &stderr);
                         Action::None
                     }
-                    Some(CMD_SPAWN) => self.handle_spawn_result(exit_code, &stderr, &context),
-                    Some(CMD_REMOVE) => self.handle_remove_result(exit_code, &stderr, &context),
+                    Some(CMD_SPAWN) => {
+                        // Side effect in the shell, not the pure handler:
+                        // tell sibling instances (hidden ones included —
+                        // only a pipe reaches them) their caches are stale.
+                        // See #140/#138 and `fire_invalidate_broadcast`.
+                        if exit_code == Some(0) {
+                            self.fire_invalidate_broadcast();
+                        }
+                        self.handle_spawn_result(exit_code, &stderr, &context)
+                    }
+                    Some(CMD_REMOVE) => {
+                        if exit_code == Some(0) {
+                            self.fire_invalidate_broadcast();
+                        }
+                        self.handle_remove_result(exit_code, &stderr, &context)
+                    }
+                    Some(CMD_INVALIDATE_BROADCAST) => {
+                        // Best-effort broadcast; success or failure, there
+                        // is nothing to do with the result.
+                        Action::None
+                    }
                     Some(other) => {
                         self.status_message = format!("Unknown command result: {other}");
                         self.status_is_error = true;
@@ -2528,6 +2623,99 @@ mod tests {
 
         // feat-b disappears AND focus moves from feat-a to feat-c.
         let action = s.handle_tab_update(vec![make_tab("feat-a", false), make_tab("feat-c", true)]);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn invalidate_pipe_sets_dirty_and_returns_refresh() {
+        let mut s = State::default();
+        assert!(!s.cache_dirty);
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert_eq!(action, Action::Refresh);
+        assert!(
+            s.cache_dirty,
+            "the dirty bit is the durable part — a hidden instance loses \
+             the Refresh result, so the bit must survive for the TabUpdate \
+             retry"
+        );
+    }
+
+    #[test]
+    fn blind_window_round_trip_heals_via_dirty_bit_not_set_diff() {
+        // THE diagnosed #140 scenario (live instrumentation, archive
+        // 12-diag-140): this instance last saw tabs {zelligent, feat-a},
+        // then went hidden (zero Events). During the blind window feat-b
+        // was spawned AND removed — so the wake-up TabUpdate's set is
+        // IDENTICAL to prev_known and the v2 set-diff has nothing to see.
+        // Only the invalidate pipe (which DOES reach hidden instances)
+        // knows anything happened; its dirty bit must drive the retry.
+        let mut s = State {
+            repo_name: "zelligent".into(),
+            ..Default::default()
+        };
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+
+        // Control: with the dirty bit clear, an identical-set TabUpdate
+        // correctly does nothing — this is exactly where v2 alone stalled.
+        let control =
+            s.handle_tab_update(vec![make_tab("zelligent", true), make_tab("feat-a", false)]);
+        assert_eq!(
+            control,
+            Action::None,
+            "control: without the dirty bit, zero net set drift means no \
+             Refresh (the v2 gap)"
+        );
+
+        // The blind-window spawn/remove each piped an invalidate. The pipe
+        // handler fires a Refresh, but this instance is hidden: the
+        // RunCommandResult never arrives, so nothing clears the bit.
+        let pipe_action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert_eq!(pipe_action, Action::Refresh);
+        assert!(s.cache_dirty);
+
+        // Wake-up TabUpdate: set still identical, but the dirty bit forces
+        // the retry — now visible, this Refresh's result can land.
+        let action =
+            s.handle_tab_update(vec![make_tab("zelligent", true), make_tab("feat-a", false)]);
+        assert_eq!(
+            action,
+            Action::Refresh,
+            "dirty bit must force a Refresh retry even with zero set drift"
+        );
+    }
+
+    #[test]
+    fn successful_list_worktrees_clears_dirty_bit() {
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert!(s.cache_dirty);
+
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        assert!(
+            !s.cache_dirty,
+            "a successful refresh satisfies the invalidation"
+        );
+
+        // With the bit cleared, an identical TabUpdate is quiet again.
+        let action = s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn failed_list_worktrees_leaves_dirty_bit_set() {
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert!(s.cache_dirty);
+
+        // A failed refresh proves nothing about cache freshness.
+        s.handle_list_worktrees(Some(1), b"", b"boom");
+        assert!(s.cache_dirty, "failure must not clear the dirty bit");
+
+        // The next TabUpdate retries the Refresh.
+        let action = s.handle_tab_update(vec![make_tab("feat-a", true)]);
         assert_eq!(action, Action::Refresh);
     }
 
