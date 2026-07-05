@@ -463,6 +463,7 @@ write_session_layout() {
   local default_fragment_path="$2"
   local initial_children_path="$3"
   local tab_name="$4"
+  local new_tab_fragment_path="$5"
   local tab_name_kdl
 
   tab_name_kdl=$(escape_kdl_string "$tab_name")
@@ -472,6 +473,23 @@ write_session_layout() {
     echo "    default_tab_template {"
     sed 's/^/        /' "$default_fragment_path"
     echo "    }"
+    # `default_tab_template`'s {{zelligent_children}} substitution ("children",
+    # a bare keyword) is only filled in when Zellij merges an EXPLICIT tab body
+    # into the template at layout-parse time — which is how the `tab { }`
+    # block below gets its shell+lazygit panes. A tab created later via `zellij
+    # action new-tab --name X` with no --layout has no explicit body to merge,
+    # and Zellij's fallback fill for that case does not recurse into nested
+    # panes to find the children marker, so it silently resolves to nothing —
+    # leaving only the sidebar, full width, with no shell pane (issue #139).
+    # `new_tab_template` is a distinct KDL node, parsed like a literal `tab { }`
+    # (no children-marker merge at all), and Zellij prefers it over
+    # `default_tab_template` specifically for that no-layout new-tab case. Give
+    # it real, literal content so manual tabs get a usable shell pane too.
+    if [ -n "$new_tab_fragment_path" ]; then
+      echo "    new_tab_template {"
+      sed 's/^/        /' "$new_tab_fragment_path"
+      echo "    }"
+    fi
     echo "    tab name=\"$tab_name_kdl\" {"
     sed 's/^/        /' "$initial_children_path"
     echo "    }"
@@ -814,6 +832,7 @@ if [ -z "$1" ]; then
     mkdir -p "$ZELLIGENT_USER_DIR/tmp"
     RENDERED_STARTUP_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-template-XXXXXX")
     RENDERED_STARTUP_CHILDREN=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-children-XXXXXX")
+    RENDERED_STARTUP_NEW_TAB_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-new-tab-template-XXXXXX")
     # `zellij --new-session-with-layout` treats an extension-less argument as a
     # layout NAME (looked up against built-ins) rather than a path, and silently
     # falls back to the default built-in layout on miss. Force a `.kdl` suffix
@@ -821,7 +840,7 @@ if [ -z "$1" ]; then
     STARTUP_LAYOUT_RAW=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-startup-session-XXXXXX")
     STARTUP_LAYOUT="${STARTUP_LAYOUT_RAW}.kdl"
     mv "$STARTUP_LAYOUT_RAW" "$STARTUP_LAYOUT"
-    trap 'rm -f "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$STARTUP_LAYOUT"' EXIT
+    trap 'rm -f "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$RENDERED_STARTUP_NEW_TAB_TEMPLATE" "$STARTUP_LAYOUT"' EXIT
 
     STARTUP_AGENT_CMD="$SHELL"
     STARTUP_AGENT_RENDER=$(build_agent_command_value "$STARTUP_AGENT_CMD" "$REPO_NAME" "$REPO_ROOT" "$REPO_ROOT" "" "false")
@@ -832,7 +851,14 @@ if [ -z "$1" ]; then
     STARTUP_CHILDREN=$(default_tab_body_content "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_PANE_NAME")
     render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_TEMPLATE" "$REPO_ROOT" "$STARTUP_AGENT_RENDER" "$STARTUP_SIDEBAR" "children"
     printf '%s\n' "$STARTUP_CHILDREN" > "$RENDERED_STARTUP_CHILDREN"
-    write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$REPO_NAME"
+    # `new_tab_template` content for manual tabs (`zellij action new-tab
+    # --name X` with no --layout, see #139): no worktree/agent context exists
+    # for a tab created later on, so fall back to a plain shell — same
+    # wrapped body shape, just without the worktree cwd/agent command.
+    STARTUP_MANUAL_AGENT_RENDER=$(escape_kdl_string "exec $STARTUP_AGENT_CMD")
+    STARTUP_NEW_TAB_CHILDREN=$(default_tab_body_content "$REPO_ROOT" "$STARTUP_MANUAL_AGENT_RENDER" "shell")
+    render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_NEW_TAB_TEMPLATE" "$REPO_ROOT" "$STARTUP_MANUAL_AGENT_RENDER" "$STARTUP_SIDEBAR" "$STARTUP_NEW_TAB_CHILDREN"
+    write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$REPO_NAME" "$RENDERED_STARTUP_NEW_TAB_TEMPLATE"
 
     echo "Creating Zellij session '$REPO_NAME'..."
     zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
@@ -1094,7 +1120,8 @@ LAYOUT="${LAYOUT_RAW}.kdl"
 mv "$LAYOUT_RAW" "$LAYOUT"
 RENDERED_TAB_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-fragment-XXXXXX")
 RENDERED_SESSION_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-session-template-XXXXXX")
-trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE"' EXIT
+RENDERED_NEW_TAB_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-new-tab-template-XXXXXX")
+trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_NEW_TAB_TEMPLATE"' EXIT
 
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 AGENT_CMD_RENDER=$(build_agent_command_value "$AGENT_CMD" "$SESSION_NAME" "$REPO_ROOT" "$WORKTREE_PATH" "$SETUP_SCRIPT" "$NEW_WORKTREE")
@@ -1104,6 +1131,15 @@ TAB_PANE_NAME=$(pane_name_for_agent_cmd "$AGENT_CMD" "$SESSION_NAME")
 TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$TAB_PANE_NAME")
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"
+# `new_tab_template` content for manual tabs (`zellij action new-tab --name X`
+# with no --layout, see #139): no worktree/agent context exists for a tab
+# created later on, so fall back to a plain shell — same wrapped body shape
+# default_tab_body_content produces for the session's own initial tab, just
+# without the worktree cwd/agent command. See write_session_layout for why
+# `default_tab_template`'s "children" alone isn't enough for these tabs.
+MANUAL_AGENT_RENDER=$(escape_kdl_string "exec $SHELL")
+NEW_TAB_CHILDREN_RENDER=$(default_tab_body_content "$REPO_ROOT" "$MANUAL_AGENT_RENDER" "shell")
+render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_NEW_TAB_TEMPLATE" "$REPO_ROOT" "$MANUAL_AGENT_RENDER" "$SIDEBAR_RENDER" "$NEW_TAB_CHILDREN_RENDER"
 
 # Decide spawn mode ONCE. We used to call `zellij_list_sessions` twice — once
 # to choose the layout shape, once to choose the launch command — and a
@@ -1134,7 +1170,7 @@ case "$SPAWN_MODE" in
     write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
     ;;
   new-session)
-    write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME"
+    write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME" "$RENDERED_NEW_TAB_TEMPLATE"
     ;;
 esac
 

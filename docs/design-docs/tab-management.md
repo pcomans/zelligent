@@ -6,6 +6,12 @@ The CLI creates tabs using `zellij action new-tab --layout FILE --name NAME`. Th
 
 Important: `new-tab --layout` does NOT inherit `default_tab_template`. Tab-bar and status-bar plugins must be included explicitly in the layout file.
 
+Manual tabs created the other way — `zellij action new-tab --name X` with no
+`--layout` at all — get their content from a separate `new_tab_template` node
+instead, since `default_tab_template`'s own `children` marker doesn't fill in
+for that case (issue #139). See
+[docs/references/zellij-kdl-layout.md](../references/zellij-kdl-layout.md#default_tab_templates-children-marker-doesnt-fill-in-for-bare-new-tab-139).
+
 ## Tab naming
 
 Tabs are named after the sanitized branch name (see [PRODUCT_SENSE.md](../PRODUCT_SENSE.md#session-name-format)). The plugin uses tab names as the primary identifier for all tab operations.

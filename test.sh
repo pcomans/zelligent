@@ -575,9 +575,18 @@ contains "no args with plugin: sets default tab template" "default_tab_template"
 contains "no args with plugin: layout has sidebar plugin" 'plugin location="file:' "$out"
 contains "no args with plugin: layout names sidebar pane" 'pane name="zelligent"' "$out"
 contains "no args with plugin: layout has status-bar" 'plugin location="zellij:status-bar"' "$out"
-count_equals "no args with plugin: session layout has one shared sidebar split" 'split_direction="Vertical"' 1 "$out"
+# 2, not 1: default_tab_template and new_tab_template (#139) each render
+# their own copy of the sidebar's outer Vertical split.
+count_equals "no args with plugin: default template and new tab template each have a sidebar split" 'split_direction="Vertical"' 2 "$out"
 contains "no args with plugin: startup honors SHELL" 'agent_cmd "/bin/zsh"' "$out"
 contains "no args with plugin: startup shell reaches layout args" 'exec /bin/zsh' "$out"
+# #139: manual tabs (`zellij action new-tab --name X` with no --layout) use
+# `new_tab_template`, not `default_tab_template`'s unfillable nested
+# {{zelligent_children}} marker — see write_session_layout for why. It must
+# carry real sidebar+shell+lazygit content, not just the sidebar.
+contains "no args with plugin: sets new tab template"            "new_tab_template"                    "$out"
+contains "no args with plugin: new tab template has shell pane"  'pane name="shell"'                   "$out"
+contains "no args with plugin: new tab template has lazygit"     'command="lazygit"'                   "$out"
 
 # No args outside Zellij with plugin but no layout: fails clearly
 NOARGS_LAYOUT_BACKUP=$(mktemp)
@@ -1161,6 +1170,20 @@ contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-s
 contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
 contains "outside zellij (new): layout names sidebar pane"       'pane name="zelligent"'             "$out"
+# #139: `default_tab_template`'s {{zelligent_children}} ("children" keyword)
+# is only filled in by Zellij when merging an EXPLICIT tab body into the
+# template — which is what makes the `tab name="some-branch"` block above
+# render correctly. A tab created later via `zellij action new-tab --name X`
+# with no --layout has no explicit body to merge, and Zellij's fill for that
+# path does not recurse into nested panes to find the marker, so it silently
+# resolves to nothing (sidebar only, no shell pane). `new_tab_template` is a
+# separate KDL node — parsed like a literal tab, no children-marker merge —
+# that Zellij prefers over `default_tab_template` for exactly that case, so
+# give it real sidebar+shell+lazygit content instead of a "children" marker.
+contains "outside zellij (new): sets new tab template"           "new_tab_template"                    "$out"
+contains "outside zellij (new): new tab template has sidebar"    'plugin location="file:'              "$out"
+contains "outside zellij (new): new tab template has shell pane" 'pane name="shell"'                   "$out"
+contains "outside zellij (new): new tab template has lazygit"    'command="lazygit"'                   "$out"
 
 cat > "$TEST_REPO_LAYOUT" <<'KDL'
 // leading comment before outer layout
@@ -1177,7 +1200,10 @@ out=$(ZELLIJ="" ZELLIJ_SESSION_NAME="" PATH="$MOCK_BIN:$PATH" "$SCRIPT" spawn so
 cleanup_test_branch
 contains "outside zellij (new): commented layout still parses" "zellij --new-session-with-layout" "$out"
 contains "outside zellij (new): commented layout keeps tab wrapper" 'tab name="some-branch"' "$out"
-count_equals "outside zellij (new): custom sidebar width reaches initial tab and default template" 'size="33%"' 2 "$out"
+# 3, not 2: initial tab's rendered fragment + default_tab_template +
+# new_tab_template (#139) each carry their own copy of the custom-width
+# sidebar pane.
+count_equals "outside zellij (new): custom sidebar width reaches initial tab, default template, and new tab template" 'size="33%"' 3 "$out"
 cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 
 # Outside Zellij, repo session already exists: add tab and attach
