@@ -134,6 +134,13 @@ with shell scripts that echo their args, then run `zelligent` with
 `PATH` pointing at the stubs. The Prompt delivery harness goes
 further — it stubs `claude` and *executes* the emitted KDL `args` line
 through `bash -lc` so the test sees what the agent would actually see.
+Because `bash -lc` is a login shell that re-sources the profile and
+resets `PATH`, the harness rewrites `exec claude` to the *absolute*
+mock path (`$MOCK_CLAUDE`) rather than relying on `PATH` shadowing —
+a bare `claude` would resolve to the real binary and recursively
+re-enter the suite. As a second layer, `test.sh` exports
+`ZELLIGENT_TEST_ACTIVE` and refuses to run when it is already set, so
+even a bypassed mock cannot fork-bomb the machine.
 
 What it catches:
 
@@ -172,9 +179,15 @@ What it catches:
   left/right split, not what the word says — `dump-layout` is the
   authoritative check).
 
-Known flake: `script exits 0 (integration)` occasionally returns
-exit 2 instead of 0. Tracked but un-fixed because it shows up only on
-loaded CI runners and not locally; one-off pre-existing noise.
+Plugin path: real Zellij actually loads the sidebar plugin, so this
+layer needs a real wasm — the `ZELLIGENT_PLUGIN_SRC=$SCRIPT` fallback
+the unit tests use (a shell script) fails wasm validation ("magic
+header not detected") and makes `zellij action new-tab` exit 2. This
+was the root cause of the long-standing `script exits 0 (integration)`
+failure. The section now prefers the dev build
+(`plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm`), falls
+back to the Homebrew-installed copy, and if neither exists skips only
+the exit-code assertion with a visible warning.
 
 CI definition is in `.github/workflows/ci.yml`: two macOS jobs,
 `test-shell` and `test-plugin`, both required to pass before merge.
