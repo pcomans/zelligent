@@ -1232,13 +1232,35 @@ else
 MOCK
   chmod +x "$MOCK_BIN_INT/lazygit"
 
+  # Real Zellij (unlike the unit tests' mock) actually loads the sidebar
+  # plugin, so the top-of-file ZELLIGENT_PLUGIN_SRC=$SCRIPT fallback — a shell
+  # script — fails wasm validation ("magic header not detected") and makes
+  # `zellij action new-tab` exit 2. Point at a real wasm when one is available.
+  INT_PLUGIN_WASM="$REPO_ROOT/plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm"
+  if [ ! -f "$INT_PLUGIN_WASM" ] && command -v brew &>/dev/null; then
+    INT_PLUGIN_WASM="$(brew --prefix 2>/dev/null)/share/zelligent/zelligent-plugin.wasm"
+  fi
+  if [ -f "$INT_PLUGIN_WASM" ]; then
+    INT_PLUGIN_SRC="$INT_PLUGIN_WASM"
+  else
+    # No wasm anywhere: keep the script fallback so the tab/layout checks
+    # below still run; the plugin-load failure makes new-tab exit 2, so the
+    # exit-code assertion is skipped rather than asserted wrong.
+    INT_PLUGIN_SRC="$ZELLIGENT_PLUGIN_SRC"
+  fi
+
   # Call the script in inside-Zellij mode; it will call `zellij action new-tab`
   # targeting the background test session via ZELLIJ_SESSION_NAME
   register_managed_cleanup "$HOME" integration-test-branch
-  int_out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME="$TEST_SESSION" PATH="$MOCK_BIN_INT:$PATH" \
+  int_out=$(ZELLIGENT_PLUGIN_SRC="$INT_PLUGIN_SRC" \
+    ZELLIJ=1 ZELLIJ_SESSION_NAME="$TEST_SESSION" PATH="$MOCK_BIN_INT:$PATH" \
     "$SCRIPT" spawn integration-test-branch 2>&1)
   int_code=$?
-  check "script exits 0 (integration)" "0" "$int_code"
+  if [ -f "$INT_PLUGIN_WASM" ]; then
+    check "script exits 0 (integration)" "0" "$int_code"
+  else
+    echo "  ⚠️  No plugin wasm found, skipping exit-code check (build one: cd plugin && cargo build --release)"
+  fi
 
   git -C "$REPO_ROOT" worktree remove --force \
     "$HOME/.zelligent/worktrees/$REPO_NAME/integration-test-branch" &>/dev/null || true
