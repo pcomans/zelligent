@@ -1163,10 +1163,8 @@ impl State {
             Mouse::LeftClick(line, _col) => {
                 let line = (*line).max(0) as usize;
                 if let Some(idx) = self.sidebar_index_at_line(line) {
-                    if idx == self.selected_index {
-                        return self.action_for_sidebar_item(idx);
-                    }
                     self.selected_index = idx;
+                    return self.action_for_sidebar_item(idx);
                 }
             }
             _ => {}
@@ -2150,52 +2148,59 @@ mod tests {
     //   line 6/7      = item2 title/subtitle (feat-c)
     //   line 8+       = footer/status/past-end -> no-op
 
+    /// #137: a single click on an unselected item's title now selects AND
+    /// activates in one step (previously this only moved `▌`, requiring a
+    /// second click to activate).
     #[test]
-    fn browse_mouse_click_title_selects_item() {
+    fn browse_mouse_click_title_selects_and_activates_item() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         s.last_cols = 80;
         let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
-        assert_eq!(action, Action::None);
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
         assert_eq!(s.selected_index, 1);
     }
 
-    /// The #135 regression: a subtitle click must select the SAME item as
-    /// its title, never the next one.
+    /// The #135 regression: a subtitle click must select (and, per #137,
+    /// activate) the SAME item as its title, never the next one.
     #[test]
-    fn browse_mouse_click_subtitle_selects_same_item_not_next() {
+    fn browse_mouse_click_subtitle_selects_and_activates_same_item_not_next() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         s.last_cols = 80;
         let action = s.handle_mouse_browse(&Mouse::LeftClick(5, 5));
-        assert_eq!(action, Action::None);
+        assert_eq!(action, Action::SwitchToTab("feat-b".into()));
         assert_eq!(s.selected_index, 1, "subtitle click must land on item 1, not item 2");
     }
 
     /// The last item's subtitle must resolve to the last item, not a dead
     /// past-the-end no-op (the other half of the #135 regression).
     #[test]
-    fn browse_mouse_click_last_item_subtitle_selects_last_item() {
+    fn browse_mouse_click_last_item_subtitle_selects_and_activates_last_item() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         s.last_cols = 80;
         let action = s.handle_mouse_browse(&Mouse::LeftClick(7, 5));
-        assert_eq!(action, Action::None);
+        assert_eq!(action, Action::SwitchToTab("feat-c".into()));
         assert_eq!(s.selected_index, 2);
     }
 
+    /// #137 idempotence guard: clicking a row that is *already* selected
+    /// (e.g. a habitual second click, or clicking the tab you're already
+    /// in) must still just activate — no duplicate spawn, no tab churn.
     #[test]
-    fn browse_mouse_click_on_selected_item_activates_it() {
+    fn browse_mouse_click_on_already_selected_item_still_activates() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
         s.last_cols = 80;
         s.selected_index = 1;
         let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
         assert_eq!(action, Action::SwitchToTab("feat-b".into()));
+        assert_eq!(s.selected_index, 1);
     }
 
     #[test]
-    fn browse_mouse_click_on_selected_detached_item_spawns_it() {
+    fn browse_mouse_click_on_detached_item_spawns_it() {
         let mut s = State {
             mode: Mode::BrowseWorktrees,
             worktrees: vec![Worktree {
