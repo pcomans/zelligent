@@ -159,6 +159,29 @@ sequenceDiagram
 See [design-docs/agent-notifications.md](design-docs/agent-notifications.md)
 for the full pipeline and the `ZELLIGENT_TAB_NAME` propagation trick.
 
+### Sidebar cache refresh triggers
+
+Each tab's sidebar is a separate plugin instance with its own `worktrees`
+cache, and Zellij delivers Events (`TabUpdate` etc.) only to instances in
+the visible tab — a hidden instance is event-starved and its snapshot
+freezes at the moment its tab lost focus (pipes, by contrast, broadcast to
+all instances). Silent self-heal `Refresh`es (no status message) therefore
+fire in `handle_tab_update` on three conditions, OR-ed into a single
+Refresh per `TabUpdate`: a newly-appeared tab with no matching worktree, a
+previously-known tab that has disappeared, and — subsuming both — the tab
+set changing in any way relative to the instance's previous snapshot. The
+set-diff trigger is what heals a starved instance: tabs spawned and/or
+removed while it was hidden can evade the two narrower gates (a new tab
+that already matches the stale cache, or one that appeared and vanished
+entirely while hidden), but the catch-up `TabUpdate` the instance receives
+when its tab becomes active again carries the accumulated set drift — and
+the instance is visible by then, so the Refresh's command result lands. A
+pure focus switch with no set drift doesn't refresh, and none of it fires
+on the very first `TabUpdate` since startup, since the bootstrap path
+already loads worktrees. See
+[references/zellij-plugin-api.md](references/zellij-plugin-api.md) for the
+event-delivery model.
+
 ## Key files
 
 | File                                       | Purpose                                                       |
