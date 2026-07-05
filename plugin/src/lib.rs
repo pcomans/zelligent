@@ -107,6 +107,16 @@ pub struct State {
     /// orphan row. A set (rather than `Option`) so rapid sequential removes
     /// don't lose the earlier pending names. See issue #121.
     pub pending_close: BTreeSet<String>,
+    /// Status events for tabs not yet present in `self.tabs`. The CLI pipes
+    /// `event=Start,tab=<name>` as part of a spawn, but that pipe routinely
+    /// races the `TabUpdate` that registers the new tab with existing sidebar
+    /// instances — without buffering, the event is silently dropped and the
+    /// spawning tab never shows its initial `Working` status. Keyed by tab
+    /// name so a later event for the same not-yet-known tab overwrites the
+    /// earlier one (latest wins); drained into `agent_statuses` once
+    /// `handle_tab_update` sees the tab. Bounded (see `handle_pipe`) so a
+    /// flood of bogus tab names can't grow this unbounded. See issue #141.
+    pub pending_statuses: BTreeMap<String, AgentStatus>,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -543,6 +553,20 @@ impl State {
             self.tabs.iter().map(|t| t.name.clone()).collect();
 
         self.tabs = tab_info;
+
+        // Drain any buffered status events (see #141) for tabs that have now
+        // shown up in this snapshot. Must run after `self.tabs` is assigned
+        // (above) so `recompute_sidebar_items` below sees the up-to-date
+        // `agent_statuses`, and before it so the freshly-drained status
+        // renders on this same pass instead of lagging a frame.
+        if !self.pending_statuses.is_empty() {
+            for tab in &self.tabs {
+                if let Some(status) = self.pending_statuses.remove(&tab.name) {
+                    self.agent_statuses.insert(tab.name.clone(), status);
+                }
+            }
+        }
+
         self.recompute_sidebar_items();
 
         // On first tab sync, prefer the actual active tab over the bootstrap cursor
@@ -925,8 +949,33 @@ impl State {
                 return Action::None;
             }
         };
-        // Ignore status updates for unknown tabs
+        // The tab this event names isn't in `self.tabs` yet — almost always
+        // because the CLI's `event=Start` pipe (fired at spawn time) races
+        // the `TabUpdate` that registers the new tab with this sidebar
+        // instance. Buffer it instead of dropping it; `handle_tab_update`
+        // drains matching entries into `agent_statuses` once the tab shows
+        // up. See issue #141.
         if !self.tabs.iter().any(|t| t.name == tab_name) {
+            // Latest event for a given not-yet-known tab wins.
+            let is_new_key = !self.pending_statuses.contains_key(&tab_name);
+            if is_new_key && self.pending_statuses.len() >= 16 {
+                // Bound the buffer so a flood of bogus/unknown tab names
+                // (typos, stale CLI invocations, etc.) can't grow it
+                // unbounded. Evicting `first_key_value` (lexicographically
+                // smallest) is arbitrary — there's no ordering signal worth
+                // preserving here — but it keeps the map's size capped
+                // deterministically without extra bookkeeping. Overwrites of
+                // an already-buffered key never evict, since they don't grow
+                // the map.
+                self.pending_statuses.pop_first();
+            }
+            self.pending_statuses.insert(tab_name, status);
+            // No Notify here: the buffered case is overwhelmingly a Start
+            // (Working), which never notifies anyway. Deferring a
+            // NeedsInput/Done notify to TabUpdate time would fire it from
+            // the wrong context (in response to a tab appearing, not the
+            // actual status event), so we deliberately drop the notify for
+            // the buffered path rather than replay it later.
             return Action::None;
         }
         self.agent_statuses.insert(tab_name.clone(), status);
@@ -2761,7 +2810,10 @@ mod tests {
     }
 
     #[test]
-    fn pipe_unknown_tab_ignored() {
+    fn pipe_unknown_tab_buffered() {
+        // #141: a valid event for a tab not yet in `self.tabs` (the CLI's
+        // spawn-time `event=Start` pipe racing the registering TabUpdate)
+        // must be buffered, not dropped.
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-b", false)];
         let action = s.handle_pipe(&pipe_msg(
@@ -2770,6 +2822,111 @@ mod tests {
         ));
         assert_eq!(action, Action::None);
         assert_eq!(s.agent_statuses.get("unknown-tab"), None);
+        assert_eq!(
+            s.pending_statuses.get("unknown-tab"),
+            Some(&AgentStatus::Done)
+        );
+    }
+
+    #[test]
+    fn pipe_buffered_status_applied_on_tab_update() {
+        // Once the buffered tab's TabUpdate arrives, the status must move
+        // from `pending_statuses` into `agent_statuses` — and the Action
+        // returned must match what an equivalent update without any
+        // buffered entry would return (the #127/#138 Refresh/None semantics
+        // are untouched by draining).
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-b", false)];
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
+        assert_eq!(s.pending_statuses.get("feat-a"), Some(&AgentStatus::Working));
+
+        let action = s.handle_tab_update(vec![
+            make_tab("feat-b", false),
+            make_tab("feat-a", true),
+        ]);
+
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
+        assert!(s.pending_statuses.get("feat-a").is_none());
+
+        // Same snapshot, but starting from a state that never buffered
+        // anything for feat-a — the Action must be identical.
+        let mut baseline = State::default();
+        baseline.tabs = vec![make_tab("feat-b", false)];
+        let baseline_action = baseline.handle_tab_update(vec![
+            make_tab("feat-b", false),
+            make_tab("feat-a", true),
+        ]);
+        assert_eq!(action, baseline_action);
+    }
+
+    #[test]
+    fn pipe_buffered_status_latest_event_wins() {
+        let mut s = State::default();
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
+        assert_eq!(s.pending_statuses.get("feat-a"), Some(&AgentStatus::Working));
+
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
+        assert_eq!(s.pending_statuses.get("feat-a"), Some(&AgentStatus::Done));
+        assert_eq!(s.pending_statuses.len(), 1);
+    }
+
+    #[test]
+    fn pipe_buffered_needs_input_does_not_notify_at_buffer_time() {
+        let mut s = State::default();
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "unknown-tab"), ("event", "PermissionRequest")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(
+            s.pending_statuses.get("unknown-tab"),
+            Some(&AgentStatus::NeedsInput)
+        );
+    }
+
+    #[test]
+    fn pipe_buffered_needs_input_does_not_notify_at_tab_update_time_either() {
+        // A NeedsInput/Done that only arrives via the buffer must not be
+        // replayed as a Notify once the tab shows up — see the comment in
+        // `handle_pipe` on why deferring the notify would fire it from the
+        // wrong context.
+        let mut s = State::default();
+        // Give feat-a a matching worktree so its appearance in the
+        // TabUpdate below doesn't independently trigger a Refresh via the
+        // unrelated #127 "newly-appeared unmatched tab" gate — this test is
+        // only about the buffered-status/Notify interaction.
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "PermissionRequest")],
+        ));
+        let action = s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(action, Action::None);
+        assert_eq!(
+            s.agent_statuses.get("feat-a"),
+            Some(&AgentStatus::NeedsInput)
+        );
+    }
+
+    #[test]
+    fn pipe_buffered_statuses_capped_at_16() {
+        let mut s = State::default();
+        for i in 0..17 {
+            s.handle_pipe(&pipe_msg(
+                "zelligent-status",
+                &[("tab", &format!("unknown-{i}")), ("event", "Start")],
+            ));
+        }
+        assert_eq!(s.pending_statuses.len(), 16);
     }
 
     #[test]
