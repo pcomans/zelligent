@@ -3,6 +3,16 @@
 # Test suite for zelligent.sh
 # Unit tests run anywhere. Integration tests require Zellij to be installed.
 
+# Fork-bomb guard: the prompt-delivery harness spawns zelligent with a mock
+# claude. If that mock is ever bypassed (e.g. a login shell resets PATH), the
+# real `claude -p "run all tests..."` can re-enter this script recursively. This
+# guard makes that recursion structurally impossible regardless of mock health.
+if [ -n "$ZELLIGENT_TEST_ACTIVE" ]; then
+  echo "test.sh: refusing recursive invocation (ZELLIGENT_TEST_ACTIVE set)" >&2
+  exit 1
+fi
+export ZELLIGENT_TEST_ACTIVE=1
+
 PASS=0
 FAIL=0
 CLEANUP_WORKTREE_PATHS=()
@@ -392,10 +402,14 @@ cat > "$KDL_PARSER" <<'PYEOF'
 
 Finds the first `args` line, extracts double-quoted string arguments using
 regex, unescapes KDL \" sequences, and runs: bash <arg1> <arg2> ...
-Replaces 'exec claude' with 'claude' so the mock binary can return.
+Rewrites 'exec claude' to the absolute mock-claude path ($MOCK_CLAUDE) so the
+mock binary is invoked even though the command runs through `bash -lc` — a login
+shell that re-sources the user's profile and resets PATH, which would otherwise
+resolve `claude` to the REAL binary and fork-bomb the suite.
 """
-import re, subprocess, sys
+import os, re, subprocess, sys
 
+mock_claude = os.environ.get("MOCK_CLAUDE", "claude")
 layout_file = sys.argv[1]
 with open(layout_file) as f:
     for line in f:
@@ -403,7 +417,7 @@ with open(layout_file) as f:
         if stripped.startswith("args "):
             tokens = re.findall(r'"((?:[^"\\]|\\.)*)"', stripped)
             args = [t.replace('\\"', '"').replace('\\\\', '\\') for t in tokens]
-            args = [a.replace('exec claude', 'claude') for a in args]
+            args = [a.replace('exec claude', mock_claude) for a in args]
             result = subprocess.run(["bash"] + args)
             sys.exit(result.returncode)
 
@@ -431,6 +445,10 @@ cat > "$MOCK_BIN_PROMPT/lazygit" <<'MOCK'
 #!/bin/bash
 MOCK
 chmod +x "$MOCK_BIN_PROMPT/claude" "$MOCK_BIN_PROMPT/zellij" "$MOCK_BIN_PROMPT/lazygit"
+
+# Absolute path to the mock claude. The KDL parser rewrites `exec claude` to this
+# so a login shell (`bash -lc`) that resets PATH can't reach the real binary.
+export MOCK_CLAUDE="$MOCK_BIN_PROMPT/claude"
 
 prompt_test_cleanup() {
   local branch="$1"
