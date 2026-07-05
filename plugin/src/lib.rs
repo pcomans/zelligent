@@ -168,6 +168,11 @@ pub struct State {
     pub agent_statuses: BTreeMap<String, AgentStatus>,
     /// Last rendered row count, used to map mouse clicks to sidebar rows.
     pub last_rows: usize,
+    /// Last rendered column count. Needed alongside `last_rows` to
+    /// recompute the exact same `ui::SidebarLayout` at click time that was
+    /// used to draw the last frame — the footer height and status-message
+    /// wrap both depend on `cols`, not just `rows`. See #135/#136.
+    pub last_cols: usize,
     /// Tab names we've asked the host to close. Until the host's `TabUpdate`
     /// confirms the close, any incoming `tab_info` that still contains a
     /// pending tab is stale (a focus-change event, etc.) and that tab must
@@ -1101,21 +1106,44 @@ impl State {
     }
 
     /// Map a rendered line number to a visible sidebar item.
-    pub fn sidebar_index_at_line(&self, line: usize, rows: usize) -> Option<usize> {
+    ///
+    /// `line` is a mouse row as Zellij reports it: relative to the PANE
+    /// CONTENT TOP (row 0 = the first content row inside the pane frame),
+    /// NOT relative to the first sidebar item. This was the root cause of
+    /// #135 — a click on an item's subtitle line landed on the *next* item
+    /// because the old mapping (`line / 2`) silently assumed the render
+    /// began with the first item, ignoring the header/blank leading lines.
+    ///
+    /// `sidebar_layout` (see ui.rs) is recomputed here from the same inputs
+    /// `render_to` used for the last frame (`last_rows`/`last_cols` are
+    /// captured at render time; `selected_index` and `status_message` don't
+    /// change between a render and the click that follows it), so this can
+    /// never disagree with what was actually drawn. Any line before the
+    /// item viewport (header, blank separator) or at/after it (footer,
+    /// status, past-the-end) is a strict no-op — never "select item 0" or
+    /// "select the next item".
+    pub fn sidebar_index_at_line(&self, line: usize) -> Option<usize> {
         if self.should_render_empty_state() || self.sidebar_items.is_empty() {
             return None;
         }
 
-        let viewport = ui::sidebar_viewport(self.selected_index, rows, self.sidebar_items.len());
-        let lines_per_item = 2;
-        // Zellij reports mouse rows relative to the first visible sidebar item.
-        // Each item occupies two rows: title then subtitle.
-        let item_offset = line / lines_per_item;
-        if item_offset >= viewport.visible_items {
+        let layout = ui::sidebar_layout(
+            self.last_rows,
+            self.last_cols,
+            self.sidebar_items.len(),
+            self.selected_index,
+            &self.status_message,
+        );
+        let leading = layout.leading_lines();
+        if line < leading {
+            return None;
+        }
+        let item_offset = (line - leading) / 2;
+        if item_offset >= layout.viewport.visible_items {
             return None;
         }
 
-        Some(viewport.start + item_offset)
+        Some(layout.viewport.start + item_offset)
     }
 
     pub fn handle_mouse_browse(&mut self, mouse: &Mouse) -> Action {
@@ -1134,7 +1162,7 @@ impl State {
             }
             Mouse::LeftClick(line, _col) => {
                 let line = (*line).max(0) as usize;
-                if let Some(idx) = self.sidebar_index_at_line(line, self.last_rows) {
+                if let Some(idx) = self.sidebar_index_at_line(line) {
                     if idx == self.selected_index {
                         return self.action_for_sidebar_item(idx);
                     }
@@ -1470,11 +1498,39 @@ impl State {
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::BrowseWorktrees => {
-                ui::render_header(w, &self.repo_name, cols);
-                let list_height = if self.should_render_empty_state() {
+                if self.should_render_empty_state() {
+                    ui::render_header(w, &self.repo_name, cols);
                     ui::render_empty_state(w);
-                    6
+                    let list_height = 6;
+                    let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                    let footer_height = if cols >= 55 { 3 } else { 4 };
+                    let used_lines = 1 + list_height + status_height + footer_height;
+                    let padding = rows.saturating_sub(used_lines);
+                    for _ in 0..padding {
+                        writeln!(w).unwrap();
+                    }
+                    ui::render_status(w, &self.status_message, self.status_is_error);
+                    ui::render_footer(w, &self.mode, VERSION, cols);
                 } else {
+                    // `layout` is computed once here and is the ONLY thing
+                    // that decides header/separator visibility and the item
+                    // viewport for this frame. `sidebar_index_at_line` (used
+                    // at click time) recomputes the identical struct from
+                    // the same inputs (`self.last_rows`/`self.last_cols`
+                    // captured from this render, plus `selected_index` and
+                    // `status_message`, both stable between a render and the
+                    // next click) — so a click can never disagree with what
+                    // was drawn. See #135/#136.
+                    let layout = ui::sidebar_layout(
+                        rows,
+                        cols,
+                        self.sidebar_items.len(),
+                        self.selected_index,
+                        &self.status_message,
+                    );
+                    if layout.show_header {
+                        ui::render_header(w, &self.repo_name, cols);
+                    }
                     ui::render_sidebar_list(
                         w,
                         &self.sidebar_items,
@@ -1482,31 +1538,23 @@ impl State {
                         &self.repo_name,
                         self.active_tab_name(),
                         self.selected_index,
-                        rows,
+                        &layout,
                         cols,
                     );
-                    if self.sidebar_items.is_empty() {
+                    let list_height = if self.sidebar_items.is_empty() {
                         2
                     } else {
-                        let visible_items = ui::sidebar_viewport(
-                            self.selected_index,
-                            rows,
-                            self.sidebar_items.len(),
-                        )
-                        .visible_items;
-                        let lines_per_item = 2;
-                        1 + (visible_items * lines_per_item)
+                        layout.viewport.visible_items * 2
+                    };
+                    let used_lines =
+                        layout.leading_lines() + list_height + layout.status_lines + layout.footer_lines;
+                    let padding = rows.saturating_sub(used_lines);
+                    for _ in 0..padding {
+                        writeln!(w).unwrap();
                     }
-                };
-                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
-                let footer_height = if cols >= 55 { 3 } else { 4 };
-                let used_lines = 1 + list_height + status_height + footer_height;
-                let padding = rows.saturating_sub(used_lines);
-                for _ in 0..padding {
-                    writeln!(w).unwrap();
+                    ui::render_status(w, &self.status_message, self.status_is_error);
+                    ui::render_footer(w, &self.mode, VERSION, cols);
                 }
-                ui::render_status(w, &self.status_message, self.status_is_error);
-                ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
@@ -1697,6 +1745,7 @@ impl ZellijPlugin for State {
 
     fn render(&mut self, rows: usize, cols: usize) {
         self.last_rows = rows;
+        self.last_cols = cols;
         self.render_to(&mut std::io::stdout(), rows, cols);
     }
 }
@@ -2089,30 +2138,59 @@ mod tests {
         assert_eq!(s.selected_index, 0);
     }
 
+    // Pane-relative mouse-mapping tests (#135/#136). `state_with_sidebar()`
+    // has 3 items (feat-a/b/c) with feat-a active, so `selected_index`
+    // starts at 0. At rows=20, cols=80, empty status: footer_lines=3
+    // (cols>=55), status_lines=0, content_budget=17 -> header+separator
+    // both show (leading=2). Rendered line map for this fixture:
+    //   line 0        = header            -> no-op
+    //   line 1        = blank separator   -> no-op
+    //   line 2/3      = item0 title/subtitle (feat-a)
+    //   line 4/5      = item1 title/subtitle (feat-b)
+    //   line 6/7      = item2 title/subtitle (feat-c)
+    //   line 8+       = footer/status/past-end -> no-op
+
     #[test]
-    fn browse_mouse_click_selects_clicked_item() {
+    fn browse_mouse_click_title_selects_item() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
+        s.last_cols = 80;
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
         assert_eq!(action, Action::None);
         assert_eq!(s.selected_index, 1);
     }
 
+    /// The #135 regression: a subtitle click must select the SAME item as
+    /// its title, never the next one.
     #[test]
-    fn browse_mouse_click_second_item_subtitle_selects_second_item() {
+    fn browse_mouse_click_subtitle_selects_same_item_not_next() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(3, 5));
+        s.last_cols = 80;
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(5, 5));
         assert_eq!(action, Action::None);
-        assert_eq!(s.selected_index, 1);
+        assert_eq!(s.selected_index, 1, "subtitle click must land on item 1, not item 2");
+    }
+
+    /// The last item's subtitle must resolve to the last item, not a dead
+    /// past-the-end no-op (the other half of the #135 regression).
+    #[test]
+    fn browse_mouse_click_last_item_subtitle_selects_last_item() {
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        s.last_cols = 80;
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(7, 5));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.selected_index, 2);
     }
 
     #[test]
     fn browse_mouse_click_on_selected_item_activates_it() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
+        s.last_cols = 80;
         s.selected_index = 1;
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
         assert_eq!(action, Action::SwitchToTab("feat-b".into()));
     }
 
@@ -2125,27 +2203,140 @@ mod tests {
                 branch: "feat-a".into(),
             }],
             last_rows: 20,
+            last_cols: 80,
             ..Default::default()
         };
         s.recompute_sidebar_items();
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(0, 5));
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
         assert_eq!(action, Action::Spawn("feat-a".into()));
         assert_eq!(s.status_message, "Spawning 'feat-a'...");
     }
 
+    /// Clicks on the header or blank-separator line are strict no-ops —
+    /// never "select item 0" (the other #135 mode of failure).
     #[test]
-    fn browse_mouse_click_ignores_non_item_lines() {
+    fn browse_mouse_click_header_and_separator_are_noop() {
         let mut s = state_with_sidebar();
         s.last_rows = 20;
-        assert_eq!(s.sidebar_index_at_line(0, 20), Some(0));
-        assert_eq!(s.sidebar_index_at_line(1, 20), Some(0));
-        assert_eq!(s.sidebar_index_at_line(2, 20), Some(1));
-        assert_eq!(s.sidebar_index_at_line(3, 20), Some(1));
-        assert_eq!(s.sidebar_index_at_line(4, 20), Some(2));
-        assert_eq!(s.sidebar_index_at_line(10, 20), None);
-        let action = s.handle_mouse_browse(&Mouse::LeftClick(10, 5));
+        s.last_cols = 80;
+        s.selected_index = 1;
+        assert_eq!(s.sidebar_index_at_line(0), None, "header line");
+        assert_eq!(s.sidebar_index_at_line(1), None, "blank separator line");
+        assert_eq!(s.handle_mouse_browse(&Mouse::LeftClick(0, 5)), Action::None);
+        assert_eq!(s.handle_mouse_browse(&Mouse::LeftClick(1, 5)), Action::None);
+        assert_eq!(s.selected_index, 1, "non-item clicks must not change selection");
+    }
+
+    #[test]
+    fn browse_mouse_click_footer_and_past_end_are_noop() {
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        s.last_cols = 80;
+        assert_eq!(s.sidebar_index_at_line(8), None);
+        assert_eq!(s.sidebar_index_at_line(19), None);
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(8, 5));
         assert_eq!(action, Action::None);
         assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn browse_mouse_index_at_line_full_map() {
+        let s = {
+            let mut s = state_with_sidebar();
+            s.last_rows = 20;
+            s.last_cols = 80;
+            s
+        };
+        assert_eq!(s.sidebar_index_at_line(0), None);
+        assert_eq!(s.sidebar_index_at_line(1), None);
+        assert_eq!(s.sidebar_index_at_line(2), Some(0));
+        assert_eq!(s.sidebar_index_at_line(3), Some(0));
+        assert_eq!(s.sidebar_index_at_line(4), Some(1));
+        assert_eq!(s.sidebar_index_at_line(5), Some(1));
+        assert_eq!(s.sidebar_index_at_line(6), Some(2));
+        assert_eq!(s.sidebar_index_at_line(7), Some(2));
+        assert_eq!(s.sidebar_index_at_line(8), None);
+    }
+
+    /// A wrapped status message must NOT change where item clicks map —
+    /// the #136 "dynamic offset" bug. `sidebar_layout` carves the status's
+    /// (wrap-aware) row budget out of `content_budget` mathematically, so
+    /// header/separator visibility (and hence `leading_lines`) no longer
+    /// depends on incidental terminal scroll caused by an under-counted
+    /// wrap. cols=30 with this ~34-char message wraps to 2 physical rows
+    /// (status_lines = 1 blank + 2 wrapped = 3); rows=20 still leaves
+    /// content_budget = 20 - (3 status + 4 footer) = 13 >= 4, so leading
+    /// stays 2 — identical to the no-status case above.
+    #[test]
+    fn browse_mouse_mapping_unaffected_by_wrapped_status_message() {
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        s.last_cols = 30;
+        s.status_message = "Only worktree tabs can be removed".into();
+        s.status_is_error = true;
+        assert_eq!(s.sidebar_index_at_line(0), None, "header still there");
+        assert_eq!(s.sidebar_index_at_line(1), None, "separator still there");
+        assert_eq!(s.sidebar_index_at_line(2), Some(0));
+        assert_eq!(s.sidebar_index_at_line(4), Some(1));
+    }
+
+    /// Locks the pre-existing (and still correct) scrolled-viewport
+    /// behavior: `viewport.start` composes with the leading-line offset
+    /// without compounding. 20 items, selected 15, rows=10 cols=80 ->
+    /// footer_lines=3, content_budget=7 -> leading=2, item_rows_budget=5 ->
+    /// max_items=2 -> start=14 (selected - max_items + 1), visible=2.
+    #[test]
+    fn browse_mouse_click_maps_correctly_in_scrolled_viewport() {
+        let mut s = State {
+            mode: Mode::BrowseWorktrees,
+            worktrees: (0..20)
+                .map(|i| Worktree {
+                    dir: format!("branch-{i}"),
+                    branch: format!("branch-{i}"),
+                })
+                .collect(),
+            tabs: (0..20)
+                .map(|i| make_tab(&format!("branch-{i}"), i == 15))
+                .collect(),
+            selected_index: 15,
+            last_rows: 10,
+            last_cols: 80,
+            ..Default::default()
+        };
+        s.recompute_sidebar_items();
+        assert_eq!(s.sidebar_index_at_line(2), Some(14), "row above selected");
+        assert_eq!(s.sidebar_index_at_line(4), Some(15), "selected item title");
+        assert_eq!(s.sidebar_index_at_line(5), Some(15), "selected item subtitle");
+        assert_eq!(s.sidebar_index_at_line(6), None, "past visible viewport");
+        // Clicking the already-selected (scrolled-to) item activates it.
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(4, 5));
+        assert_eq!(action, Action::SwitchToTab("branch-15".into()));
+    }
+
+    /// Short-pane degradation: blank separator drops first, then the
+    /// header — an item row is never sacrificed. cols=80 (footer_lines=3),
+    /// no status.
+    #[test]
+    fn browse_mouse_short_pane_drops_separator_before_header() {
+        let mut s = state_with_sidebar();
+        s.last_cols = 80;
+
+        // content_budget = rows - 3. rows=7 -> budget=4 -> header+separator.
+        s.last_rows = 7;
+        assert_eq!(s.sidebar_index_at_line(0), None, "header");
+        assert_eq!(s.sidebar_index_at_line(1), None, "separator");
+        assert_eq!(s.sidebar_index_at_line(2), Some(0));
+
+        // rows=6 -> budget=3 -> header only, no separator.
+        s.last_rows = 6;
+        assert_eq!(s.sidebar_index_at_line(0), None, "header");
+        assert_eq!(s.sidebar_index_at_line(1), Some(0), "item row right after header");
+
+        // rows=5 -> budget=2 -> neither header nor separator; item row 0
+        // is still shown (never sacrificed).
+        s.last_rows = 5;
+        assert_eq!(s.sidebar_index_at_line(0), Some(0), "item title at pane top");
+        assert_eq!(s.sidebar_index_at_line(1), Some(0), "item subtitle");
     }
 
     #[test]
@@ -2154,6 +2345,7 @@ mod tests {
             mode: Mode::BrowseWorktrees,
             tabs: vec![make_tab("notes", true)],
             last_rows: 20,
+            last_cols: 80,
             ..Default::default()
         };
         s.recompute_sidebar_items();
