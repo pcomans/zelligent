@@ -22,6 +22,112 @@ pub struct SidebarViewport {
     pub visible_items: usize,
 }
 
+/// Single source of truth for the BrowseWorktrees sidebar's vertical layout.
+/// Computed once from `(rows, cols, item_count, selected, status_message)`
+/// and consumed by BOTH the renderer (`render_to` / `render_sidebar_list`)
+/// and the mouse-click mapper (`State::sidebar_index_at_line`), so a click
+/// can never resolve to a different row than what was actually drawn.
+/// See #135/#136 — both bugs were a direct consequence of the render path
+/// and the hit-test path each guessing this layout independently, and
+/// disagreeing whenever the guesses drifted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarLayout {
+    /// Whether the ` zelligent / <repo> ` banner line is drawn this frame.
+    pub show_header: bool,
+    /// Whether a blank separator line is drawn between the header (or the
+    /// pane top, if the header itself was dropped) and the first item.
+    pub show_separator: bool,
+    /// The scrollable item viewport: which items are visible, and where.
+    pub viewport: SidebarViewport,
+    /// Physical rows the status message will occupy this frame, including
+    /// its leading blank line and any wrap at the real pane width. 0 when
+    /// there is no status message.
+    pub status_lines: usize,
+    /// Physical rows the footer (blank + command hints + version) occupies.
+    pub footer_lines: usize,
+}
+
+impl SidebarLayout {
+    /// Rows before the first item row: 0, 1 (header only), or 2 (header +
+    /// blank separator). This is exactly the offset mouse-click line
+    /// numbers need before dividing by 2 to find an item index.
+    pub fn leading_lines(&self) -> usize {
+        self.show_header as usize + self.show_separator as usize
+    }
+}
+
+/// Degradation thresholds for `sidebar_layout`, in rows reserved for
+/// `[header, separator, >=1 two-line item]` — i.e. `content_budget` below,
+/// after status/footer rows are already carved out of `rows`. Order of
+/// sacrifice on a too-short pane: blank separator first, then the header
+/// itself — an item row is never sacrificed (frozen design, #135/#136):
+///   content_budget >= 4: header + separator + >=1 item
+///   content_budget == 3: header only (no separator) + >=1 item
+///   content_budget <  3: neither header nor separator (bare item list)
+const MIN_ROWS_HEADER_AND_SEPARATOR: usize = 4;
+const MIN_ROWS_HEADER_ONLY: usize = 3;
+
+/// How many physical rows a status message will occupy (its content line
+/// only, not the leading blank line before it), accounting for wrap at the
+/// real pane width. `render_status` prints `"  {message}"`, so the wrap
+/// width is the message's visible width plus the 2-space prefix.
+fn status_wrap_rows(message: &str, cols: usize) -> usize {
+    if cols == 0 {
+        return 1;
+    }
+    let width = 2 + visible_width(message);
+    width.div_ceil(cols).max(1)
+}
+
+/// Compute the sidebar's full vertical layout for one frame. See
+/// `SidebarLayout` for field meanings and the module-level doc comment for
+/// why this must be the only place that does this arithmetic.
+pub fn sidebar_layout(
+    rows: usize,
+    cols: usize,
+    item_count: usize,
+    selected: usize,
+    status_message: &str,
+) -> SidebarLayout {
+    let footer_lines = if cols >= 55 { 3 } else { 4 };
+    let status_lines = if status_message.is_empty() {
+        0
+    } else {
+        1 + status_wrap_rows(status_message, cols)
+    };
+
+    let content_budget = rows.saturating_sub(status_lines + footer_lines);
+    let (show_header, show_separator) = if content_budget >= MIN_ROWS_HEADER_AND_SEPARATOR {
+        (true, true)
+    } else if content_budget >= MIN_ROWS_HEADER_ONLY {
+        (true, false)
+    } else {
+        (false, false)
+    };
+
+    let leading = show_header as usize + show_separator as usize;
+    let item_rows_budget = content_budget.saturating_sub(leading);
+    let max_items = (item_rows_budget / 2).max(1);
+    let start = if selected >= max_items {
+        selected - max_items + 1
+    } else {
+        0
+    };
+    let viewport = SidebarViewport {
+        start,
+        max_items,
+        visible_items: item_count.saturating_sub(start).min(max_items),
+    };
+
+    SidebarLayout {
+        show_header,
+        show_separator,
+        viewport,
+        status_lines,
+        footer_lines,
+    }
+}
+
 /// Sanitize a branch name to match the shell's tab/session name logic:
 /// replace `/` with `-`, then strip anything outside `[A-Za-z0-9_-]`.
 pub fn sanitize_tab_name(branch: &str) -> String {
@@ -62,22 +168,6 @@ pub fn fit_text(s: &str, width: usize) -> String {
     let clipped = clip_to_width(s, width);
     let padding = width.saturating_sub(visible_width(&clipped));
     format!("{clipped}{}", " ".repeat(padding))
-}
-
-pub fn sidebar_viewport(selected: usize, rows: usize, total_items: usize) -> SidebarViewport {
-    let lines_per_item = 2;
-    let max_items = (rows.saturating_sub(5) / lines_per_item).max(1);
-    let start = if selected >= max_items {
-        selected - max_items + 1
-    } else {
-        0
-    };
-
-    SidebarViewport {
-        start,
-        max_items,
-        visible_items: total_items.saturating_sub(start).min(max_items),
-    }
 }
 
 fn status_color(status: &AgentStatus) -> &'static str {
@@ -127,7 +217,7 @@ pub fn render_sidebar_list(
     repo_name: &str,
     active_tab_name: Option<&str>,
     selected: usize,
-    rows: usize,
+    layout: &SidebarLayout,
     cols: usize,
 ) {
     if items.is_empty() {
@@ -140,10 +230,18 @@ pub fn render_sidebar_list(
     //   left gutter (▌ / blank) = navigation cursor
     //   title color/weight       = active tab in Zellij (bold cyan)
     //   right gutter (●/✓ / blank) = agent status
-    let viewport = sidebar_viewport(selected, rows, items.len());
+    //
+    // `layout` (computed once by `sidebar_layout`) is the only source of the
+    // viewport and separator visibility — never recomputed here — so this
+    // render can never draw a different set of rows than what
+    // `State::sidebar_index_at_line` used to map the last click. See
+    // #135/#136.
+    let viewport = layout.viewport;
     let content_width = cols.saturating_sub(4).max(1);
 
-    writeln!(w).unwrap();
+    if layout.show_separator {
+        writeln!(w).unwrap();
+    }
     for (idx, item) in items
         .iter()
         .enumerate()
@@ -309,7 +407,18 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
         Mode::NotGitRepo | Mode::Confirming => {}
     }
     let version_line = fit_text(version, cols.saturating_sub(2));
-    writeln!(w, "  {DIM}{version_line}{RESET}").unwrap();
+    // No trailing `\n` here: `render_footer` is always the very last thing
+    // `render_to` writes for any Mode. Zellij's plugin pane is a real
+    // terminal grid — after `\x1b[H` positions the cursor at row 0, writing
+    // exactly `rows` newline-terminated lines advances the cursor through
+    // `rows` row transitions, one past the last valid row, which forces a
+    // scroll that silently discards row 0 (the header). This is the
+    // verified root cause of #136 ("header never displays"): every prior
+    // frame emitted exactly `rows` lines, ALL `writeln!`-terminated,
+    // guaranteeing that scroll on every single render. Omitting the final
+    // newline keeps the cursor on the last row instead of pushing it past
+    // the bottom, so a frame that fills `rows` exactly no longer scrolls.
+    write!(w, "  {DIM}{version_line}{RESET}").unwrap();
 }
 
 pub fn render_status(w: &mut impl Write, message: &str, is_error: bool) {

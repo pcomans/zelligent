@@ -133,7 +133,46 @@ fn render_sidebar_list_short_pane_still_shows_one_item() {
         ..Default::default()
     };
     s.recompute_sidebar_items();
+    // rows=5, cols=80 -> footer_lines=3, content_budget=2 -> below
+    // MIN_ROWS_HEADER_ONLY (3), so BOTH header and separator degrade away.
+    // The item row is never sacrificed: it's still the very first content
+    // line. See #135/#136.
     insta::assert_snapshot!(render_to_string(&s, 5, 80));
+}
+
+/// Middle degradation tier: enough room for the header but not the blank
+/// separator. rows=6, cols=80 -> footer_lines=3, content_budget=3 ==
+/// MIN_ROWS_HEADER_ONLY -> header shows, separator does not.
+#[test]
+fn render_sidebar_list_medium_pane_drops_separator_keeps_header() {
+    let mut s = State {
+        mode: Mode::BrowseWorktrees,
+        worktrees: (0..3)
+            .map(|i| Worktree { dir: format!("branch-{i}"), branch: format!("branch-{i}") })
+            .collect(),
+        tabs: (0..3)
+            .map(|i| make_tab_info(&format!("branch-{i}"), i == 0))
+            .collect(),
+        selected_index: 0,
+        ..Default::default()
+    };
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 6, 80));
+}
+
+/// A status message that's wider than the pane wraps to multiple physical
+/// terminal rows. `sidebar_layout` accounts for the wrap when carving the
+/// status budget out of `content_budget`, so the header/separator/item
+/// rows above it stay in their normal positions and the frame still fits
+/// `rows` exactly (no scroll, no swallowed header) — this is the #136
+/// "dynamic offset" bug, fixed. cols=30: the ~34-char message (36 chars
+/// with its 2-space prefix) wraps to 2 physical rows.
+#[test]
+fn render_browse_with_wrapped_status_message() {
+    let mut s = state_with_worktrees();
+    s.status_message = "Only worktree tabs can be removed".into();
+    s.status_is_error = true;
+    insta::assert_snapshot!(render_to_string(&s, 20, 30));
 }
 
 #[test]
