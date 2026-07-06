@@ -60,7 +60,9 @@ pub const PIPE_INVALIDATE: &str = "zelligent-invalidate";
 pub const CTX_GENERATION: &str = "generation";
 
 /// Pipe name for "reply with your known agent statuses". Broadcast once by
-/// a plugin instance in `load()` so a newly-created sidebar (e.g. in a
+/// a plugin instance when its RunCommands grant lands (`Event::
+/// PermissionRequestResult(Granted)` — never from `load()`, where
+/// run_command is always denied) so a newly-created sidebar (e.g. in a
 /// freshly spawned tab) can catch up on status glyphs it never saw —
 /// `zelligent-status` pipes only reach instances alive at send time. See
 /// #140 part B (Z-6).
@@ -133,7 +135,8 @@ pub enum Action {
         tab_name: String,
         status: AgentStatus,
     },
-    /// Broadcast `PIPE_STATUS_REQUEST` — fired once from `load()` so this
+    /// Broadcast `PIPE_STATUS_REQUEST` — fired once when the RunCommands
+    /// grant lands (not from `load()`, where run_command is denied) so this
     /// (possibly late-created) instance can catch up on statuses it never
     /// saw. See #140 part B.
     RequestStatusReplay,
@@ -407,10 +410,13 @@ impl State {
     }
 
     /// Broadcast `PIPE_STATUS_REQUEST` to every sidebar instance in this
-    /// session. Fired once from `load()`: a freshly-created instance (e.g.
-    /// the sidebar in a newly spawned tab) has an empty `agent_statuses`
-    /// map and never saw any `zelligent-status` pipe sent before it
-    /// existed. Same transport as `fire_invalidate_broadcast` and for the
+    /// session. Fired once from the `PermissionRequestResult(Granted)`
+    /// handler — NOT `load()`, where the async RunCommands grant makes
+    /// run_command a guaranteed denial (see that handler's comment): a
+    /// freshly-created instance (e.g. the sidebar in a newly spawned tab)
+    /// has an empty `agent_statuses` map and never saw any
+    /// `zelligent-status` pipe sent before it existed. Same transport as
+    /// `fire_invalidate_broadcast` and for the
     /// same reason — see that method's doc comment. Best-effort: any
     /// resulting replies land as ordinary `zelligent-status-replay` pipes
     /// (see `handle_pipe`); the RunCommandResult of this broadcast itself
