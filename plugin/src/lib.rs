@@ -14,6 +14,25 @@ pub enum AgentStatus {
     Done,
 }
 
+/// A status event buffered in `State::pending_statuses` because its tab
+/// wasn't known yet. `age` counts the `TabUpdate` events the entry has
+/// survived unmatched; re-receiving a pipe for the same tab replaces the
+/// whole entry, resetting `age` to 0. See `PENDING_STATUS_MAX_TAB_UPDATES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingStatus {
+    pub status: AgentStatus,
+    pub age: u8,
+}
+
+/// How many `TabUpdate` events an unmatched entry in `pending_statuses` may
+/// survive before it's dropped. The legitimate race this buffer exists for
+/// — an external `zelligent-status` sender beating the `TabUpdate` that
+/// registers its tab (see #141) — resolves within 1-2 updates; 8 is a
+/// generous margin while still ensuring a stale or mistyped `tab=` value
+/// can't sit in the buffer indefinitely and later get misapplied to an
+/// unrelated tab created with that name.
+pub const PENDING_STATUS_MAX_TAB_UPDATES: u8 = 8;
+
 pub const VERSION: &str = env!("ZELLIGENT_VERSION");
 
 // Command context keys used to route RunCommandResult
@@ -107,16 +126,18 @@ pub struct State {
     /// orphan row. A set (rather than `Option`) so rapid sequential removes
     /// don't lose the earlier pending names. See issue #121.
     pub pending_close: BTreeSet<String>,
-    /// Status events for tabs not yet present in `self.tabs`. The CLI pipes
-    /// `event=Start,tab=<name>` as part of a spawn, but that pipe routinely
-    /// races the `TabUpdate` that registers the new tab with existing sidebar
+    /// Status events for tabs not yet present in `self.tabs`. An external
+    /// `zelligent-status` sender (e.g. an agent notification hook) can race
+    /// the `TabUpdate` that registers a brand-new tab with existing sidebar
     /// instances — without buffering, the event is silently dropped and the
     /// spawning tab never shows its initial `Working` status. Keyed by tab
     /// name so a later event for the same not-yet-known tab overwrites the
-    /// earlier one (latest wins); drained into `agent_statuses` once
-    /// `handle_tab_update` sees the tab. Bounded (see `handle_pipe`) so a
-    /// flood of bogus tab names can't grow this unbounded. See issue #141.
-    pub pending_statuses: BTreeMap<String, AgentStatus>,
+    /// earlier one (latest wins, resetting its age); drained into
+    /// `agent_statuses` once `handle_tab_update` sees the tab, and aged out
+    /// after `PENDING_STATUS_MAX_TAB_UPDATES` unmatched updates. Bounded to
+    /// 16 entries (see `handle_pipe`) so a flood of bogus tab names can't
+    /// grow this unbounded. See issue #141.
+    pub pending_statuses: BTreeMap<String, PendingStatus>,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -561,10 +582,17 @@ impl State {
         // renders on this same pass instead of lagging a frame.
         if !self.pending_statuses.is_empty() {
             for tab in &self.tabs {
-                if let Some(status) = self.pending_statuses.remove(&tab.name) {
-                    self.agent_statuses.insert(tab.name.clone(), status);
+                if let Some(pending) = self.pending_statuses.remove(&tab.name) {
+                    self.agent_statuses.insert(tab.name.clone(), pending.status);
                 }
             }
+            // Age out whatever's left. A stale or mistyped `tab=` value must
+            // not sit here indefinitely and later get applied to an
+            // unrelated tab that happens to be created with that name.
+            self.pending_statuses.retain(|_, pending| {
+                pending.age += 1;
+                pending.age < PENDING_STATUS_MAX_TAB_UPDATES
+            });
         }
 
         self.recompute_sidebar_items();
@@ -950,11 +978,12 @@ impl State {
             }
         };
         // The tab this event names isn't in `self.tabs` yet — almost always
-        // because the CLI's `event=Start` pipe (fired at spawn time) races
-        // the `TabUpdate` that registers the new tab with this sidebar
-        // instance. Buffer it instead of dropping it; `handle_tab_update`
-        // drains matching entries into `agent_statuses` once the tab shows
-        // up. See issue #141.
+        // because an external `zelligent-status` sender (e.g. an agent
+        // notification hook) races the `TabUpdate` that registers the new
+        // tab with this sidebar instance. Buffer it instead of dropping it;
+        // `handle_tab_update` drains matching entries into `agent_statuses`
+        // once the tab shows up, and ages out ones that never match. See
+        // issue #141.
         if !self.tabs.iter().any(|t| t.name == tab_name) {
             // Latest event for a given not-yet-known tab wins.
             let is_new_key = !self.pending_statuses.contains_key(&tab_name);
@@ -969,7 +998,8 @@ impl State {
                 // the map.
                 self.pending_statuses.pop_first();
             }
-            self.pending_statuses.insert(tab_name, status);
+            self.pending_statuses
+                .insert(tab_name, PendingStatus { status, age: 0 });
             // No Notify here: the buffered case is overwhelmingly a Start
             // (Working), which never notifies anyway. Deferring a
             // NeedsInput/Done notify to TabUpdate time would fire it from
@@ -2811,9 +2841,9 @@ mod tests {
 
     #[test]
     fn pipe_unknown_tab_buffered() {
-        // #141: a valid event for a tab not yet in `self.tabs` (the CLI's
-        // spawn-time `event=Start` pipe racing the registering TabUpdate)
-        // must be buffered, not dropped.
+        // #141: a valid event for a tab not yet in `self.tabs` (an external
+        // status pipe racing the registering TabUpdate) must be buffered,
+        // not dropped.
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-b", false)];
         let action = s.handle_pipe(&pipe_msg(
@@ -2824,7 +2854,10 @@ mod tests {
         assert_eq!(s.agent_statuses.get("unknown-tab"), None);
         assert_eq!(
             s.pending_statuses.get("unknown-tab"),
-            Some(&AgentStatus::Done)
+            Some(&PendingStatus {
+                status: AgentStatus::Done,
+                age: 0
+            })
         );
     }
 
@@ -2841,7 +2874,13 @@ mod tests {
             "zelligent-status",
             &[("tab", "feat-a"), ("event", "Start")],
         ));
-        assert_eq!(s.pending_statuses.get("feat-a"), Some(&AgentStatus::Working));
+        assert_eq!(
+            s.pending_statuses.get("feat-a"),
+            Some(&PendingStatus {
+                status: AgentStatus::Working,
+                age: 0
+            })
+        );
 
         let action = s.handle_tab_update(vec![
             make_tab("feat-b", false),
@@ -2869,13 +2908,25 @@ mod tests {
             "zelligent-status",
             &[("tab", "feat-a"), ("event", "Start")],
         ));
-        assert_eq!(s.pending_statuses.get("feat-a"), Some(&AgentStatus::Working));
+        assert_eq!(
+            s.pending_statuses.get("feat-a"),
+            Some(&PendingStatus {
+                status: AgentStatus::Working,
+                age: 0
+            })
+        );
 
         s.handle_pipe(&pipe_msg(
             "zelligent-status",
             &[("tab", "feat-a"), ("event", "Stop")],
         ));
-        assert_eq!(s.pending_statuses.get("feat-a"), Some(&AgentStatus::Done));
+        assert_eq!(
+            s.pending_statuses.get("feat-a"),
+            Some(&PendingStatus {
+                status: AgentStatus::Done,
+                age: 0
+            })
+        );
         assert_eq!(s.pending_statuses.len(), 1);
     }
 
@@ -2889,7 +2940,10 @@ mod tests {
         assert_eq!(action, Action::None);
         assert_eq!(
             s.pending_statuses.get("unknown-tab"),
-            Some(&AgentStatus::NeedsInput)
+            Some(&PendingStatus {
+                status: AgentStatus::NeedsInput,
+                age: 0
+            })
         );
     }
 
@@ -2927,6 +2981,85 @@ mod tests {
             ));
         }
         assert_eq!(s.pending_statuses.len(), 16);
+    }
+
+    #[test]
+    fn pending_status_expires_after_max_tab_updates() {
+        // #141: an unmatched pending entry must not haunt the buffer
+        // forever — once it's survived PENDING_STATUS_MAX_TAB_UPDATES
+        // TabUpdates with no matching tab, it's dropped and does not apply
+        // even if a tab with that name appears afterwards.
+        let mut s = State::default();
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
+        for _ in 0..PENDING_STATUS_MAX_TAB_UPDATES {
+            s.handle_tab_update(vec![make_tab("feat-b", false)]);
+        }
+        assert!(s.pending_statuses.get("feat-a").is_none());
+
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.agent_statuses.get("feat-a"), None);
+    }
+
+    #[test]
+    fn pending_status_applies_just_before_expiry() {
+        // Draining (matching a now-known tab) happens before aging, so an
+        // entry on its last legal update still applies if its tab shows up
+        // on that very update.
+        let mut s = State::default();
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
+        for _ in 0..(PENDING_STATUS_MAX_TAB_UPDATES - 1) {
+            s.handle_tab_update(vec![make_tab("feat-b", false)]);
+        }
+        assert!(s.pending_statuses.get("feat-a").is_some());
+
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
+    }
+
+    #[test]
+    fn pending_status_reset_by_new_pipe() {
+        // Re-receiving a pipe for a still-buffered tab must reset its age,
+        // not just overwrite its status.
+        let mut s = State::default();
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Start")],
+        ));
+        for _ in 0..(PENDING_STATUS_MAX_TAB_UPDATES - 1) {
+            s.handle_tab_update(vec![make_tab("feat-b", false)]);
+        }
+        assert_eq!(
+            s.pending_statuses.get("feat-a"),
+            Some(&PendingStatus {
+                status: AgentStatus::Working,
+                age: PENDING_STATUS_MAX_TAB_UPDATES - 1
+            })
+        );
+
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
+        assert_eq!(
+            s.pending_statuses.get("feat-a"),
+            Some(&PendingStatus {
+                status: AgentStatus::Done,
+                age: 0
+            })
+        );
+
+        // Confirm the reset actually matters: the entry survives another
+        // near-expiry stretch that would otherwise have dropped it.
+        for _ in 0..(PENDING_STATUS_MAX_TAB_UPDATES - 1) {
+            s.handle_tab_update(vec![make_tab("feat-b", false)]);
+        }
+        assert!(s.pending_statuses.get("feat-a").is_some());
     }
 
     #[test]
