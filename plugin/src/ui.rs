@@ -79,6 +79,21 @@ fn status_wrap_rows(message: &str, cols: usize) -> usize {
     width.div_ceil(cols).max(1)
 }
 
+/// Physical rows `render_status` will occupy this frame: 0 when there is no
+/// message, else its leading blank line plus however many rows the message
+/// wraps to at `cols` width. This is the single source of truth for that
+/// arithmetic — `sidebar_layout` calls it, and so must every other render
+/// arm in `lib.rs` that reserves space for a status message, so a wrapped
+/// status can never re-trigger the header-swallowing scroll bug (#135/#136)
+/// in a path that isn't the populated BrowseWorktrees list.
+pub fn status_height(status_message: &str, cols: usize) -> usize {
+    if status_message.is_empty() {
+        0
+    } else {
+        1 + status_wrap_rows(status_message, cols)
+    }
+}
+
 /// Compute the sidebar's full vertical layout for one frame. See
 /// `SidebarLayout` for field meanings and the module-level doc comment for
 /// why this must be the only place that does this arithmetic.
@@ -90,11 +105,7 @@ pub fn sidebar_layout(
     status_message: &str,
 ) -> SidebarLayout {
     let footer_lines = if cols >= 55 { 3 } else { 4 };
-    let status_lines = if status_message.is_empty() {
-        0
-    } else {
-        1 + status_wrap_rows(status_message, cols)
-    };
+    let status_lines = status_height(status_message, cols);
 
     let content_budget = rows.saturating_sub(status_lines + footer_lines);
     let (show_header, show_separator) = if content_budget >= MIN_ROWS_HEADER_AND_SEPARATOR {

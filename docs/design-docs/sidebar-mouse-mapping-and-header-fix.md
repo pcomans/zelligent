@@ -70,7 +70,21 @@ see the implementor's report for the annotated captures.
    than what was actually drawn. The old standalone `ui::sidebar_viewport`
    (which used a blind `rows.saturating_sub(5)` heuristic, oblivious to
    `cols`, the footer's real height, or status wrap) has been removed —
-   there is now exactly one place that does this arithmetic.
+   there is now exactly one place that does the *sidebar viewport*
+   arithmetic.
+
+   A follow-up review found the unification was incomplete: three other
+   `render_to` arms (`NotGitRepo`, `BrowseWorktrees`'s empty-state branch,
+   and `InputBranch`) still computed their own `status_height` as a fixed
+   `if status_message.is_empty() { 0 } else { 2 }`, independently of
+   `sidebar_layout` — undercounting a wrapped status message and
+   re-triggering the exact header-swallowing scroll this fix was written
+   to eliminate, just outside the populated sidebar-list path. The wrap
+   math was pulled out of `sidebar_layout` into `ui::status_height(status_message,
+   cols) -> usize`, which `sidebar_layout` now calls too, and all three
+   arms were switched to call it instead of the fixed guess. There is now
+   exactly one place that computes wrap-aware status height, shared by
+   every render arm that reserves space for `render_status`.
 
 3. **Graceful degradation**, in this order, so an item row is never the
    first thing sacrificed on a too-short pane:

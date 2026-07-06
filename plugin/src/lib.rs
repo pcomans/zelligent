@@ -1488,7 +1488,7 @@ impl State {
             Mode::NotGitRepo => {
                 ui::render_header(w, "error", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
-                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                let status_height = ui::status_height(&self.status_message, cols);
                 let used_lines = 1 + 7 + status_height + 2;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {
@@ -1502,7 +1502,7 @@ impl State {
                     ui::render_header(w, &self.repo_name, cols);
                     ui::render_empty_state(w);
                     let list_height = 6;
-                    let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                    let status_height = ui::status_height(&self.status_message, cols);
                     let footer_height = if cols >= 55 { 3 } else { 4 };
                     let used_lines = 1 + list_height + status_height + footer_height;
                     let padding = rows.saturating_sub(used_lines);
@@ -1576,7 +1576,7 @@ impl State {
             Mode::InputBranch => {
                 ui::render_header(w, &self.repo_name, cols);
                 ui::render_input(w, &self.input_buffer);
-                let status_height = if self.status_message.is_empty() { 0 } else { 2 };
+                let status_height = ui::status_height(&self.status_message, cols);
                 let used_lines = 1 + 4 + status_height + 3;
                 let padding = rows.saturating_sub(used_lines);
                 for _ in 0..padding {

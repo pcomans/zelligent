@@ -1,6 +1,6 @@
 mod common;
 
-use common::{key, make_tab_info, render_to_string, state_with_worktrees};
+use common::{key, make_tab_info, physical_rows, render_to_string, state_with_worktrees};
 use zelligent_plugin::{AgentStatus, Mode, SidebarItem, State, Worktree};
 use zellij_tile::prelude::*;
 
@@ -172,7 +172,89 @@ fn render_browse_with_wrapped_status_message() {
     let mut s = state_with_worktrees();
     s.status_message = "Only worktree tabs can be removed".into();
     s.status_is_error = true;
-    insta::assert_snapshot!(render_to_string(&s, 20, 30));
+    let output = render_to_string(&s, 20, 30);
+    assert_eq!(
+        physical_rows(&output, 30),
+        20,
+        "wrapped status must not push the frame past `rows` (that's the #136 scroll bug)"
+    );
+    assert!(output.contains("zelligent"), "header must survive a wrapped status message");
+    insta::assert_snapshot!(output);
+}
+
+/// A status message long enough to wrap at cols=50 without also wrapping
+/// any of the arm's own fixed content lines (this arm's longest fixed line,
+/// the `x  nuke session & start fresh` hint, is 31 wide — comfortably under
+/// 50 — which keeps this test isolated to the status-wrap bug rather than
+/// tripping an unrelated one).
+///
+/// Companion to the populated-list case above: `Mode::NotGitRepo` computed
+/// its status budget from a fixed `{ 0 } else { 2 }` guess (review of
+/// #135/#136) instead of `ui::status_height`, so a wrapped message here
+/// would silently overflow `rows` and scroll the header off just like the
+/// bug this branch fixed for the sidebar list.
+#[test]
+fn render_not_git_repo_with_wrapped_status() {
+    let s = State {
+        mode: Mode::NotGitRepo,
+        status_message: "Only worktree tabs can be removed from the sidebar".into(),
+        status_is_error: true,
+        initial_cwd: std::path::PathBuf::from("/tmp/foo"),
+        ..Default::default()
+    };
+    let output = render_to_string(&s, 20, 50);
+    assert_eq!(
+        physical_rows(&output, 50),
+        20,
+        "wrapped status must not push the frame past `rows`"
+    );
+    assert!(output.contains("zelligent / error"), "header must survive a wrapped status message");
+    insta::assert_snapshot!(output);
+}
+
+/// Same status message and width as above; cols=50 also comfortably fits
+/// this arm's longest fixed line (`Pick a branch or type a new one to get
+/// started.`, 49 wide) so only the status wrap is under test.
+///
+/// Companion to the populated-list case above: the `BrowseWorktrees`
+/// empty-state branch (`should_render_empty_state()`) had the same fixed
+/// `{ 0 } else { 2 }` status guess as `NotGitRepo`/`InputBranch`.
+#[test]
+fn render_browse_empty_with_wrapped_status() {
+    let s = State {
+        mode: Mode::BrowseWorktrees,
+        status_message: "Only worktree tabs can be removed from the sidebar".into(),
+        status_is_error: true,
+        ..Default::default()
+    };
+    let output = render_to_string(&s, 20, 50);
+    assert_eq!(
+        physical_rows(&output, 50),
+        20,
+        "wrapped status must not push the frame past `rows`"
+    );
+    assert!(output.contains("zelligent"), "header must survive a wrapped status message");
+    insta::assert_snapshot!(output);
+}
+
+/// Companion to the populated-list case above: `Mode::InputBranch` had the
+/// same fixed `{ 0 } else { 2 }` status guess.
+#[test]
+fn render_input_branch_with_wrapped_status() {
+    let s = State {
+        mode: Mode::InputBranch,
+        status_message: "Only worktree tabs can be removed from the sidebar".into(),
+        status_is_error: true,
+        ..Default::default()
+    };
+    let output = render_to_string(&s, 20, 50);
+    assert_eq!(
+        physical_rows(&output, 50),
+        20,
+        "wrapped status must not push the frame past `rows`"
+    );
+    assert!(output.contains("New branch name"), "header/content must survive a wrapped status message");
+    insta::assert_snapshot!(output);
 }
 
 #[test]
