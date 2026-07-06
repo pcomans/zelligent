@@ -47,6 +47,10 @@ and [ARCHITECTURE.md](../ARCHITECTURE.md)):
   refresh clears it — the retry that succeeds is the one fired while
   visible. This is the only pattern that catches a spawn+remove
   round-trip completed entirely inside an instance's blind window.
+  "Successful" is generation-gated (`invalidate_generation`, bumped per
+  invalidation and stamped into the refresh's `run_command` context) so a
+  refresh already in flight when a newer invalidation lands cannot clear
+  that invalidation's bit — see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 Established by the 2026-07 live verification and instrumentation of issues
 #138/#140 (hidden instances logged zero events across the entire window;

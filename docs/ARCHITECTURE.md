@@ -181,7 +181,16 @@ broadcasts a `zelligent-invalidate` pipe; every instance marks
 it on the spot; a hidden instance loses the command result, so the durable
 dirty bit re-fires the Refresh on every `TabUpdate` until a successful
 `list-worktrees` clears it — the first such retry lands right as the tab
-becomes visible. A pure focus switch with no set drift and a clean cache
+becomes visible. "Successful" is guarded by a generation counter,
+`invalidate_generation`, bumped each time `cache_dirty` is set: a refresh
+already in flight when a new invalidation lands is stamped with the OLDER
+generation, so its (still-applied) result cannot clear the bit the newer
+invalidation set — only a refresh launched at-or-after the latest
+invalidation can prove the cache reflects it. Without this guard, a stale
+in-flight refresh could clear the bit out from under a still-pending
+invalidation; if that pending refresh's own result is then lost to a
+hidden instance, the cache would be stuck stale with no retry trigger
+left (#140). A pure focus switch with no set drift and a clean cache
 doesn't refresh, and the tab-set triggers don't fire on the very first
 `TabUpdate` since startup, since the bootstrap path already loads
 worktrees. See
