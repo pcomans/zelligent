@@ -21,5 +21,5 @@ Verifies the PR 83 layout behavior started through `zelligent`.
 - Expected: A new tab opens in the live session and still shows the persistent left sidebar
 
 ## Test 4: Manual tabs inherit the sidebar
-- Action: Press `Ctrl-t`, then `n`, type `scratch`, and press Enter
+- Action: Press `Ctrl-t`, then `n` (creates an unnamed tab immediately — Zellij has no inline rename prompt here; do NOT type a name, it would land in the new tab's shell). To name it, use `zellij action rename-tab scratch` from the control window
 - Expected: The new manual tab keeps the left sidebar frame inherited from `default_tab_template`
