@@ -1,0 +1,23 @@
+---
+source: tests/render_snapshots.rs
+expression: output
+---
+[?1049h[H[2J[1m[36m zelligent ───────────────────────────────────────[0m
+
+  [1mNew branch name:[0m
+
+  > [7m [0m
+
+
+
+
+
+
+
+
+
+
+  [31mOnly worktree tabs can be removed from the sidebar[0m
+
+  [2mEnter[0m create  [2mEsc[0m back
+  [2mVERSION                               [0m

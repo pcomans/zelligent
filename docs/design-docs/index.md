@@ -12,4 +12,5 @@ Detailed design documentation for zelligent subsystems.
 | [sidebar-layout-contract.md](sidebar-layout-contract.md) | Current fragment-based CLI layout contract |
 | [sidebar-layout-decisions.md](sidebar-layout-decisions.md) | Design decisions behind the sidebar layout contract |
 | [sidebar-stack-rollout.md](sidebar-stack-rollout.md) | Branch-by-branch rollout strategy for the stacked sidebar PRs |
+| [sidebar-mouse-mapping-and-header-fix.md](sidebar-mouse-mapping-and-header-fix.md) | Root cause and fix for the #135/#136 mouse-mapping and header-swallow bugs |
 | [zellij-behaviors.md](zellij-behaviors.md) | Tribal knowledge about Zellij CLI behavior |
