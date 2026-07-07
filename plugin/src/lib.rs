@@ -263,8 +263,9 @@ pub struct State {
     /// kept mainly as a readable marker of "which message is this" and
     /// asserted by tests to confirm `set_status` armed a new TTL.
     pub status_message_epoch: u64,
-    /// Count of `STATUS_MESSAGE_TTL_SECS` timers `set_status` has armed
-    /// whose `Event::Timer` hasn't been processed yet by `handle_timer`.
+    /// Count of `STATUS_MESSAGE_TTL_SECS` timers actually armed (one per
+    /// event with a `set_status` request — see `note_timer_armed`) whose
+    /// `Event::Timer` hasn't been processed yet by `handle_timer`.
     ///
     /// `zellij_tile::shim::set_timeout` does NOT replace a previously
     /// armed timer — the host spawns an independent one-shot
@@ -379,14 +380,16 @@ impl State {
     /// — every call site that used to assign the fields directly now goes
     /// through here, so a future call site can't forget the timer.
     ///
-    /// A non-empty `msg` bumps `status_message_epoch`, increments
-    /// `status_message_pending_timers`, and sets
+    /// A non-empty `msg` bumps `status_message_epoch` and sets
     /// `status_timer_needs_arming` so the imperative shell (`update`/
     /// `pipe`) arms the real host timer right after this event finishes
-    /// processing — see the field doc comments for why a plain count
-    /// (rather than a single epoch snapshot) is what actually guards
-    /// `handle_timer` against a stale timer clearing a message that's
-    /// since been replaced.
+    /// processing. `status_message_pending_timers` is deliberately NOT
+    /// incremented here: the count must track timers actually armed, and
+    /// the shell arms at most one per event no matter how many times a
+    /// handler called `set_status` while processing it — counting per
+    /// call would leave the count permanently ahead of the timers that
+    /// will ever fire, and `handle_timer` would never reach 0 again. See
+    /// `note_timer_armed`.
     ///
     /// An empty `msg` (clearing the status) is intentionally NOT armed:
     /// there is nothing left to expire.
@@ -399,8 +402,20 @@ impl State {
         }
         self.status_message = msg;
         self.status_message_epoch += 1;
-        self.status_message_pending_timers += 1;
         self.status_timer_needs_arming = true;
+    }
+
+    /// Record that the imperative shell armed one real host timer for the
+    /// currently displayed message, consuming the `set_status` request.
+    /// Pure counterpart of `arm_pending_status_timer` so unit tests can
+    /// drive the exact arm/fire bookkeeping without the host call. The
+    /// `status_message_pending_timers` increment lives here — and only
+    /// here — so the count equals the number of `Event::Timer`s that are
+    /// genuinely still due, which is what makes `handle_timer`'s
+    /// reach-zero test sound.
+    pub fn note_timer_armed(&mut self) {
+        self.status_timer_needs_arming = false;
+        self.status_message_pending_timers += 1;
     }
 
     /// Handle `Event::Timer` — a `STATUS_MESSAGE_TTL_SECS` timeout armed by
@@ -737,7 +752,7 @@ impl State {
     fn arm_pending_status_timer(&mut self) {
         if self.status_timer_needs_arming {
             set_timeout(STATUS_MESSAGE_TTL_SECS);
-            self.status_timer_needs_arming = false;
+            self.note_timer_armed();
         }
     }
 
@@ -4885,8 +4900,16 @@ mod tests {
         assert_eq!(s.status_message, "Spawned 'feature-c'");
         assert!(!s.status_is_error);
         assert_eq!(s.status_message_epoch, 1);
-        assert_eq!(s.status_message_pending_timers, 1);
         assert!(s.status_timer_needs_arming, "set_status must request a timer arm");
+        assert_eq!(
+            s.status_message_pending_timers, 0,
+            "the count tracks timers actually armed by the shell, not requests"
+        );
+
+        s.note_timer_armed(); // the shell arms once per event
+
+        assert!(!s.status_timer_needs_arming);
+        assert_eq!(s.status_message_pending_timers, 1);
     }
 
     #[test]
@@ -4894,7 +4917,7 @@ mod tests {
         let mut s = State::default();
         s.set_status("Unknown agent event: Bogus", true);
         assert!(s.status_is_error);
-        assert_eq!(s.status_message_pending_timers, 1);
+        assert!(s.status_timer_needs_arming);
     }
 
     #[test]
@@ -4903,7 +4926,7 @@ mod tests {
         // start a TTL for a message that's already gone.
         let mut s = State::default();
         s.set_status("Refreshed", false);
-        s.status_timer_needs_arming = false; // simulate the shell having armed it
+        s.note_timer_armed(); // the shell arms it
 
         s.set_status("", false);
 
@@ -4926,6 +4949,7 @@ mod tests {
     fn timer_clears_message_once_its_own_ttl_fires() {
         let mut s = State::default();
         s.set_status("Spawned 'feature-c'", false);
+        s.note_timer_armed();
         assert_eq!(s.status_message_pending_timers, 1);
 
         let rerender = s.handle_timer();
@@ -4942,8 +4966,10 @@ mod tests {
         // timer fires) ... arm1's now-stale Timer finally arrives. B must
         // survive and get its own full TTL from arm2's timer.
         let mut s = State::default();
-        s.set_status("Spawning 'feat-a'...", false); // arm1
-        s.set_status("Spawned 'feat-a'", false); // arm2, before arm1's timer fires
+        s.set_status("Spawning 'feat-a'...", false);
+        s.note_timer_armed(); // arm1 (its own event)
+        s.set_status("Spawned 'feat-a'", false);
+        s.note_timer_armed(); // arm2 (a later event), before arm1's timer fires
 
         assert_eq!(s.status_message_epoch, 2);
         assert_eq!(s.status_message_pending_timers, 2);
@@ -4967,6 +4993,25 @@ mod tests {
         assert!(rerender);
         assert!(s.status_message.is_empty());
         assert_eq!(s.status_message_pending_timers, 0);
+    }
+
+    #[test]
+    fn burst_of_set_status_in_one_event_arms_one_timer_and_still_clears() {
+        // Two set_status calls while processing a SINGLE event: the shell
+        // arms only one timer for the burst, so the count must also grow
+        // by one — counting per set_status call would leave it permanently
+        // ahead of the timers that will ever fire and the message would
+        // never clear again (the #152 review finding).
+        let mut s = State::default();
+        s.set_status("Removing 'feat-a'...", false);
+        s.set_status("Failed to remove 'feat-a': boom", true); // same event
+        s.note_timer_armed(); // the shell arms once for the whole event
+
+        assert_eq!(s.status_message_epoch, 2);
+        assert_eq!(s.status_message_pending_timers, 1);
+
+        assert!(s.handle_timer(), "the burst's single timer must clear");
+        assert!(s.status_message.is_empty());
     }
 
     #[test]
