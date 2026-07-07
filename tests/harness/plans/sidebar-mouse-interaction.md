@@ -24,13 +24,13 @@ to send wheel and left-click events into the `view` window.
 - Action: Send a wheel-up mouse event inside the sidebar content area
 - Expected: The selected row returns to the startup row `zelligent-test-repo`
 
-## Test 4: First click selects a detached worktree row
-- Action: Left-click on the `feature-b` title line in the sidebar. In a standard 220x60 harness capture this is around column 10, row 9; otherwise, use the current capture to target the `feature-b` row directly
-- Expected: `feature-b` becomes the selected row, but the active tab remains `zelligent-test-repo`
+## Test 4: A received click selects AND activates a worktree row (#137)
+- Action: Left-click on the `feature-b` title line in the sidebar. In a standard 220x60 harness capture this is around column 10, row 9; otherwise, use the current capture to target the `feature-b` row directly. (If the sidebar pane is not focused, Zellij eats one extra click as the focus claim — count clicks from the first one the plugin receives.)
+- Expected: `feature-b` becomes the selected row AND its tab opens (spawn if detached, switch if open) in the same click; the persistent sidebar remains visible
 
-## Test 5: Second click on the selected row opens it
+## Test 5: Clicking the already-active row is idempotent
 - Action: Left-click the same `feature-b` row again
-- Expected: The session opens a `feature-b` tab and the persistent sidebar remains visible. If `feature-b` was still detached, this click spawns it; if it was already open, this click switches to it
+- Expected: No new tab, no churn — selection and active tab stay `feature-b`
 
 ## Test 6: Clicking a non-item line does nothing
 - Action: Left-click a blank sidebar line below the visible rows or in the footer area. In a standard 220x60 harness capture, column 10, row 12 is one such blank line
