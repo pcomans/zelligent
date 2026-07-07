@@ -8,8 +8,21 @@ The `serialization_interval` config controls how frequently Zellij snapshots the
 
 ### Cache paths
 
-- macOS: `~/Library/Caches/org.Zellij-Contributors.Zellij/<version>/session_info/<session>/`
-- Linux: `~/.cache/zellij/<version>/session_info/<session>/`
+- macOS: `~/Library/Caches/org.Zellij-Contributors.Zellij/<version-dir>/session_info/<session>/`
+- Linux: `~/.cache/zellij/<version-dir>/session_info/<session>/`
+
+`<version-dir>` is **not stable** across zellij releases: 0.43.1 used the bare
+version string (e.g. `0.43.1`), 0.44.x uses `contract_version_<N>` (observed
+on disk as `contract_version_1`), and it can drift again on future releases.
+Code that needs to find a session's cache dir must glob
+(`*/session_info/<session>`) rather than hardcode a version string — see Bug 3.
+
+Two files live under each session's dir:
+
+- `session-metadata.kdl` — display-only, used by `zellij list-sessions`. Refreshed ~1s.
+- `session-layout.kdl` — the file resurrection actually reads. Written only
+  when the layout is "dirty" (pane count changed etc.), on the
+  `serialization_interval` timer.
 
 ## Known bugs
 
@@ -57,6 +70,65 @@ When the plugin gets a wrong cwd, it enters `NotGitRepo` mode. This mode offers 
 - `d` — dump the session layout to disk (for debugging)
 - `x` — nuke the session (`kill_sessions`, terminates the plugin)
 - `q` / `Esc` — close the plugin
+
+### Bug 3: Stale serialized plugin URL resurrects a broken sidebar (#155/#157/#158)
+
+**Problem:** `session-layout.kdl` stores each plugin's location as a resolved
+`file:<path>` URL (config-alias indirection does NOT survive serialization —
+zellij resolves aliases before writing the layout, so this can't be worked
+around by using an alias). If that path stops holding a valid zelligent
+wasm — the install moved from dev to Homebrew or back, the binary was
+deleted, `$HOME` moved (container rebuild) — resurrecting the session loads
+whatever is now at that path and Zellij shows `ERROR IN PLUGIN … magic
+header not detected` in the pane. Because resurrection re-serializes, the
+corruption is sticky: every future resurrection and every new tab inherits
+the bad URL.
+
+The trap: `zellij list-sessions --short` (what `zelligent`'s existence probe
+uses) prints EXITED sessions identically to alive ones. So **zelligent's own
+normal startup and spawn flows** — not just a stray manual `zellij attach` —
+walk into resurrecting a broken layout whenever a crash, reboot, or
+force-quit left an EXITED session behind. Full research, verified against
+zellij source and live experiments: issue #155.
+
+**Fix — three parts:**
+
+1. **`reconcile_serialized_session(name, current_plugin_path)` guard
+   (`zelligent.sh`, #157).** Called immediately before every flow that can
+   attach to a session by name (the no-arg startup path and the spawn
+   attach-session path — both probe `zellij list-sessions --short`). Does
+   nothing for an alive or nonexistent session. For an EXITED session, it
+   greps every `file:` URL out of the session's `session-layout.kdl`
+   (deliberately not a KDL parse) and validates each one: file exists, first
+   4 bytes are the wasm magic number, and — for URLs whose basename is
+   `zelligent-plugin.wasm` — the path matches the currently resolved plugin
+   path. Any failure (on any plugin's URL, not just ours — a broken
+   third-party plugin URL is just as fatal to resurrection) drops the
+   session (`zellij delete-session --force` + removes its cache dirs) and
+   prints one line naming the bad path, then falls through to a fresh
+   session. No `file:` URLs at all, or an unreadable/missing layout file,
+   fails open (session left untouched) — the guard must never block startup
+   on ambiguity.
+2. **`zelligent doctor` sweep (#157).** Enumerates every serialized session
+   across the cache glob (not just the current repo's) and runs the same
+   validation. Auto-fixes (deletes + reports) only EXITED sessions whose
+   *own* zelligent-plugin URL is stale. Everything else — an alive session
+   with a stale URL, or an EXITED session broken only by a third-party
+   plugin's URL — is reported with the fix command, never auto-deleted;
+   doctor doesn't get to unilaterally kill a live session or clean up a
+   plugin that isn't zelligent's.
+3. **`nuke` cache glob fix (#158).** `nuke` used to remove
+   `<cache_base>/$zellij_version/session_info/$REPO_NAME`, which silently
+   no-ops on any zellij whose version-dir name doesn't match (true for every
+   0.44.x install, since `zellij --version` reports `0.44.3` but the cache
+   dir is `contract_version_1`). Fixed to glob for any dir with a
+   `session_info/<name>` entry, same helper the guard and doctor use.
+
+**Not fixed:** rewriting the URL in place to preserve resurrected tabs (v1
+always drops and recreates — the session is from an older install anyway, so
+fresh is arguably better); an env-var opt-out of resurrection entirely
+(`session_serialization false` in the layout is a documented mechanism if
+ever needed, but the guard makes it unnecessary for zelligent's own flows).
 
 ### Key Zellij source locations
 
