@@ -26,7 +26,7 @@ Rendering contract: see ui-audit-01 — ▌ cursor axis, BOLD CYAN active-tab ax
 2. THERE IS NO TAB BAR (layout has only a bottom status-bar). Wherever a step says "tab bar click X" or "click X in the tab bar": instead switch natively with REAL KEYSTROKES — press `C-t` (tab mode) then the digit of the target tab's 1-based position (then Esc if a mode indicator lingers in the status bar). Wherever a step says "active tab in the tab bar": verify via (a) the MAIN pane's frame title (e.g. `┌ feature-a` or the repo tab's pane titles) and (b) the sidebar's bold-cyan row; optional corroboration via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only, never as the tested action). Track tab positions yourself as tabs are created (order of creation = order in query-tab-names).
 3. KNOWN BUG (confirmed in run 01, do NOT re-report, do NOT trip over it): clicking a row's SUBTITLE line selects the NEXT item (one-line mapping offset), and clicking the blank separator under the header selects item 0. Therefore: ALWAYS click TITLE lines when selecting rows. If selection lands one row off after a title-line click, THAT is new information — report it.
 4. KNOWN RENDER DEVIATION (confirmed, do not re-report): the in-pane header line is missing (content starts with a blank line); the ▌ gutter appears on BOTH lines of the selected item (this is correct behavior).
-5. Sidebar plugin state may be PER-TAB (each tab's sidebar pane is its own plugin instance with its own ▌ cursor). When you switch tabs, the cursor may sit elsewhere — this is under investigation, record cursor position after every switch.
+5. Sidebar plugin state is PER-TAB (each tab's sidebar pane is its own plugin instance with its own ▌ cursor). Fixed in #151: the cursor now RE-SYNCS to the active tab's row whenever the active tab changes (sidebar click, Enter, or a native switch) — so a revealed sidebar's ▌ should already sit on the active row, matching the bold-cyan marker. Still record cursor position after every switch as corroboration; a mismatch is now a FAIL, not an open question.
 
 ## Test 1: Startup sanity
 - Action: launch, wait ~8s, capture.
@@ -54,7 +54,7 @@ Rendering contract: see ui-audit-01 — ▌ cursor axis, BOLD CYAN active-tab ax
 
 ## Test 7: Native switch via TAB BAR click is reflected in the sidebar
 - Action: click directly on the `feature-b` tab name in the top tab bar.
-- Expected: Zellij activates feature-b; the sidebar's bold-cyan row updates to `feature-b` WITHOUT any sidebar click; ▌ stays wherever it was (independent axis). Desync here = FAIL.
+- Expected: Zellij activates feature-b; the sidebar's bold-cyan row updates to `feature-b` WITHOUT any sidebar click; ▌ ALSO follows to the `feature-b` row (#151: the cursor re-syncs on any active-tab change, native switches included) — ▌ and bold-cyan must land on the same row. Desync here = FAIL.
 
 ## Test 8: Native switch again to repo tab
 - Action: click `zelligent-test-repo` in the tab bar.
