@@ -91,6 +91,14 @@ Current plans:
   every bug found in the audit (Z-1 through Z-8). Use as a regression suite
   when fixing those bugs.
 
+**CLI-under-test rule:** fixtures clone the source repo's checked-out branch
+(usually `main`) into `/tmp/zelligent-test-repo`, so `./zelligent.sh` inside the
+test repo is the OLD CLI. Plugin changes are injected via
+`ZELLIGENT_PLUGIN_SRC`, but to test CLI changes you must invoke the installed
+`zelligent` (from `bash dev-install.sh` of the branch under test) — verify with
+`command -v zelligent` plus a `grep` for the change. A prior #140 verification
+produced a false FAILED verdict by running the fixture clone's script.
+
 Harness driving rules learned in the audit (apply to all mouse plans): enable
 `tmux set-option -g mouse on` on the harness socket before SGR click injection
 and send press/release as separate `send-keys` calls; there is no tab bar —

@@ -159,6 +159,44 @@ sequenceDiagram
 See [design-docs/agent-notifications.md](design-docs/agent-notifications.md)
 for the full pipeline and the `ZELLIGENT_TAB_NAME` propagation trick.
 
+### Sidebar cache refresh triggers
+
+Each tab's sidebar is a separate plugin instance with its own `worktrees`
+cache, and Zellij delivers Events (`TabUpdate` etc.) only to instances in
+the visible tab — a hidden instance is event-starved and its snapshot
+freezes at the moment its tab lost focus. Pipes, by contrast, broadcast to
+all instances and are the only channel that reaches hidden ones. Silent
+self-heal `Refresh`es (no status message) therefore fire in
+`handle_tab_update` on four conditions, OR-ed into a single Refresh per
+`TabUpdate`: a newly-appeared tab with no matching worktree, a
+previously-known tab that has disappeared, the tab set changing in any way
+relative to the instance's previous snapshot (subsumes the first two), and
+the `cache_dirty` bit being set. The set-diff heals a starved instance
+whose catch-up `TabUpdate` (received when its tab becomes active again)
+shows net drift — but a worktree spawned AND removed entirely inside the
+blind window leaves zero net drift, which only the pipe path catches: the
+CLI (and the plugin itself, after its own spawn/remove completes)
+broadcasts a `zelligent-invalidate` pipe; every instance marks
+`cache_dirty` and fires an immediate Refresh. Visible instances complete
+it on the spot; a hidden instance loses the command result, so the durable
+dirty bit re-fires the Refresh on every `TabUpdate` until a successful
+`list-worktrees` clears it — the first such retry lands right as the tab
+becomes visible. "Successful" is guarded by a generation counter,
+`invalidate_generation`, bumped each time `cache_dirty` is set: a refresh
+already in flight when a new invalidation lands is stamped with the OLDER
+generation, so its (still-applied) result cannot clear the bit the newer
+invalidation set — only a refresh launched at-or-after the latest
+invalidation can prove the cache reflects it. Without this guard, a stale
+in-flight refresh could clear the bit out from under a still-pending
+invalidation; if that pending refresh's own result is then lost to a
+hidden instance, the cache would be stuck stale with no retry trigger
+left (#140). A pure focus switch with no set drift and a clean cache
+doesn't refresh, and the tab-set triggers don't fire on the very first
+`TabUpdate` since startup, since the bootstrap path already loads
+worktrees. See
+[references/zellij-plugin-api.md](references/zellij-plugin-api.md) for the
+event-delivery model.
+
 ## Key files
 
 | File                                       | Purpose                                                       |
