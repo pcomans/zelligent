@@ -716,6 +716,23 @@ if [ -d "$WORKTREES_BASE" ]; then
 fi
 WORKTREES_DIR="$WORKTREES_BASE/$REPO_NAME"
 
+# Best-effort: tell every sidebar plugin instance in the repo's session that
+# the worktree list just changed (spawn/remove). CLI pipes are the ONLY
+# channel that reaches plugin instances in hidden tabs — Zellij Events
+# (TabUpdate etc.) are only delivered to the visible tab, so without this
+# pipe a hidden sidebar can keep a stale worktree row indefinitely. See
+# issues #138/#140 and docs/references/zellij-plugin-api.md ("Event delivery
+# and hidden panes"). Mirrors how the Claude Code status hooks invoke
+# `zellij pipe`. Guarded so it can never fail the calling command.
+pipe_invalidate() {
+  command -v zellij &>/dev/null || return 0
+  if [ -n "$ZELLIJ" ]; then
+    zellij pipe --name zelligent-invalidate 2>/dev/null || true
+  else
+    zellij --session "$REPO_NAME" pipe --name zelligent-invalidate 2>/dev/null || true
+  fi
+}
+
 # Handle nuke subcommand — delete the repo's Zellij session so it won't resurrect
 if [ "$1" = "nuke" ]; then
   if [ -n "$ZELLIJ" ]; then
@@ -925,6 +942,9 @@ if [ "$1" = "remove" ]; then
     exit 1
   fi
   echo "✅ Removed worktree for '$BRANCH_NAME'"
+  # Invalidate every sidebar instance's worktree cache — including hidden
+  # ones, which only a pipe can reach. See issues #138/#140.
+  pipe_invalidate
   # When running inside Zellij, also close the worktree's tab so the sidebar
   # plugin doesn't show an orphaned tab labeled "user tab" (the worktree is
   # gone but Zellij still holds the tab). Return the user to the tab they
@@ -1122,13 +1142,21 @@ case "$SPAWN_MODE" in
   inside-zellij)
     echo "🪟 Opening tab '$SESSION_NAME'..."
     zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+    # Invalidate every sidebar instance's worktree cache — including hidden
+    # ones, which only a pipe can reach. See issues #138/#140.
+    pipe_invalidate
     ;;
   attach-session)
     echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
     ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+    # Fire before the blocking `attach` below, so existing instances heal
+    # even if the user later detaches without interacting. See #138/#140.
+    pipe_invalidate
     zellij attach "$REPO_NAME"
     ;;
   new-session)
+    # No pipe_invalidate: the session is brand new, so every plugin
+    # instance in it bootstraps a fresh worktree list anyway.
     echo "🪟 Creating Zellij session '$REPO_NAME'..."
     zellij --new-session-with-layout "$LAYOUT" --session "$REPO_NAME"
     ;;
