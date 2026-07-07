@@ -1,6 +1,7 @@
 pub mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -257,32 +258,21 @@ pub struct State {
     /// covers the other ordering, and is correct even against pre-hide
     /// `self.tabs` because the instance's own tab was active then too).
     pub resync_on_reveal: bool,
-    /// Bumped every time `set_status` sets a non-empty `status_message` —
-    /// one "generation" per displayed message. Not itself sufficient to
-    /// guard `Event::Timer` (see `status_message_pending_timers` for why);
-    /// kept mainly as a readable marker of "which message is this" and
-    /// asserted by tests to confirm `set_status` armed a new TTL.
-    pub status_message_epoch: u64,
-    /// Count of `STATUS_MESSAGE_TTL_SECS` timers actually armed (one per
-    /// event with a `set_status` request — see `note_timer_armed`) whose
-    /// `Event::Timer` hasn't been processed yet by `handle_timer`.
-    ///
-    /// `zellij_tile::shim::set_timeout` does NOT replace a previously
-    /// armed timer — the host spawns an independent one-shot
-    /// `tokio::time::sleep` per call (see zellij-server's `set_timeout`),
-    /// so a rapid run of status changes can have several of these
-    /// in flight at once. A single "epoch == expected epoch" check taken
-    /// alone can't safely guard this: every arm snapshots the epoch it's
-    /// protecting to the value it just bumped to, so an earlier (stale)
-    /// timer firing after a newer message replaced the old one would see
-    /// that same epoch match and clear the newer message prematurely.
-    /// Counting outstanding arms instead is race-order independent: the
-    /// message is only cleared once every timer armed so far has reported
-    /// in (this count reaches 0) — which can only happen at-or-after the
-    /// *last* arm's own TTL has elapsed. An earlier stale timer just
-    /// decrements the count and leaves the current message alone to live
-    /// out its own full TTL. See `handle_timer` and issue #152.
-    pub status_message_pending_timers: u32,
+    /// When the currently displayed `status_message` was set (`None` when
+    /// no message is showing). THE source of truth for expiry (#152):
+    /// `handle_timer` and `handle_visible` clear the message iff it is at
+    /// least `STATUS_MESSAGE_TTL_SECS` old. `Event::Timer` is only a
+    /// wake-up, never an authority — zellij's `set_timeout` spawns an
+    /// independent one-shot timer per call (see zellij-server), timers can
+    /// be lost entirely while the instance's pane is hidden (hidden
+    /// instances receive no Events), and any bookkeeping that must pair
+    /// arms with fires therefore wedges after a single loss. An age check
+    /// is immune: a stale timer firing early finds the newer message too
+    /// young and leaves it; a lost timer is covered by the next wake-up
+    /// (a later message's timer, or the reveal re-arm in
+    /// `handle_visible`). Uses the WASI monotonic clock, available to the
+    /// plugin sandbox.
+    pub status_message_set_at: Option<Instant>,
     /// Set by `set_status` when it arms a new timer; consumed by the
     /// `ZellijPlugin::update`/`pipe` shell, which performs the actual
     /// `zellij_tile::shim::set_timeout` host call and clears this flag.
@@ -380,69 +370,58 @@ impl State {
     /// — every call site that used to assign the fields directly now goes
     /// through here, so a future call site can't forget the timer.
     ///
-    /// A non-empty `msg` bumps `status_message_epoch` and sets
+    /// A non-empty `msg` stamps `status_message_set_at` and sets
     /// `status_timer_needs_arming` so the imperative shell (`update`/
-    /// `pipe`) arms the real host timer right after this event finishes
-    /// processing. `status_message_pending_timers` is deliberately NOT
-    /// incremented here: the count must track timers actually armed, and
-    /// the shell arms at most one per event no matter how many times a
-    /// handler called `set_status` while processing it — counting per
-    /// call would leave the count permanently ahead of the timers that
-    /// will ever fire, and `handle_timer` would never reach 0 again. See
-    /// `note_timer_armed`.
+    /// `pipe`) arms a wake-up timer right after this event finishes
+    /// processing. Re-setting within the TTL simply re-stamps — the age
+    /// check in `handle_timer` gives the newer message its own full TTL
+    /// no matter how many older timers are still in flight.
     ///
-    /// An empty `msg` (clearing the status) is intentionally NOT armed:
-    /// there is nothing left to expire.
+    /// An empty `msg` (clearing the status) resets the stamp AND any
+    /// not-yet-performed arm request: there is nothing left to expire,
+    /// and arming for an already-cleared message would be pure noise.
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         let msg = msg.into();
         self.status_is_error = is_error;
         if msg.is_empty() {
             self.status_message = msg;
+            self.status_message_set_at = None;
+            self.status_timer_needs_arming = false;
             return;
         }
         self.status_message = msg;
-        self.status_message_epoch += 1;
+        self.status_message_set_at = Some(Instant::now());
         self.status_timer_needs_arming = true;
     }
 
-    /// Record that the imperative shell armed one real host timer for the
-    /// currently displayed message, consuming the `set_status` request.
-    /// Pure counterpart of `arm_pending_status_timer` so unit tests can
-    /// drive the exact arm/fire bookkeeping without the host call. The
-    /// `status_message_pending_timers` increment lives here — and only
-    /// here — so the count equals the number of `Event::Timer`s that are
-    /// genuinely still due, which is what makes `handle_timer`'s
-    /// reach-zero test sound.
-    pub fn note_timer_armed(&mut self) {
-        self.status_timer_needs_arming = false;
-        self.status_message_pending_timers += 1;
+    /// True when the currently displayed message has lived out its TTL.
+    /// Pure age check — see `status_message_set_at` for why expiry is
+    /// decided by age, never by pairing timer arms with fires. The small
+    /// tolerance absorbs the host timer firing marginally early relative
+    /// to our own clock reading.
+    fn status_message_expired(&self) -> bool {
+        self.status_message_set_at
+            .is_some_and(|t| t.elapsed().as_secs_f64() >= STATUS_MESSAGE_TTL_SECS - 0.25)
     }
 
-    /// Handle `Event::Timer` — a `STATUS_MESSAGE_TTL_SECS` timeout armed by
-    /// `set_status`. Pure (no host calls) so it stays unit-testable; the
-    /// real `set_timeout` call lives in the `update`/`pipe` shell.
+    /// Handle `Event::Timer` — a `STATUS_MESSAGE_TTL_SECS` wake-up armed by
+    /// the shell after a `set_status`. Pure (no host calls) so it stays
+    /// unit-testable; the real `set_timeout` call lives in the
+    /// `update`/`pipe` shell.
     ///
-    /// See `status_message_pending_timers` for why this decrements a count
-    /// rather than comparing a single stored epoch: only once every timer
-    /// armed so far has reported in (the count reaches 0) do we know the
-    /// *most recently set* message has lived out its own full TTL. A
-    /// stale timer belonging to an already-replaced message just
-    /// decrements the count and leaves the current message alone.
+    /// The timer is only a wake-up: the clear decision is the age check in
+    /// `status_message_expired` (see `status_message_set_at` for why any
+    /// arm/fire pairing scheme wedges on lost timers). A stale timer from
+    /// an already-replaced message finds the newer message too young and
+    /// leaves it to be cleared by its own wake-up.
     ///
     /// Returns `true` (re-render needed) only when a message was actually
     /// cleared.
-    ///
-    /// Accepted edge (see issue #152): hidden plugin instances receive no
-    /// Events at all, so a timer armed just before this instance's tab is
-    /// hidden never fires here. The stale message then clears on the next
-    /// `handle_timer`/interaction after the tab becomes visible again —
-    /// deliberately not worth extra machinery for a cosmetic footer.
     pub fn handle_timer(&mut self) -> bool {
-        self.status_message_pending_timers =
-            self.status_message_pending_timers.saturating_sub(1);
-        if self.status_message_pending_timers == 0 && !self.status_message.is_empty() {
+        if !self.status_message.is_empty() && self.status_message_expired() {
             self.status_message.clear();
             self.status_is_error = false;
+            self.status_message_set_at = None;
             true
         } else {
             false
@@ -487,6 +466,13 @@ impl State {
     /// fresh snapshot that typically follows re-syncs as well, whichever
     /// order the two events arrive in. Returns whether a re-render is
     /// needed (the cursor moved).
+    /// Reveal also reconciles the status footer (#152): a message that
+    /// expired while this pane was hidden is cleared lazily (its wake-up
+    /// timer may have been lost — hidden instances receive no Events),
+    /// and a still-live message gets a fresh wake-up armed for the same
+    /// reason. Both paths are safe no matter whether the original timer
+    /// actually fires later: expiry is decided by age, and a redundant
+    /// wake-up on a young message is a no-op.
     pub fn handle_visible(&mut self, visible: bool) -> bool {
         if !visible {
             return false;
@@ -494,7 +480,18 @@ impl State {
         let before = self.selected_index;
         self.select_active_sidebar_item();
         self.resync_on_reveal = true;
-        self.selected_index != before
+        let mut status_changed = false;
+        if !self.status_message.is_empty() {
+            if self.status_message_expired() {
+                self.status_message.clear();
+                self.status_is_error = false;
+                self.status_message_set_at = None;
+                status_changed = true;
+            } else {
+                self.status_timer_needs_arming = true;
+            }
+        }
+        self.selected_index != before || status_changed
     }
 
     fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
@@ -752,7 +749,7 @@ impl State {
     fn arm_pending_status_timer(&mut self) {
         if self.status_timer_needs_arming {
             set_timeout(STATUS_MESSAGE_TTL_SECS);
-            self.note_timer_armed();
+            self.status_timer_needs_arming = false;
         }
     }
 
@@ -1841,8 +1838,13 @@ impl ZellijPlugin for State {
         // no host effect to `execute`, each reporting precisely whether a
         // re-render is needed. See `State::handle_visible` (#151) and
         // `State::handle_timer` (#152).
+        // Reveal may request a fresh wake-up timer for a still-live status
+        // message (its original timer can be lost while hidden), so the
+        // arm step runs on this path too.
         if let Event::Visible(visible) = event {
-            return self.handle_visible(visible);
+            let rerender = self.handle_visible(visible);
+            self.arm_pending_status_timer();
+            return rerender;
         }
         if let Event::Timer(_) = event {
             return self.handle_timer();
@@ -4880,36 +4882,32 @@ mod tests {
 
     // --- Status message TTL (#152) ---
     //
-    // set_status/handle_timer are pure (no host calls), so — like every
-    // other handler in this module — they're exercised directly. The real
-    // `zellij_tile::shim::set_timeout` call lives in `arm_pending_status_timer`
-    // (called from `update`/`pipe`, never from unit tests, same as
-    // `execute`/`fire_*`); `status_timer_needs_arming` is the indirection
-    // these tests use to observe that a timer *would* be armed without
-    // actually calling into the host.
+    // set_status/handle_timer/handle_visible are pure (no host calls), so —
+    // like every other handler in this module — they're exercised directly.
+    // The real `zellij_tile::shim::set_timeout` call lives in
+    // `arm_pending_status_timer` (called from `update`/`pipe`, never from
+    // unit tests, same as `execute`/`fire_*`); `status_timer_needs_arming`
+    // is the indirection these tests observe. Expiry is age-based: tests
+    // backdate `status_message_set_at` instead of sleeping.
+
+    fn backdate_status(s: &mut State, secs: u64) {
+        s.status_message_set_at = s
+            .status_message_set_at
+            .map(|t| t - std::time::Duration::from_secs(secs));
+    }
 
     #[test]
-    fn set_status_bumps_epoch_and_arms_timer() {
+    fn set_status_stamps_age_and_requests_wakeup() {
         let mut s = State::default();
-        assert_eq!(s.status_message_epoch, 0);
-        assert_eq!(s.status_message_pending_timers, 0);
+        assert!(s.status_message_set_at.is_none());
         assert!(!s.status_timer_needs_arming);
 
         s.set_status("Spawned 'feature-c'", false);
 
         assert_eq!(s.status_message, "Spawned 'feature-c'");
         assert!(!s.status_is_error);
-        assert_eq!(s.status_message_epoch, 1);
-        assert!(s.status_timer_needs_arming, "set_status must request a timer arm");
-        assert_eq!(
-            s.status_message_pending_timers, 0,
-            "the count tracks timers actually armed by the shell, not requests"
-        );
-
-        s.note_timer_armed(); // the shell arms once per event
-
-        assert!(!s.status_timer_needs_arming);
-        assert_eq!(s.status_message_pending_timers, 1);
+        assert!(s.status_message_set_at.is_some());
+        assert!(s.status_timer_needs_arming, "set_status must request a wake-up");
     }
 
     #[test]
@@ -4917,110 +4915,98 @@ mod tests {
         let mut s = State::default();
         s.set_status("Unknown agent event: Bogus", true);
         assert!(s.status_is_error);
-        assert!(s.status_timer_needs_arming);
     }
 
     #[test]
-    fn set_status_empty_message_does_not_arm() {
-        // A future call site that clears the message this way must not
-        // start a TTL for a message that's already gone.
+    fn set_status_empty_message_clears_stamp_and_pending_arm() {
+        // Clearing in the same event that set a message must also retract
+        // the not-yet-performed arm request — arming a wake-up for an
+        // already-cleared message is noise (Codex review finding).
         let mut s = State::default();
         s.set_status("Refreshed", false);
-        s.note_timer_armed(); // the shell arms it
+        assert!(s.status_timer_needs_arming);
 
         s.set_status("", false);
 
         assert!(s.status_message.is_empty());
-        assert_eq!(
-            s.status_message_epoch, 1,
-            "clearing must not bump the epoch"
-        );
-        assert_eq!(
-            s.status_message_pending_timers, 1,
-            "clearing must not touch the pending-timer count"
-        );
-        assert!(
-            !s.status_timer_needs_arming,
-            "clearing must not request a new timer arm"
-        );
+        assert!(s.status_message_set_at.is_none());
+        assert!(!s.status_timer_needs_arming);
     }
 
     #[test]
-    fn timer_clears_message_once_its_own_ttl_fires() {
+    fn timer_before_ttl_does_not_clear() {
         let mut s = State::default();
         s.set_status("Spawned 'feature-c'", false);
-        s.note_timer_armed();
-        assert_eq!(s.status_message_pending_timers, 1);
+        assert!(!s.handle_timer(), "a fresh message must survive an early wake-up");
+        assert_eq!(s.status_message, "Spawned 'feature-c'");
+    }
 
-        let rerender = s.handle_timer();
+    #[test]
+    fn timer_after_ttl_clears() {
+        let mut s = State::default();
+        s.set_status("Spawned 'feature-c'", false);
+        backdate_status(&mut s, 9);
 
-        assert!(rerender, "clearing the message should request a re-render");
+        assert!(s.handle_timer(), "clearing must request a re-render");
         assert!(s.status_message.is_empty());
         assert!(!s.status_is_error);
-        assert_eq!(s.status_message_pending_timers, 0);
+        assert!(s.status_message_set_at.is_none());
     }
 
     #[test]
-    fn stale_timer_does_not_clear_a_message_set_after_it_was_armed() {
-        // arm1 (message A) ... arm2 (message B, re-arming before arm1's
-        // timer fires) ... arm1's now-stale Timer finally arrives. B must
-        // survive and get its own full TTL from arm2's timer.
+    fn stale_timer_does_not_clear_a_newer_message() {
+        // Message A's wake-up fires after A was replaced by B: B is younger
+        // than the TTL, so the age check leaves it to live out its own TTL
+        // no matter how many older timers are in flight.
         let mut s = State::default();
         s.set_status("Spawning 'feat-a'...", false);
-        s.note_timer_armed(); // arm1 (its own event)
-        s.set_status("Spawned 'feat-a'", false);
-        s.note_timer_armed(); // arm2 (a later event), before arm1's timer fires
+        backdate_status(&mut s, 5);
+        s.set_status("Spawned 'feat-a'", false); // B, re-stamps to now
 
-        assert_eq!(s.status_message_epoch, 2);
-        assert_eq!(s.status_message_pending_timers, 2);
+        assert!(!s.handle_timer(), "A's stale wake-up must not clear B");
+        assert_eq!(s.status_message, "Spawned 'feat-a'");
 
-        // arm1's stale Timer fires first.
-        let rerender = s.handle_timer();
-
-        assert!(
-            !rerender,
-            "a stale timer must not report a clear happened"
-        );
-        assert_eq!(
-            s.status_message, "Spawned 'feat-a'",
-            "the newer message must survive a stale timer from an earlier arm"
-        );
-        assert_eq!(s.status_message_pending_timers, 1);
-
-        // arm2's own Timer fires next, after living its full TTL.
-        let rerender = s.handle_timer();
-
-        assert!(rerender);
+        backdate_status(&mut s, 9);
+        assert!(s.handle_timer(), "B clears once IT is old enough");
         assert!(s.status_message.is_empty());
-        assert_eq!(s.status_message_pending_timers, 0);
     }
 
     #[test]
-    fn burst_of_set_status_in_one_event_arms_one_timer_and_still_clears() {
-        // Two set_status calls while processing a SINGLE event: the shell
-        // arms only one timer for the burst, so the count must also grow
-        // by one — counting per set_status call would leave it permanently
-        // ahead of the timers that will ever fire and the message would
-        // never clear again (the #152 review finding).
+    fn reveal_lazily_clears_a_message_that_expired_while_hidden() {
+        // The wake-up timer can be lost while the pane is hidden (hidden
+        // instances receive no Events). Reveal must reconcile: an expired
+        // message clears immediately.
         let mut s = State::default();
-        s.set_status("Removing 'feat-a'...", false);
-        s.set_status("Failed to remove 'feat-a': boom", true); // same event
-        s.note_timer_armed(); // the shell arms once for the whole event
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        s.set_status("Spawned 'feat-b'", false);
+        s.status_timer_needs_arming = false; // shell armed it (then lost)
+        backdate_status(&mut s, 20);
 
-        assert_eq!(s.status_message_epoch, 2);
-        assert_eq!(s.status_message_pending_timers, 1);
-
-        assert!(s.handle_timer(), "the burst's single timer must clear");
+        assert!(s.handle_visible(true), "reveal must clear and re-render");
         assert!(s.status_message.is_empty());
+        assert!(s.status_message_set_at.is_none());
     }
 
     #[test]
-    fn timer_with_no_pending_arms_is_a_harmless_no_op() {
-        // Defensive: an Event::Timer arriving with nothing outstanding
-        // (shouldn't happen in practice, but `saturating_sub` guards it)
-        // must not panic or fabricate a clear.
+    fn reveal_rearms_wakeup_for_a_still_live_message() {
+        // A young message whose timer may have been lost while hidden gets
+        // a fresh wake-up on reveal; a redundant wake-up is harmless (the
+        // age check just declines to clear).
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        s.set_status("Spawned 'feat-b'", false);
+        s.status_timer_needs_arming = false; // shell armed it (then lost)
+
+        s.handle_visible(true);
+
+        assert_eq!(s.status_message, "Spawned 'feat-b'");
+        assert!(s.status_timer_needs_arming, "reveal must request a fresh wake-up");
+    }
+
+    #[test]
+    fn timer_with_no_message_is_a_harmless_no_op() {
         let mut s = State::default();
         assert!(!s.handle_timer());
-        assert_eq!(s.status_message_pending_timers, 0);
+        assert!(s.status_message_set_at.is_none());
     }
 }
