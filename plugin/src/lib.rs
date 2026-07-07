@@ -495,7 +495,11 @@ impl State {
     /// dropped (defensive cap, not expected to bite in practice).
     fn serialize_statuses(&self) -> String {
         let mut out = String::new();
-        for (tab, status) in self.agent_statuses.iter().chain(self.pending_statuses.iter()) {
+        for (tab, status) in self
+            .agent_statuses
+            .iter()
+            .chain(self.pending_statuses.iter().map(|(tab, p)| (tab, &p.status)))
+        {
             if tab.contains(':') || tab.contains(';') {
                 continue;
             }
@@ -1337,7 +1341,8 @@ impl State {
                     if self.pending_statuses.len() >= 16 {
                         self.pending_statuses.pop_first();
                     }
-                    self.pending_statuses.insert(tab, status);
+                    self.pending_statuses
+                        .insert(tab, PendingStatus { status, age: 0 });
                 }
             }
             // No Notify, no status_message: replay is a silent catch-up,
@@ -3868,7 +3873,10 @@ mod tests {
         let mut s = State::default();
         s.tabs = vec![make_tab("feat-a", false)];
         s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
-        s.pending_statuses.insert("feat-b".to_string(), AgentStatus::Done);
+        s.pending_statuses.insert(
+            "feat-b".to_string(),
+            PendingStatus { status: AgentStatus::Done, age: 0 },
+        );
         let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
         let Action::ReplayStatuses(payload) = action else {
             panic!("expected ReplayStatuses, got {action:?}");
@@ -3890,7 +3898,10 @@ mod tests {
         // knowledge to offer — the reply gate must not require a live
         // agent_statuses entry.
         let mut s = State::default();
-        s.pending_statuses.insert("feat-b".to_string(), AgentStatus::Working);
+        s.pending_statuses.insert(
+            "feat-b".to_string(),
+            PendingStatus { status: AgentStatus::Working, age: 0 },
+        );
         let action = s.handle_pipe(&pipe_msg(PIPE_STATUS_REQUEST, &[]));
         assert_eq!(
             action,
@@ -3915,7 +3926,10 @@ mod tests {
         let mut s = State::default();
         s.agent_statuses.insert("feat-a".to_string(), AgentStatus::Working);
         s.agent_statuses.insert("feat-b".to_string(), AgentStatus::NeedsInput);
-        s.pending_statuses.insert("feat-c".to_string(), AgentStatus::Done);
+        s.pending_statuses.insert(
+            "feat-c".to_string(),
+            PendingStatus { status: AgentStatus::Done, age: 0 },
+        );
         let payload = s.serialize_statuses();
         let mut parsed = State::parse_statuses(&payload);
         parsed.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3991,14 +4005,20 @@ mod tests {
         assert_eq!(s.agent_statuses.get("unknown-tab"), None);
         assert_eq!(
             s.pending_statuses.get("unknown-tab"),
-            Some(&AgentStatus::Done)
+            Some(&PendingStatus {
+                status: AgentStatus::Done,
+                age: 0
+            })
         );
     }
 
     #[test]
     fn status_replay_never_overwrites_existing_pending_status() {
         let mut s = State::default();
-        s.pending_statuses.insert("unknown-tab".to_string(), AgentStatus::Working);
+        s.pending_statuses.insert(
+            "unknown-tab".to_string(),
+            PendingStatus { status: AgentStatus::Working, age: 0 },
+        );
         let action = s.handle_pipe(&pipe_msg(
             PIPE_STATUS_REPLAY,
             &[(STATUS_REPLAY_ARG, "unknown-tab:Done")],
@@ -4006,7 +4026,10 @@ mod tests {
         assert_eq!(action, Action::None);
         assert_eq!(
             s.pending_statuses.get("unknown-tab"),
-            Some(&AgentStatus::Working)
+            Some(&PendingStatus {
+                status: AgentStatus::Working,
+                age: 0
+            })
         );
     }
 
@@ -4015,7 +4038,10 @@ mod tests {
         let mut s = State::default();
         for i in 0..16 {
             s.pending_statuses
-                .insert(format!("existing-{i}"), AgentStatus::Working);
+                .insert(
+                format!("existing-{i}"),
+                PendingStatus { status: AgentStatus::Working, age: 0 },
+            );
         }
         let action = s.handle_pipe(&pipe_msg(
             PIPE_STATUS_REPLAY,
