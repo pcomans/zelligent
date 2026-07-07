@@ -85,6 +85,199 @@ zellij_list_sessions() {
   fi
 }
 
+# --- Stale serialized session reconciliation (#155/#157/#158) -------------
+#
+# Zellij caches a resurrectable copy of every session it has seen
+# (session-layout.kdl) under a cache dir named after the running zellij's
+# version/contract, e.g. `contract_version_1` on 0.44.x, `0.43.1` on older
+# releases — the exact directory name drifts across zellij versions and
+# must never be hardcoded (#158). `zellij attach` (including
+# `--create-background`) resurrects verbatim from that file whenever the
+# named session isn't currently alive, even though `zellij list-sessions
+# --short` prints EXITED sessions identically to alive ones. If the
+# serialized layout points a plugin at a `file:` path that's since moved,
+# been deleted, or no longer holds a valid wasm module, the resurrected
+# session shows a broken plugin pane ("magic header not detected") and,
+# because resurrection re-serializes, the corruption is sticky. See the
+# design doc for the full research: docs/design-docs/session-resurrection.md
+# and zelligent issue #155.
+
+# Cache roots to search for serialized session_info dirs. Overridable via
+# ZELLIGENT_ZELLIJ_CACHE_ROOTS (colon-separated) so tests never touch the
+# real cache.
+zellij_cache_roots() {
+  if [ -n "$ZELLIGENT_ZELLIJ_CACHE_ROOTS" ]; then
+    local root roots
+    IFS=':' read -ra roots <<<"$ZELLIGENT_ZELLIJ_CACHE_ROOTS"
+    # Print one-per-line with an explicit trailing newline on every entry —
+    # a bare `tr ':' '\n'` leaves the last root without one when there's
+    # only a single override path (no ':' to convert), and `while read`
+    # silently drops a final line with no trailing newline.
+    for root in "${roots[@]}"; do
+      printf '%s\n' "$root"
+    done
+  else
+    printf '%s\n' \
+      "$HOME/Library/Caches/org.Zellij-Contributors.Zellij" \
+      "${XDG_CACHE_HOME:-$HOME/.cache}/zellij"
+  fi
+}
+
+# All existing `<cache_root>/*/session_info/<name>` directories across every
+# cache root, tolerant of the version/contract dir name drifting (#158).
+serialized_session_dirs() {
+  local name="$1" root dir
+  while IFS= read -r root; do
+    [ -n "$root" ] && [ -d "$root" ] || continue
+    for dir in "$root"/*/session_info/"$name"; do
+      [ -d "$dir" ] && printf '%s\n' "$dir"
+    done
+  done < <(zellij_cache_roots)
+}
+
+# `session-layout.kdl` files for one session name, across cache roots.
+serialized_layout_files() {
+  local name="$1" dir
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    [ -f "$dir/session-layout.kdl" ] && printf '%s\n' "$dir/session-layout.kdl"
+  done < <(serialized_session_dirs "$name")
+}
+
+# `session-layout.kdl` files for EVERY serialized session, across cache
+# roots — used by `zelligent doctor`'s sweep.
+all_serialized_layout_files() {
+  local root f
+  while IFS= read -r root; do
+    [ -n "$root" ] && [ -d "$root" ] || continue
+    for f in "$root"/*/session_info/*/session-layout.kdl; do
+      [ -f "$f" ] && printf '%s\n' "$f"
+    done
+  done < <(zellij_cache_roots)
+}
+
+# Long-form `zellij list-sessions`, timeout-guarded like zellij_list_sessions.
+zellij_list_sessions_long() {
+  run_with_timeout 3 zellij list-sessions --no-formatting 2>/dev/null || true
+}
+
+# alive | exited | none for a session name, parsed from the long-form
+# listing. `--short` can't distinguish EXITED from alive (#155 finding 1.4);
+# the long form marks EXITED sessions with a "(EXITED" suffix on their line.
+# Fails open to "none" on any list-sessions error/timeout — the guard must
+# never block startup.
+session_state() {
+  local name="$1" output line candidate
+  output=$(zellij_list_sessions_long)
+  [ -n "$output" ] || { printf 'none\n'; return 0; }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    candidate="${line%% \[Created*}"
+    if [ "$candidate" = "$name" ]; then
+      if printf '%s\n' "$line" | grep -qF '(EXITED'; then
+        printf 'exited\n'
+      else
+        printf 'alive\n'
+      fi
+      return 0
+    fi
+  done <<<"$output"
+  printf 'none\n'
+}
+
+# Candidate plugin `file:` URLs referenced by a serialized layout. Uses grep
+# rather than a KDL parser — robust to formatting drift; a stray non-plugin
+# match just fails validation, which triggers a fresh session (the safe
+# direction). URL-decoding isn't needed for zelligent's own paths.
+extract_plugin_file_urls() {
+  local file="$1"
+  grep -o 'file:[^"]*' "$file" 2>/dev/null || true
+}
+
+# Validate one `file:` plugin URL. Returns 0 (valid) or 1 (stale).
+#   - missing file, or first 4 bytes aren't the wasm magic number  -> stale
+#   - basename is zelligent-plugin.wasm but path != current_plugin_path
+#     (install moved) -> stale
+#   - URL-encoded paths (contain a %XX escape) are not decoded; treated as
+#     "cannot validate safely" and pass.
+validate_plugin_url() {
+  local url="$1" current_plugin_path="$2" path magic
+  path="${url#file:}"
+  case "$path" in
+    *%[0-9A-Fa-f][0-9A-Fa-f]*) return 0 ;;
+  esac
+  [ -f "$path" ] || return 1
+  # Compare via hex (not a raw string) because bash can't hold the NUL byte
+  # that starts the wasm magic number (\0asm) in a variable.
+  magic=$(head -c4 "$path" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  [ "$magic" = "0061736d" ] || return 1
+  if [ "$(basename "$path")" = "zelligent-plugin.wasm" ] && [ -n "$current_plugin_path" ] && [ "$path" != "$current_plugin_path" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Classify a layout file's staleness: prints "<kind>\t<bad_path>" where kind
+# is one of none|zelligent|other. "zelligent" wins over "other" (a stale
+# zelligent URL is always auto-fixable; a stale third-party URL alone is
+# not) — see reconcile_serialized_session / doctor for how each is used.
+layout_stale_kind() {
+  local file="$1" current_plugin_path="$2" url path kind="none" bad_path=""
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    if ! validate_plugin_url "$url" "$current_plugin_path"; then
+      path="${url#file:}"
+      if [ "$(basename "$path")" = "zelligent-plugin.wasm" ]; then
+        kind="zelligent"
+        bad_path="$path"
+        break
+      elif [ "$kind" != "zelligent" ]; then
+        kind="other"
+        bad_path="$path"
+      fi
+    fi
+  done < <(extract_plugin_file_urls "$file")
+  printf '%s\t%s\n' "$kind" "$bad_path"
+}
+
+# Drop a session's cache dirs and print the standard stale-session message.
+drop_stale_session() {
+  local name="$1" bad_path="$2" dir
+  zellij delete-session --force "$name" 2>/dev/null || true
+  while IFS= read -r dir; do
+    [ -n "$dir" ] && rm -rf "$dir" 2>/dev/null || true
+  done < <(serialized_session_dirs "$name")
+  echo "ℹ️  Dropped stale saved session '$name' (serialized plugin path no longer valid: $bad_path); starting fresh."
+}
+
+# The core guard (#155/#157): call before any flow that can attach to a
+# session by name (`zellij list-sessions --short` doesn't distinguish
+# EXITED from alive, so a naive existence probe can walk into resurrecting
+# a broken layout). Never touches a live session — its server holds the
+# plugin in memory and will re-serialize on its own. Fails open: any
+# ambiguity (list-sessions timeout, unreadable/missing layout file, no
+# file: URLs at all) leaves the session untouched.
+reconcile_serialized_session() {
+  local name="$1" current_plugin_path="$2" file kind bad_path
+
+  [ "$(session_state "$name")" = "exited" ] || return 0
+
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    IFS=$'\t' read -r kind bad_path < <(layout_stale_kind "$file" "$current_plugin_path")
+    if [ "$kind" != "none" ]; then
+      # Re-check immediately before deleting: the session could have
+      # transitioned exited -> alive between the check above and here (a
+      # second `zelligent` launch racing this one). delete-session --force
+      # on a now-alive session would kill it out from under its user.
+      if [ "$(session_state "$name")" = "exited" ]; then
+        drop_stale_session "$name" "$bad_path"
+      fi
+      return 0
+    fi
+  done < <(serialized_layout_files "$name")
+}
+
 resolve_shared_asset_path() {
   local override_var="$1"
   local asset_name="$2"
@@ -704,6 +897,38 @@ PERMS
     fi
   fi
 
+  # 8. Sweep serialized (resurrectable) sessions for stale plugin URLs
+  # (#155/#157). Startup and spawn only reconcile the current repo's own
+  # session; this is the only place ALL cached sessions get checked,
+  # including other repos' and alive-but-stale ones (which the startup
+  # guard deliberately never touches).
+  echo ""
+  echo "  Serialized sessions:"
+  DOCTOR_SWEEP_COUNT=0
+  while IFS= read -r DOCTOR_LAYOUT_FILE; do
+    [ -n "$DOCTOR_LAYOUT_FILE" ] || continue
+    DOCTOR_SWEEP_COUNT=$((DOCTOR_SWEEP_COUNT + 1))
+    DOCTOR_SESSION_DIR=$(dirname "$DOCTOR_LAYOUT_FILE")
+    DOCTOR_SESSION_NAME=$(basename "$DOCTOR_SESSION_DIR")
+    DOCTOR_SESSION_STATE=$(session_state "$DOCTOR_SESSION_NAME")
+    IFS=$'\t' read -r DOCTOR_STALE_KIND DOCTOR_BAD_PATH < <(layout_stale_kind "$DOCTOR_LAYOUT_FILE" "$PLUGIN_PATH")
+    if [ "$DOCTOR_STALE_KIND" = "none" ]; then
+      echo "    $DOCTOR_SESSION_NAME ($DOCTOR_SESSION_STATE): ok"
+    elif [ "$DOCTOR_SESSION_STATE" = "exited" ] && [ "$DOCTOR_STALE_KIND" = "zelligent" ]; then
+      # Auto-fixable: exited, and the zelligent sidebar's own URL is stale.
+      drop_stale_session "$DOCTOR_SESSION_NAME" "$DOCTOR_BAD_PATH" | sed 's/^/    /'
+    else
+      # Warn-only: either the session is still alive (never delete it out
+      # from under its user) or it's exited but only a third-party plugin's
+      # URL is stale (not ours to fix on the user's behalf).
+      echo "    $DOCTOR_SESSION_NAME ($DOCTOR_SESSION_STATE): stale — plugin path no longer valid: $DOCTOR_BAD_PATH"
+      echo "        Fix: zellij delete-session --force '$DOCTOR_SESSION_NAME'"
+    fi
+  done < <(all_serialized_layout_files)
+  if [ "$DOCTOR_SWEEP_COUNT" -eq 0 ]; then
+    echo "    none found"
+  fi
+
   if [ "$ERRORS" -ne 0 ]; then
     echo ""
     echo "Some checks failed. Fix the issues above and run 'zelligent doctor' again."
@@ -783,16 +1008,16 @@ if [ "$1" = "nuke" ]; then
   # Remove the resurrection cache so the session won't come back on next attach.
   # Zellij discovers resurrectable sessions by scanning the session_info cache dir.
   # Paths:
-  #   macOS: ~/Library/Caches/org.Zellij-Contributors.Zellij/VERSION/session_info/SESSION/
-  #   Linux: ~/.cache/zellij/VERSION/session_info/SESSION/
-  if [ -n "$zellij_version" ]; then
-    for cache_base in \
-      "$HOME/Library/Caches/org.Zellij-Contributors.Zellij" \
-      "${XDG_CACHE_HOME:-$HOME/.cache}/zellij"; do
-      cache_dir="$cache_base/$zellij_version/session_info/$REPO_NAME"
-      rm -rf "$cache_dir" 2>/dev/null || true
-    done
-  fi
+  #   macOS: ~/Library/Caches/org.Zellij-Contributors.Zellij/<version-or-contract-dir>/session_info/SESSION/
+  #   Linux: ~/.cache/zellij/<version-or-contract-dir>/session_info/SESSION/
+  # The version-dir NAME drifts across zellij releases — 0.43.1 used the bare
+  # version string, 0.44.x uses `contract_version_N`, and it can drift again
+  # on future releases. Hardcoding `$zellij_version` here silently no-ops on
+  # any version that doesn't match (#158); glob for any dir that owns a
+  # `session_info/<name>` entry instead.
+  while IFS= read -r cache_dir; do
+    [ -n "$cache_dir" ] && rm -rf "$cache_dir" 2>/dev/null || true
+  done < <(serialized_session_dirs "$REPO_NAME")
   # Clean up stale socket if still present
   if [ -n "$zellij_version" ]; then
     rm -f "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
@@ -808,12 +1033,22 @@ if [ -z "$1" ]; then
     exit 0
   fi
 
+  # Resolve the plugin path up front (best-effort) so the reconciliation
+  # guard (#155/#157) can validate a resurrectable session's serialized
+  # plugin URL BEFORE the existence probe below decides to `zellij attach`
+  # into it. `zellij list-sessions --short` prints EXITED sessions
+  # identically to alive ones, so this probe is itself the vulnerable path.
+  # Tolerate resolve failure here — the guard still catches missing-file and
+  # bad-magic staleness without a current path to compare against; the
+  # "not installed" error below still fires from the real resolve attempt.
+  PLUGIN_PATH_STARTUP=$(resolve_plugin_path 2>/dev/null || true)
+  reconcile_serialized_session "$REPO_NAME" "$PLUGIN_PATH_STARTUP"
+
   if zellij_list_sessions | grep -qxF "$REPO_NAME"; then
     echo "Attaching to session '$REPO_NAME'..."
     exec zellij attach "$REPO_NAME"
   else
-    PLUGIN_PATH_STARTUP=""
-    if ! PLUGIN_PATH_STARTUP=$(resolve_plugin_path); then
+    if [ -z "$PLUGIN_PATH_STARTUP" ]; then
       if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
         echo "Plugin source not found: $ZELLIGENT_PLUGIN_SRC" >&2
       else
@@ -1156,10 +1391,17 @@ render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_NEW_TAB_TEMPLATE" "$REPO_ROOT
 #   new-session         — outside zellij, no session: `--new-session-with-layout`
 if [ -n "$ZELLIJ" ]; then
   SPAWN_MODE="inside-zellij"
-elif zellij_list_sessions | grep -qxF "$REPO_NAME"; then
-  SPAWN_MODE="attach-session"
 else
-  SPAWN_MODE="new-session"
+  # Same guard as the no-arg startup path (#155/#157): this probe is the
+  # other flow that can walk into resurrecting a broken EXITED session
+  # (`attach-session` mode below calls `zellij attach "$REPO_NAME"`).
+  # PLUGIN_PATH_LAYOUT is already resolved above (line ~1270).
+  reconcile_serialized_session "$REPO_NAME" "$PLUGIN_PATH_LAYOUT"
+  if zellij_list_sessions | grep -qxF "$REPO_NAME"; then
+    SPAWN_MODE="attach-session"
+  else
+    SPAWN_MODE="new-session"
+  fi
 fi
 
 # Inside Zellij and attach-session both want a fragment layout (panes at
