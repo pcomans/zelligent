@@ -1,6 +1,6 @@
 ---
 fixture: setup-empty-repo.sh
-launch: ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh
+launch: zelligent  # INSTALLED CLI — never the fixture clone's ./zelligent.sh (old main; see README "CLI under test")
 session_name: zelligent-test-repo
 ---
 
@@ -17,7 +17,7 @@ Verifies the PR 83 layout behavior started through `zelligent`.
 - Expected: The initial tab shows the sidebar plus the standard shell and lazygit body
 
 ## Test 3: Spawn from inside the session keeps the same frame
-- Action: In the control window, run `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn feature-a bash`
+- Action: Spawn from the sidebar UI itself (never from the control window — see README "CLI under test"): focus the sidebar in the view window, press `i`, type `feature-a`, press Enter
 - Expected: A new tab opens in the live session and still shows the persistent left sidebar
 
 ## Test 4: Manual tabs inherit the sidebar
