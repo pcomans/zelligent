@@ -1,0 +1,23 @@
+---
+source: tests/render_snapshots.rs
+expression: output
+---
+[?1049h[H[2J[1m[36m zelligent / error ───────────────────────────────[0m
+
+  [1m[31mNot a git repository.[0m
+  [2mCurrent directory: /tmp/foo[0m
+
+  [2md[0m  save layout to disk
+  [2mx[0m  nuke session & start fresh
+  [2mq[0m  close plugin
+
+
+
+
+
+
+
+
+  [31mOnly worktree tabs can be removed from the sidebar[0m
+
+  [2mVERSION                               [0m

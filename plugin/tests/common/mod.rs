@@ -51,6 +51,58 @@ pub fn render_to_string(state: &State, rows: usize, cols: usize) -> String {
     output.replace(zelligent_plugin::VERSION, "VERSION")
 }
 
+/// Strip ANSI CSI escape sequences (`ESC '[' <params> <final-byte>`, the
+/// only kind this codebase's `ui` module emits) so a rendered line's
+/// on-screen width can be measured.
+#[allow(dead_code)]
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+            }
+            for next in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Count the physical terminal rows a rendered frame occupies, the way a
+/// real terminal grid would: each newline-delimited line contributes
+/// `ceil(visible_width / cols).max(1)` rows, since a too-wide line
+/// soft-wraps instead of scrolling. `render_to`'s very last write is
+/// deliberately `write!`, not `writeln!` (see `render_footer`'s doc
+/// comment), so a frame that exactly fills `rows` has no trailing newline —
+/// drop the trailing empty split that a terminating `\n` would otherwise
+/// produce so it isn't miscounted as an extra blank row.
+///
+/// This is the regression check for #135/#136: every render arm must
+/// account for a wrapped status message (via `ui::status_height`) when
+/// budgeting its padding, or the frame emits more physical rows than
+/// `rows`, forcing a scroll that discards row 0 (the header).
+#[allow(dead_code)]
+pub fn physical_rows(output: &str, cols: usize) -> usize {
+    let mut lines: Vec<&str> = output.split('\n').collect();
+    if output.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let width = zelligent_plugin::ui::visible_width(&strip_ansi(line));
+            width.div_ceil(cols.max(1)).max(1)
+        })
+        .sum()
+}
+
 pub fn state_with_worktrees() -> State {
     let mut s = State::default();
     s.mode = Mode::BrowseWorktrees;
