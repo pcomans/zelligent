@@ -33,7 +33,11 @@ Each hook runs: `zellij pipe --name zelligent-status --args "event=<event>,tab=$
 
 Pipes arrive via `fn pipe(&mut self, msg: PipeMessage)` -- a separate WASM export, not an event subscription. No `subscribe()` call needed. Requires `PermissionType::ReadCliPipes`.
 
-`zellij pipe` (without `--plugin`) broadcasts to ALL running plugins. The plugin filters by `msg.name == "zelligent-status"` and ignores messages for unknown tabs.
+`zellij pipe` (without `--plugin`) broadcasts to ALL running plugins. The plugin filters by `msg.name == "zelligent-status"`.
+
+### Buffering events for not-yet-known tabs (#141)
+
+No automatic `event=Start` pipe is fired during spawn — neither `zelligent.sh` nor the plugin sends one. The only pipes come from external `zelligent-status` senders (the Claude Code plugin's hooks, see above), and those can race the `TabUpdate` that registers a brand-new tab with a given sidebar instance — so `handle_pipe` sometimes sees an event for a tab that isn't in `self.tabs` yet. Rather than dropping it, the event is stashed in `pending_statuses: BTreeMap<String, PendingStatus>` (latest event per tab wins and resets its age, capped at 16 entries to bound memory) and drained into `agent_statuses` by `handle_tab_update` once that tab appears in a snapshot. An entry that never matches is aged out after `PENDING_STATUS_MAX_TAB_UPDATES` `TabUpdate`s so a stale or mistyped `tab=` value can't get misapplied to an unrelated tab created later with that name. Buffered events never produce a `Notify` — replaying a `NeedsInput`/`Done` notification at `TabUpdate` time would fire it from the wrong context, and the buffered case is overwhelmingly `Start`/`Working`, which never notifies anyway.
 
 ### 4. Plugin sends OS notifications
 

@@ -54,9 +54,10 @@ Conventions: as ui-audit-01 (tmux mouse on; press/release separate send-keys; AR
 - DISCRIMINATOR: natively switch back (C-t+digit) to the tab where the glyph was visible; capture. If ● is STILL there → per-instance state (glyphs differ across tabs simultaneously). If it is gone everywhere → global clear on TabUpdate. Record which.
 
 ## R8 — BUG-10: auto-Start pipe from spawn is dropped (no working glyph on fresh spawn)
-- From the repo tab sidebar: two/three-click spawn `feature-c`. Capture at 3s, 10s, and 20s after the click (batch a loop).
-- REPRODUCED if the feature-c row NEVER shows a green ● in any capture (the spawn wrapper pipes event=Start automatically; check .ansi for `\x1b[32m●`).
-- Corroborate: via ctrl window pipe `event=Start,tab=feature-c` manually; wait 2s; capture → ● should now appear, proving the pipe path works but the auto event was lost.
+- PREMISE CORRECTION (2026-07-05 verification run): there is NO automatic `event=Start` pipe during spawn — neither `zelligent.sh` nor the plugin pipes anything; the only auto-pipe source is the Claude Code plugin's `UserPromptSubmit`/session hooks, which fire only when a real `claude` agent runs (this fixture's default agent-cmd is `$SHELL`, so nothing pipes). The original audit's "auto-Start dropped" observation was partly a fixture artifact.
+- The race this step now tests deterministically: via ctrl window, pipe `event=Start,tab=feature-a` while NO feature-a tab exists yet; capture (no glyph, no error — silently held). Then spawn `feature-a` via real title-line clicks; after the tab opens, natively switch back to the repo tab and capture ANSI.
+- With the #141 buffer fix: the feature-a row in the repo tab's sidebar shows the green ● (`\x1b[32m●`) — the pre-existing instance buffered the early event and drained it on the registering TabUpdate. Pre-fix behavior (REPRODUCED): the early event is dropped and no ● ever appears without a second manual pipe.
+- Negative control: pipe `event=Start,tab=nonexistent` → no glyph anywhere, no error text.
 
 ## R9 — BUG-6: duplicate-named manual tab invisible in sidebar
 - Via ctrl window: `zellij --session zelligent-test-repo action new-tab --name feature-a` (feature-a tab already open from R4); wait 3s; capture.
