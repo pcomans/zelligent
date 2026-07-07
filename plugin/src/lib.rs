@@ -281,6 +281,13 @@ pub struct State {
     /// for `Action`/`execute` and `fire_invalidate_broadcast`. Tests
     /// observe this flag directly instead of a real timer being armed.
     pub status_timer_needs_arming: bool,
+    /// Seconds the next wake-up should be armed for. `set_status` requests
+    /// the full TTL; `handle_visible`/`handle_timer` request only the
+    /// REMAINING TTL of the current message — arming a full TTL on reveal
+    /// would let a nearly-expired message live almost twice its lifetime,
+    /// and an early-firing timer must re-chain for what's left rather than
+    /// leave the message stranded until an unrelated event.
+    pub status_timer_arm_secs: f64,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -392,6 +399,7 @@ impl State {
         self.status_message = msg;
         self.status_message_set_at = Some(Instant::now());
         self.status_timer_needs_arming = true;
+        self.status_timer_arm_secs = STATUS_MESSAGE_TTL_SECS;
     }
 
     /// True when the currently displayed message has lived out its TTL.
@@ -402,6 +410,14 @@ impl State {
     fn status_message_expired(&self) -> bool {
         self.status_message_set_at
             .is_some_and(|t| t.elapsed().as_secs_f64() >= STATUS_MESSAGE_TTL_SECS - 0.25)
+    }
+
+    /// Seconds of TTL the current message has left (floored at a small
+    /// positive wake-up so a nearly-expired message still gets a timer).
+    fn status_message_remaining_secs(&self) -> f64 {
+        self.status_message_set_at
+            .map(|t| (STATUS_MESSAGE_TTL_SECS - t.elapsed().as_secs_f64()).max(0.3))
+            .unwrap_or(STATUS_MESSAGE_TTL_SECS)
     }
 
     /// Handle `Event::Timer` — a `STATUS_MESSAGE_TTL_SECS` wake-up armed by
@@ -418,12 +434,22 @@ impl State {
     /// Returns `true` (re-render needed) only when a message was actually
     /// cleared.
     pub fn handle_timer(&mut self) -> bool {
-        if !self.status_message.is_empty() && self.status_message_expired() {
+        if self.status_message.is_empty() {
+            return false;
+        }
+        if self.status_message_expired() {
             self.status_message.clear();
             self.status_is_error = false;
             self.status_message_set_at = None;
             true
         } else {
+            // Early wake-up (host timer fired ahead of our clock, or this
+            // was a stale timer from a replaced message): re-chain for the
+            // remaining TTL so the message never depends on an unrelated
+            // event to expire. Terminates — each fire either clears or
+            // re-arms exactly once for a strictly later deadline.
+            self.status_timer_needs_arming = true;
+            self.status_timer_arm_secs = self.status_message_remaining_secs();
             false
         }
     }
@@ -488,7 +514,10 @@ impl State {
                 self.status_message_set_at = None;
                 status_changed = true;
             } else {
+                // Only the REMAINING TTL: a full re-arm here would extend a
+                // nearly-expired message to almost twice its lifetime.
                 self.status_timer_needs_arming = true;
+                self.status_timer_arm_secs = self.status_message_remaining_secs();
             }
         }
         self.selected_index != before || status_changed
@@ -748,7 +777,7 @@ impl State {
     /// handler still only arms (at most) one timer per event.
     fn arm_pending_status_timer(&mut self) {
         if self.status_timer_needs_arming {
-            set_timeout(STATUS_MESSAGE_TTL_SECS);
+            set_timeout(self.status_timer_arm_secs.max(0.3));
             self.status_timer_needs_arming = false;
         }
     }
@@ -1847,7 +1876,9 @@ impl ZellijPlugin for State {
             return rerender;
         }
         if let Event::Timer(_) = event {
-            return self.handle_timer();
+            let rerender = self.handle_timer();
+            self.arm_pending_status_timer(); // early-fire re-chain
+            return rerender;
         }
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
@@ -4908,6 +4939,10 @@ mod tests {
         assert!(!s.status_is_error);
         assert!(s.status_message_set_at.is_some());
         assert!(s.status_timer_needs_arming, "set_status must request a wake-up");
+        assert_eq!(
+            s.status_timer_arm_secs, STATUS_MESSAGE_TTL_SECS,
+            "a fresh message gets its full TTL"
+        );
     }
 
     #[test]
@@ -4934,11 +4969,23 @@ mod tests {
     }
 
     #[test]
-    fn timer_before_ttl_does_not_clear() {
+    fn timer_before_ttl_does_not_clear_and_rechains_for_the_remainder() {
         let mut s = State::default();
         s.set_status("Spawned 'feature-c'", false);
+        backdate_status(&mut s, 5);
+        s.status_timer_needs_arming = false; // shell armed the original
+
         assert!(!s.handle_timer(), "a fresh message must survive an early wake-up");
         assert_eq!(s.status_message, "Spawned 'feature-c'");
+        assert!(
+            s.status_timer_needs_arming,
+            "an early wake-up must re-chain — the message must never depend on an unrelated event to expire"
+        );
+        assert!(
+            s.status_timer_arm_secs > 2.0 && s.status_timer_arm_secs <= 3.2,
+            "re-chain must be for the REMAINING TTL (~3s at age 5), got {}",
+            s.status_timer_arm_secs
+        );
     }
 
     #[test]
@@ -4997,10 +5044,16 @@ mod tests {
         s.set_status("Spawned 'feat-b'", false);
         s.status_timer_needs_arming = false; // shell armed it (then lost)
 
+        backdate_status(&mut s, 5);
         s.handle_visible(true);
 
         assert_eq!(s.status_message, "Spawned 'feat-b'");
         assert!(s.status_timer_needs_arming, "reveal must request a fresh wake-up");
+        assert!(
+            s.status_timer_arm_secs > 2.0 && s.status_timer_arm_secs <= 3.2,
+            "reveal must arm only the REMAINING TTL (~3s at age 5), not a full one, got {}",
+            s.status_timer_arm_secs
+        );
     }
 
     #[test]
