@@ -653,6 +653,114 @@ rm -rf "$FAKE_TMPDIR"
 
 rm -rf "$MOCK_HANG_BIN" "$FAKE_HANG_WASM_DIR"
 
+# ── Stale session reconciliation (#155/#157/#158) ──────────────────────────────
+echo "Stale session reconciliation:"
+
+# Pull the reconciliation functions straight out of zelligent.sh (same
+# awk-extraction pattern as the pane_name_for_agent_cmd unit tests above) and
+# drive them directly against a fabricated cache dir, so these tests never
+# touch a real zellij cache. ZELLIGENT_ZELLIJ_CACHE_ROOTS points the glob
+# helpers at the fake dir instead of the real platform cache bases.
+RECONCILE_FNS=$(
+  awk '/^run_with_timeout\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^zellij_cache_roots\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^serialized_session_dirs\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^serialized_layout_files\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^all_serialized_layout_files\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^zellij_list_sessions_long\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^session_state\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^extract_plugin_file_urls\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^validate_plugin_url\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^layout_stale_kind\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^drop_stale_session\(\) \{/,/^\}$/' "$SCRIPT"
+  awk '/^reconcile_serialized_session\(\) \{/,/^\}$/' "$SCRIPT"
+)
+
+FAKE_ZCACHE=$(mktemp -d)
+FAKE_ZPLUGINS=$(mktemp -d)
+mkdir -p "$FAKE_ZCACHE/contract_version_1/session_info"
+CURRENT_WASM="$FAKE_ZPLUGINS/current/zelligent-plugin.wasm"
+OLD_PATH_WASM="$FAKE_ZPLUGINS/old/zelligent-plugin.wasm"
+SCRIPT_BYTES_WASM="$FAKE_ZPLUGINS/scriptdir/zelligent-plugin.wasm"
+mkdir -p "$(dirname "$CURRENT_WASM")" "$(dirname "$OLD_PATH_WASM")" "$(dirname "$SCRIPT_BYTES_WASM")"
+printf '\0asm\x01\x00\x00\x00' > "$CURRENT_WASM"
+printf '\0asm\x01\x00\x00\x00' > "$OLD_PATH_WASM"
+printf '#!/bin/bash\necho hi\n' > "$SCRIPT_BYTES_WASM"
+
+mk_fake_session() {
+  local name="$1" url="$2"
+  local dir="$FAKE_ZCACHE/contract_version_1/session_info/$name"
+  mkdir -p "$dir"
+  if [ -n "$url" ]; then
+    printf 'layout {\n    pane { plugin location="file:%s" }\n}\n' "$url" > "$dir/session-layout.kdl"
+  else
+    printf 'layout {\n    pane { plugin location="zellij:status-bar" }\n}\n' > "$dir/session-layout.kdl"
+  fi
+}
+
+mk_fake_session "healthy-sess"     "$CURRENT_WASM"
+mk_fake_session "missing-sess"     "$FAKE_ZPLUGINS/gone/zelligent-plugin.wasm"
+mk_fake_session "scriptbytes-sess" "$SCRIPT_BYTES_WASM"
+mk_fake_session "wrongpath-sess"   "$OLD_PATH_WASM"
+mk_fake_session "nofileurl-sess"   ""
+mk_fake_session "alive-sess"       "$OLD_PATH_WASM"
+
+MOCK_RECONCILE=$(mktemp -d)
+RECONCILE_DELETE_LOG=$(mktemp)
+cat > "$MOCK_RECONCILE/zellij" <<MOCK
+#!/bin/bash
+if [ "\$1" = "list-sessions" ]; then
+  cat <<LIST
+healthy-sess [Created 5s ago] (EXITED - attach to resurrect)
+missing-sess [Created 5s ago] (EXITED - attach to resurrect)
+scriptbytes-sess [Created 5s ago] (EXITED - attach to resurrect)
+wrongpath-sess [Created 5s ago] (EXITED - attach to resurrect)
+nofileurl-sess [Created 5s ago] (EXITED - attach to resurrect)
+alive-sess [Created 5s ago]
+LIST
+  exit 0
+fi
+if [ "\$1" = "delete-session" ]; then
+  echo "DELETED:\$3" >> "$RECONCILE_DELETE_LOG"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_RECONCILE/zellij"
+
+run_reconcile() {
+  local name="$1"
+  PATH="$MOCK_RECONCILE:$PATH" ZELLIGENT_ZELLIJ_CACHE_ROOTS="$FAKE_ZCACHE" \
+    bash -c "$RECONCILE_FNS
+reconcile_serialized_session '$name' '$CURRENT_WASM'" 2>&1
+}
+
+out=$(run_reconcile healthy-sess)
+check "reconcile: healthy wasm URL prints nothing" "" "$out"
+not_contains "reconcile: healthy-sess not deleted" "DELETED:healthy-sess" "$(cat "$RECONCILE_DELETE_LOG")"
+
+out=$(run_reconcile missing-sess)
+contains "reconcile: missing plugin file dropped" "Dropped stale saved session 'missing-sess'" "$out"
+contains "reconcile: missing-sess delete-session called" "DELETED:missing-sess" "$(cat "$RECONCILE_DELETE_LOG")"
+
+out=$(run_reconcile scriptbytes-sess)
+contains "reconcile: script-bytes (bad magic) dropped" "Dropped stale saved session 'scriptbytes-sess'" "$out"
+contains "reconcile: scriptbytes-sess delete-session called" "DELETED:scriptbytes-sess" "$(cat "$RECONCILE_DELETE_LOG")"
+
+out=$(run_reconcile wrongpath-sess)
+contains "reconcile: valid wasm at wrong (drifted) path dropped" "Dropped stale saved session 'wrongpath-sess'" "$out"
+contains "reconcile: wrongpath-sess delete-session called" "DELETED:wrongpath-sess" "$(cat "$RECONCILE_DELETE_LOG")"
+
+out=$(run_reconcile nofileurl-sess)
+check "reconcile: no file: URLs (fail-open) prints nothing" "" "$out"
+not_contains "reconcile: nofileurl-sess not deleted" "DELETED:nofileurl-sess" "$(cat "$RECONCILE_DELETE_LOG")"
+
+out=$(run_reconcile alive-sess)
+check "reconcile: alive session with stale URL untouched" "" "$out"
+not_contains "reconcile: alive-sess never deleted" "DELETED:alive-sess" "$(cat "$RECONCILE_DELETE_LOG")"
+
+rm -rf "$MOCK_RECONCILE" "$RECONCILE_DELETE_LOG" "$FAKE_ZCACHE" "$FAKE_ZPLUGINS"
+
 # ── Argument validation ────────────────────────────────────────────────────────
 echo "Argument validation:"
 
@@ -737,6 +845,40 @@ out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME2" XDG_CACHE_HOME="$FAKE_HOME
 check "nuke existing session exits 0" "0" "$code"
 contains "nuke existing session prints success" "start fresh" "$out"
 rm -rf "$MOCK_NUKE2" "$FAKE_HOME2"
+
+# nuke cache glob (#158): zellij --version reports "0.43.1" but the actual
+# on-disk cache dir is contract_version_1 (the 0.44+ naming scheme) — the
+# pre-#158 code hardcoded the version-named path and silently found nothing.
+# Glob for any dir with a session_info/<name> entry instead.
+MOCK_NUKE3=$(mktemp -d)
+cat > "$MOCK_NUKE3/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "delete-session" ]; then exit 0; fi
+if [ "$1" = "--version" ]; then echo "zellij 0.43.1"; exit 0; fi
+MOCK
+cat > "$MOCK_NUKE3/ps" <<'MOCK'
+#!/bin/bash
+echo ""
+MOCK
+cat > "$MOCK_NUKE3/kill" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+cat > "$MOCK_NUKE3/sleep" <<'MOCK'
+#!/bin/bash
+exit 0
+MOCK
+chmod +x "$MOCK_NUKE3/zellij" "$MOCK_NUKE3/ps" "$MOCK_NUKE3/kill" "$MOCK_NUKE3/sleep"
+FAKE_HOME3=$(mktemp -d)
+FAKE_CACHE_DIR="$FAKE_HOME3/.cache/zellij/contract_version_1/session_info/$REPO_NAME"
+mkdir -p "$FAKE_CACHE_DIR"
+echo "layout stub" > "$FAKE_CACHE_DIR/session-layout.kdl"
+echo "metadata stub" > "$FAKE_CACHE_DIR/session-metadata.kdl"
+out=$(cd "$REPO_ROOT" && ZELLIJ="" HOME="$FAKE_HOME3" XDG_CACHE_HOME="$FAKE_HOME3/.cache" TMPDIR="$FAKE_HOME3/tmp" PATH="$MOCK_NUKE3:$PATH" "$SCRIPT" nuke 2>&1); code=$?
+check "nuke cache glob: exits 0" "0" "$code"
+[ ! -d "$FAKE_CACHE_DIR" ]
+check "nuke cache glob: removes contract_version_N session_info dir despite version mismatch" "0" "$?"
+rm -rf "$MOCK_NUKE3" "$FAKE_HOME3"
 
 # nuke from non-git dir: exits non-zero
 NONGIT_NUKE=$(mktemp -d)
@@ -832,6 +974,56 @@ check "doctor drift: does not rewrite layout" "$DRIFTED_LAYOUT_BEFORE" "$(cat "$
 
 rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
+# doctor sweep (#157): auto-fixes an EXITED session whose own sidebar URL is
+# stale, but only warns (never deletes) for an alive session with a stale
+# URL and for an EXITED session broken only by a third-party plugin's URL.
+MOCK_DR_SWEEP=$(mktemp -d)
+MOCK_DR_SWEEP_HOME=$(mktemp -d)
+FAKE_SWEEP_WASM_DIR=$(mktemp -d)
+FAKE_SWEEP_WASM="$FAKE_SWEEP_WASM_DIR/zelligent-plugin.wasm"
+printf '\0asm\x01\x00\x00\x00' > "$FAKE_SWEEP_WASM"
+
+SWEEP_CACHE="$MOCK_DR_SWEEP_HOME/.cache/zellij/contract_version_1/session_info"
+mkdir -p "$SWEEP_CACHE/exited-zelligent-stale" "$SWEEP_CACHE/alive-stale" "$SWEEP_CACHE/exited-thirdparty-stale"
+printf 'layout {\n    pane { plugin location="file:%s/gone/zelligent-plugin.wasm" }\n}\n' "$FAKE_SWEEP_WASM_DIR" \
+  > "$SWEEP_CACHE/exited-zelligent-stale/session-layout.kdl"
+printf 'layout {\n    pane { plugin location="file:%s/gone/zelligent-plugin.wasm" }\n}\n' "$FAKE_SWEEP_WASM_DIR" \
+  > "$SWEEP_CACHE/alive-stale/session-layout.kdl"
+printf 'layout {\n    pane { plugin location="file:%s/gone/zjstatus.wasm" }\n}\n' "$FAKE_SWEEP_WASM_DIR" \
+  > "$SWEEP_CACHE/exited-thirdparty-stale/session-layout.kdl"
+
+cat > "$MOCK_DR_SWEEP/zellij" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "list-sessions" ]; then
+  cat <<LIST
+exited-zelligent-stale [Created 5s ago] (EXITED - attach to resurrect)
+alive-stale [Created 5s ago]
+exited-thirdparty-stale [Created 5s ago] (EXITED - attach to resurrect)
+LIST
+  exit 0
+fi
+if [ "$1" = "delete-session" ]; then exit 0; fi
+exit 0
+MOCK
+chmod +x "$MOCK_DR_SWEEP/zellij"
+
+out_sweep=$(HOME="$MOCK_DR_SWEEP_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_SWEEP_WASM" \
+  PATH="$MOCK_DR_SWEEP:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_sweep=$?
+check "doctor sweep: exits 0" "0" "$code_sweep"
+contains "doctor sweep: header printed" "Serialized sessions:" "$out_sweep"
+contains "doctor sweep: auto-drops exited zelligent-stale session" "Dropped stale saved session 'exited-zelligent-stale'" "$out_sweep"
+contains "doctor sweep: warns (does not silently fix) alive-but-stale session" "alive-stale (alive): stale" "$out_sweep"
+contains "doctor sweep: alive-stale gets a fix command, not auto-deletion" "delete-session --force 'alive-stale'" "$out_sweep"
+contains "doctor sweep: warns on exited session broken only by third-party plugin" "exited-thirdparty-stale (exited): stale" "$out_sweep"
+excludes "doctor sweep: does not claim to have dropped the third-party-broken session" "Dropped stale saved session 'exited-thirdparty-stale'" "$out_sweep"
+check "doctor sweep: alive-stale cache dir untouched" "true" \
+  "$([ -d "$SWEEP_CACHE/alive-stale" ] && echo true || echo false)"
+check "doctor sweep: exited-thirdparty-stale cache dir untouched" "true" \
+  "$([ -d "$SWEEP_CACHE/exited-thirdparty-stale" ] && echo true || echo false)"
+check "doctor sweep: exited-zelligent-stale cache dir removed" "false" \
+  "$([ -d "$SWEEP_CACHE/exited-zelligent-stale" ] && echo true || echo false)"
+
+rm -rf "$MOCK_DR_SWEEP" "$MOCK_DR_SWEEP_HOME" "$FAKE_SWEEP_WASM_DIR"
 
 # doctor with existing keybinds block in config: preserves existing keybinds
 MOCK_DR_BIN2=$(mktemp -d)
@@ -1249,6 +1441,10 @@ if ! command -v zellij &>/dev/null; then
   echo "  ⚠️  Zellij not found, skipping integration tests"
 else
   TEST_SESSION="zelligent-test-$$"
+  # A leftover serialized session from an aborted prior run (same PID, or a
+  # PID reused since) can resurrect here instead of creating fresh — belt
+  # and braces determinism fix noted in the #155 design doc (Phase 3).
+  zellij delete-session --force "$TEST_SESSION" 2>/dev/null || true
   zellij attach --create-background "$TEST_SESSION" 2>/dev/null
 
   # Mock lazygit so the script can pass the dependency check
