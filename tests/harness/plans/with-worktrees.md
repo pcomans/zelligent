@@ -23,7 +23,7 @@ worktrees. The fixture creates three worktrees: `feature-a`, `feature-b`, and
 - Expected: The sidebar remains visible and responsive after refresh
 
 ## Test 4: Spawned tabs keep the sidebar frame
-- Action: In the control window, run `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn feature-d bash`
+- Action: Spawn from the sidebar UI itself (never from the control window — see README "CLI under test"): focus the sidebar in the view window, press `i`, type `feature-d`, press Enter
 - Expected: The new `feature-d` tab appears in the live session and still renders the left sidebar
 
 ## Test 5: Version is displayed
