@@ -1364,9 +1364,10 @@ LAYOUT_RAW=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-XXXXXX")
 LAYOUT="${LAYOUT_RAW}.kdl"
 mv "$LAYOUT_RAW" "$LAYOUT"
 RENDERED_TAB_FRAGMENT=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-fragment-XXXXXX")
+RENDERED_TAB_BODY=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-tab-body-XXXXXX")
 RENDERED_SESSION_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-session-template-XXXXXX")
 RENDERED_NEW_TAB_TEMPLATE=$(mktemp "$ZELLIGENT_USER_DIR/tmp/layout-new-tab-template-XXXXXX")
-trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_NEW_TAB_TEMPLATE"' EXIT
+trap 'rm -f "$LAYOUT" "$RENDERED_TAB_FRAGMENT" "$RENDERED_TAB_BODY" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_NEW_TAB_TEMPLATE"' EXIT
 
 SETUP_SCRIPT="$REPO_ROOT/.zelligent/setup.sh"
 AGENT_CMD_RENDER=$(build_agent_command_value "$AGENT_CMD" "$SESSION_NAME" "$REPO_ROOT" "$WORKTREE_PATH" "$SETUP_SCRIPT" "$NEW_WORKTREE")
@@ -1376,6 +1377,13 @@ TAB_PANE_NAME=$(pane_name_for_agent_cmd "$AGENT_CMD" "$SESSION_NAME")
 TAB_CHILDREN_RENDER=$(default_tab_children_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$TAB_PANE_NAME")
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_TAB_FRAGMENT" "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$SIDEBAR_RENDER" "$TAB_CHILDREN_RENDER"
 render_layout_fragment "$LAYOUT_SOURCE" "$RENDERED_SESSION_TEMPLATE" "$REPO_ROOT" "$SESSION_AGENT_RENDER" "$SIDEBAR_RENDER" "children"
+# Content-only body for the new-session mode's explicit `tab { }` block (issue
+# #163): the session template already wraps every tab in the sidebar, so the
+# tab body must carry ONLY the agent+lazygit panes — embedding the full
+# sidebar-bearing RENDERED_TAB_FRAGMENT there gets merged INTO the template's
+# children slot and renders a second, nested sidebar. Same wrapped-body form
+# as the no-arg startup path uses for its initial tab.
+printf '%s\n' "$(default_tab_body_content "$WORKTREE_PATH" "$AGENT_CMD_RENDER" "$TAB_PANE_NAME")" > "$RENDERED_TAB_BODY"
 # `new_tab_template` content for manual tabs (`zellij action new-tab --name X`
 # with no --layout, see #139): no worktree/agent context exists for a tab
 # created later on, so fall back to a plain shell — same wrapped body shape
@@ -1422,7 +1430,7 @@ case "$SPAWN_MODE" in
     write_fragment_layout "$LAYOUT" "$RENDERED_TAB_FRAGMENT"
     ;;
   new-session)
-    write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_FRAGMENT" "$SESSION_NAME" "$RENDERED_NEW_TAB_TEMPLATE"
+    write_session_layout "$LAYOUT" "$RENDERED_SESSION_TEMPLATE" "$RENDERED_TAB_BODY" "$SESSION_NAME" "$RENDERED_NEW_TAB_TEMPLATE"
     ;;
 esac
 
