@@ -1,6 +1,6 @@
 ---
 fixture: setup-many-worktrees.sh
-launch: ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh
+launch: zelligent  # INSTALLED CLI — never the fixture clone's ./zelligent.sh (old main; see README "CLI under test")
 session_name: zelligent-test-repo
 ---
 
