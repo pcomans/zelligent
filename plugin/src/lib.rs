@@ -233,7 +233,21 @@ pub struct State {
     /// sidebar cursor. Deliberately separate from `selected_index`: the
     /// cursor also moves via j/k browsing within the current tab, which must
     /// NOT be snapped back on the next same-active `TabUpdate`. See #151.
+    ///
+    /// Change detection alone CANNOT catch a tab round trip: hidden
+    /// instances receive no `TabUpdate`s, so from each instance's own
+    /// perspective the active tab is its own tab both in the last update
+    /// before hiding and the first one after reveal (live-instrumented,
+    /// #151). `Event::Visible(true)` is the reveal signal — see
+    /// `handle_visible` and `resync_on_reveal`.
     pub last_active_tab: Option<String>,
+    /// Set by `handle_visible(true)`; makes the next `handle_tab_update`
+    /// re-sync the cursor unconditionally, then clears. Covers the reveal
+    /// ordering where the fresh active-tab snapshot arrives just after the
+    /// `Visible(true)` event (the immediate re-sync in `handle_visible`
+    /// covers the other ordering, and is correct even against pre-hide
+    /// `self.tabs` because the instance's own tab was active then too).
+    pub resync_on_reveal: bool,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -344,6 +358,25 @@ impl State {
         };
         self.selected_index = idx;
         true
+    }
+
+    /// Handle `Event::Visible` — the only reliable "this pane was just
+    /// revealed" signal (#151): hidden instances receive no `TabUpdate`s,
+    /// so a hide/reveal round trip never registers as an active-tab change
+    /// in `handle_tab_update`. On reveal, re-sync the cursor immediately
+    /// (correct even against pre-hide `self.tabs`: this instance's own tab
+    /// was the active one then too) and arm `resync_on_reveal` so the
+    /// fresh snapshot that typically follows re-syncs as well, whichever
+    /// order the two events arrive in. Returns whether a re-render is
+    /// needed (the cursor moved).
+    pub fn handle_visible(&mut self, visible: bool) -> bool {
+        if !visible {
+            return false;
+        }
+        let before = self.selected_index;
+        self.select_active_sidebar_item();
+        self.resync_on_reveal = true;
+        self.selected_index != before
     }
 
     fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
@@ -888,16 +921,20 @@ impl State {
 
         self.recompute_sidebar_items();
 
-        // Re-sync the cursor when the active tab has changed since the last
-        // snapshot — covers a sidebar click, Enter, or a native Ctrl-t
-        // switch into an already-open tab, whose sidebar instance last left
-        // ▌ wherever the user exited that tab through. Gated on a *change*
-        // (not fired unconditionally) so j/k browsing within a tab survives
-        // the next same-active `TabUpdate` instead of being snapped back.
-        // `!had_tabs` subsumes the old bootstrap-only correction: it prefers
-        // the actual active tab over a cursor established from worktrees
-        // before tab state arrived, and also seeds `last_active_tab` so the
-        // very next real switch is detected.
+        // Re-sync the cursor to the active tab when (a) this is the first
+        // snapshot (`!had_tabs`, the old bootstrap correction), (b) this
+        // instance's pane was just revealed (`resync_on_reveal`, armed by
+        // `Event::Visible(true)` — a sidebar click, Enter, or native Ctrl-t
+        // switch into an already-open tab lands here), or (c) the active
+        // tab changed within a delivered snapshot (tab creation, closes).
+        //
+        // (c) alone looked sufficient but is NOT — live instrumentation
+        // (#151) showed hidden instances receive no `TabUpdate`s at all, so
+        // across a hide/reveal round trip the active tab reads as this
+        // instance's own tab on both sides and never "changes". The gating
+        // still matters for what it EXCLUDES: a same-active `TabUpdate`
+        // arriving while the user j/k-browses this visible instance must
+        // not snap the cursor back.
         //
         // `select_active_sidebar_item` returns false when the active tab has
         // no sidebar row (e.g. a plain user tab with no matching worktree);
@@ -906,8 +943,9 @@ impl State {
         // switching *back* to a tab with a row is detected as a change and
         // re-syncs then.
         let current_active_tab = self.active_tab_name().map(str::to_string);
-        if !had_tabs || current_active_tab != self.last_active_tab {
+        if !had_tabs || self.resync_on_reveal || current_active_tab != self.last_active_tab {
             self.select_active_sidebar_item();
+            self.resync_on_reveal = false;
             self.last_active_tab = current_active_tab;
         }
 
@@ -1664,6 +1702,13 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
             EventType::TabUpdate,
+            // Visible(true) is the ONLY reliable "this tab was just
+            // revealed" signal: hidden instances receive no TabUpdates, so
+            // from each instance's own perspective the active tab is its
+            // own tab both in the last update before hiding and the first
+            // one after reveal — active-tab change detection alone can
+            // never see a round trip. See #151 and `handle_visible`.
+            EventType::Visible,
         ]);
 
         // The status-replay request (#140 part B / Z-6) is fired from the
@@ -1675,6 +1720,12 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
+        // Handled outside the Action-producing match: pure state sync with
+        // no host effect to `execute`, and it must report whether the
+        // cursor actually moved. See `State::handle_visible` / #151.
+        if let Event::Visible(visible) = event {
+            return self.handle_visible(visible);
+        }
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 // First moment run_command is actually allowed. Ask any
@@ -3184,6 +3235,71 @@ mod tests {
             s.selected_index, 1,
             "same-active TabUpdate must not disturb a manual j/k move"
         );
+    }
+
+    #[test]
+    fn reveal_after_round_trip_resyncs_even_though_active_name_never_changed() {
+        // The live #151 delivery model (instrumented): hidden instances get
+        // NO TabUpdates, so this instance sees active == its own tab both
+        // before hiding and after reveal — change detection alone never
+        // fires. Event::Visible(true) must carry the re-sync.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(s.selected_index, 0);
+
+        // User clicks feat-b's row to leave: the click handler sets the
+        // selection before the switch, then the instance goes dark and
+        // receives NOTHING while the user works in feat-b.
+        s.selected_index = 1;
+        s.handle_visible(false);
+
+        // Reveal: Visible(true) first, then the fresh snapshot in which
+        // the active tab name is the same as the instance last saw.
+        assert!(s.handle_visible(true), "reveal must move the cursor and re-render");
+        assert_eq!(s.selected_index, 0, "cursor back on the active tab's row");
+
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(s.selected_index, 0);
+        assert!(!s.resync_on_reveal, "the reveal flag must be consumed");
+    }
+
+    #[test]
+    fn reveal_resync_survives_tab_update_arriving_before_visible_is_processed() {
+        // Opposite ordering: the fresh snapshot lands first (same active
+        // name, so no change fires), Visible(true) afterwards.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        s.selected_index = 1; // click that initiated the switch away
+        s.handle_visible(false);
+
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(s.selected_index, 1, "same-active snapshot alone must not move it yet");
+        assert!(s.handle_visible(true));
+        assert_eq!(s.selected_index, 0);
+    }
+
+    #[test]
+    fn visible_true_does_not_break_jk_browsing_afterwards() {
+        // The reveal flag is one-shot: once consumed by the next TabUpdate,
+        // browsing must not be snapped back by later same-active updates.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        s.handle_visible(true);
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+
+        s.selected_index = 1; // j/k browse
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(s.selected_index, 1, "browsing must survive same-active updates");
+    }
+
+    #[test]
+    fn visible_false_is_a_no_op() {
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        s.selected_index = 1;
+        assert!(!s.handle_visible(false));
+        assert_eq!(s.selected_index, 1);
+        assert!(!s.resync_on_reveal);
     }
 
     #[test]

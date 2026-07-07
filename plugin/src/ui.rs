@@ -246,10 +246,13 @@ pub fn render_sidebar_list(
     // (title + subtitle) — a continuous 2-row bar, not just a mark on the
     // title line. Confirmed intended.
     //
-    // The cursor re-syncs to the active tab whenever the active tab changes
-    // (`State::handle_tab_update`, see #151): it tracks tab switches
-    // (sidebar click, Enter, or a native Ctrl-t switch) but never fights j/k
-    // browsing within a tab, since that re-sync only fires on a change.
+    // The cursor re-syncs to the active tab whenever this pane is revealed
+    // (`State::handle_visible` — hidden instances receive no TabUpdates, so
+    // reveal is the only reliable switch signal) or the active tab changes
+    // within a delivered snapshot (`State::handle_tab_update`); see #151.
+    // It tracks tab switches (sidebar click, Enter, or a native Ctrl-t
+    // switch) but never fights j/k browsing within a tab, since neither
+    // trigger fires during same-tab browsing.
     //
     // `layout` (computed once by `sidebar_layout`) is the only source of the
     // viewport and separator visibility — never recomputed here — so this
