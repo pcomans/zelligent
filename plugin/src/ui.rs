@@ -242,6 +242,15 @@ pub fn render_sidebar_list(
     //   title color/weight       = active tab in Zellij (bold cyan)
     //   right gutter (●/✓ / blank) = agent status
     //
+    // The ▌ gutter intentionally spans BOTH lines of the selected item
+    // (title + subtitle) — a continuous 2-row bar, not just a mark on the
+    // title line. Confirmed intended.
+    //
+    // The cursor re-syncs to the active tab whenever the active tab changes
+    // (`State::handle_tab_update`, see #151): it tracks tab switches
+    // (sidebar click, Enter, or a native Ctrl-t switch) but never fights j/k
+    // browsing within a tab, since that re-sync only fires on a change.
+    //
     // `layout` (computed once by `sidebar_layout`) is the only source of the
     // viewport and separator visibility — never recomputed here — so this
     // render can never draw a different set of rows than what

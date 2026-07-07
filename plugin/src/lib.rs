@@ -228,6 +228,12 @@ pub struct State {
     /// harmless; it's superseded when B lands, and if B is lost the
     /// still-set bit makes the next `TabUpdate` retry). See #140.
     pub invalidate_generation: u64,
+    /// Name of the tab that was active as of the last `TabUpdate`, used by
+    /// `handle_tab_update` to detect an active-tab change and re-sync the
+    /// sidebar cursor. Deliberately separate from `selected_index`: the
+    /// cursor also moves via j/k browsing within the current tab, which must
+    /// NOT be snapped back on the next same-active `TabUpdate`. See #151.
+    pub last_active_tab: Option<String>,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -882,10 +888,27 @@ impl State {
 
         self.recompute_sidebar_items();
 
-        // On first tab sync, prefer the actual active tab over the bootstrap cursor
-        // that may have been established from worktrees before tab state arrived.
-        if !had_tabs {
+        // Re-sync the cursor when the active tab has changed since the last
+        // snapshot — covers a sidebar click, Enter, or a native Ctrl-t
+        // switch into an already-open tab, whose sidebar instance last left
+        // ▌ wherever the user exited that tab through. Gated on a *change*
+        // (not fired unconditionally) so j/k browsing within a tab survives
+        // the next same-active `TabUpdate` instead of being snapped back.
+        // `!had_tabs` subsumes the old bootstrap-only correction: it prefers
+        // the actual active tab over a cursor established from worktrees
+        // before tab state arrived, and also seeds `last_active_tab` so the
+        // very next real switch is detected.
+        //
+        // `select_active_sidebar_item` returns false when the active tab has
+        // no sidebar row (e.g. a plain user tab with no matching worktree);
+        // deliberately do NOT reset `selected_index` in that case — leave
+        // the cursor where it is. `last_active_tab` is still updated so that
+        // switching *back* to a tab with a row is detected as a change and
+        // re-syncs then.
+        let current_active_tab = self.active_tab_name().map(str::to_string);
+        if !had_tabs || current_active_tab != self.last_active_tab {
             self.select_active_sidebar_item();
+            self.last_active_tab = current_active_tab;
         }
 
         // Refresh worktrees only when a *newly-appeared* tab has no matching
@@ -3083,14 +3106,137 @@ mod tests {
         // TabUpdate it gets on becoming visible carries any set drift, which
         // is what fires. Refreshing on mere focus changes would be pure
         // overhead.
+        //
+        // This is also the #151 repro: the sidebar cursor must still follow
+        // the active tab across this exact switch even though it doesn't
+        // warrant a Refresh — the two are independent.
         let mut s = State::default();
         s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(s.selected_index, 0);
 
         let action = s.handle_tab_update(vec![
             make_tab("feat-a", false),
             make_tab("feat-b", true), // focus moved, same tab set
         ]);
         assert_eq!(action, Action::None);
+        assert_eq!(
+            s.selected_index, 1,
+            "#151: the cursor must re-sync to feat-b even though the tab set didn't change"
+        );
+    }
+
+    #[test]
+    fn tab_update_active_tab_change_resyncs_cursor_to_new_active_row() {
+        // Issue #151: revealing an already-open tab (sidebar click, Enter,
+        // or a native Ctrl-t switch) must re-sync ▌ to the newly active
+        // tab's row, even though `recompute_sidebar_items`'s "preserve
+        // previous selection by identity" logic (see its `previous_item_key`
+        // handling) would otherwise leave the cursor on whatever item this
+        // instance last selected — feat-a is untouched by the switch below,
+        // so that logic alone would leave the cursor at index 0.
+        let mut s = State::default();
+        s.handle_tab_update(vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
+        ]);
+        assert_eq!(s.selected_index, 0);
+
+        // Active tab jumps from feat-a to feat-c with no tab-set change —
+        // e.g. this instance was hidden while the user Ctrl-t'd through.
+        s.handle_tab_update(vec![
+            make_tab("feat-a", false),
+            make_tab("feat-b", false),
+            make_tab("feat-c", true),
+        ]);
+        assert_eq!(
+            s.selected_index, 2,
+            "cursor must follow the active tab across the switch"
+        );
+    }
+
+    #[test]
+    fn tab_update_same_active_tab_does_not_disturb_manual_browse() {
+        // The re-sync must fire only on an active-tab CHANGE. A same-active
+        // TabUpdate (e.g. a routine re-render) must not fight j/k browsing
+        // away from the active row.
+        let mut s = State::default();
+        s.handle_tab_update(vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
+        ]);
+        assert_eq!(s.selected_index, 0);
+
+        // Browse down to feat-b, away from the active tab's row.
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 1);
+
+        // Same active tab (feat-a) reported again must not snap the cursor
+        // back to its row.
+        let action = s.handle_tab_update(vec![
+            make_tab("feat-a", true),
+            make_tab("feat-b", false),
+            make_tab("feat-c", false),
+        ]);
+        assert_eq!(action, Action::None);
+        assert_eq!(
+            s.selected_index, 1,
+            "same-active TabUpdate must not disturb a manual j/k move"
+        );
+    }
+
+    #[test]
+    fn tab_update_no_active_tab_in_snapshot_leaves_cursor_but_updates_tracked_name() {
+        // `select_active_sidebar_item` returns false when the snapshot has
+        // no active tab to select a row for — reachable via the #121
+        // pending-close race: the tab being closed can still arrive marked
+        // active in a stale TabUpdate, and the race-guard filter (above)
+        // drops it entirely, leaving a snapshot with no active tab at all.
+        // The decided contract: leave the cursor exactly where it is (do
+        // NOT reset to 0), but still update the tracked active-tab name so
+        // that the next real switch is correctly seen as a change.
+        let mut s = State::default();
+        s.handle_tab_update(vec![
+            make_tab("zelligent", true),
+            make_tab("feat-a", false),
+            make_tab("feat-b", false),
+        ]);
+        assert_eq!(s.selected_index, 0);
+
+        // Browse down to feat-b.
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        s.handle_key_browse(&key(BareKey::Char('j')));
+        assert_eq!(s.selected_index, 2);
+
+        // "zelligent" close is in flight; a stale TabUpdate still shows it
+        // active. The race guard filters it out, leaving a snapshot with no
+        // active tab at all.
+        s.pending_close.insert("zelligent".into());
+        s.handle_tab_update(vec![
+            make_tab("zelligent", true),
+            make_tab("feat-a", false),
+            make_tab("feat-b", false),
+        ]);
+        assert_eq!(
+            s.selected_index, 1,
+            "no active tab in the filtered snapshot must not reset the cursor \
+             (index shifts from 2 to 1 only because zelligent's row was \
+             dropped from the list — feat-b, the same logical item, is still \
+             selected)"
+        );
+
+        // The confirming TabUpdate lands: zelligent is gone, focus lands on
+        // feat-a instead of feat-b. The gap update above must have tracked
+        // "no active tab" so this is correctly seen as a change and
+        // re-syncs, even though `recompute_sidebar_items`'s identity
+        // preservation would otherwise keep the cursor on feat-b.
+        let action = s.handle_tab_update(vec![make_tab("feat-a", true), make_tab("feat-b", false)]);
+        assert_eq!(action, Action::None);
+        assert_eq!(
+            s.selected_index, 0,
+            "tracked name must have updated during the gap so this switch re-syncs"
+        );
     }
 
     #[test]
