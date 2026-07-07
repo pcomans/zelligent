@@ -514,6 +514,12 @@ impl State {
 
     pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) -> Action {
         let had_tabs = !self.tabs.is_empty();
+        // Snapshot pending_close before the confirm loop below mutates it.
+        // The disappeared-tab check further down needs to know which names
+        // were pending *before* this update, so a self-initiated close being
+        // confirmed here isn't mistaken for an externally-vanished tab.
+        // See #138.
+        let pending_close_before: BTreeSet<String> = self.pending_close.clone();
         // Race guard: for each tab we asked the host to close, filter it
         // out of any incoming snapshot that still includes it. Once a
         // `TabUpdate` arrives that no longer contains a pending tab, the
@@ -567,7 +573,23 @@ impl State {
                 && t.name != self.repo_name
                 && !worktree_tab_names.contains(&t.name)
         });
-        if has_new_unmatched {
+
+        // Refresh worktrees when a previously-known tab is now absent. Each
+        // tab's sidebar is a separate plugin instance with its own cache, so
+        // an instance other than the one that drove a remove only learns
+        // about it via this TabUpdate — nothing else tells it the worktree
+        // row is now stale. Self-initiated closes are excluded via
+        // `pending_close_before`: `handle_remove_result` already drops the
+        // tab from `self.tabs` up front, so `previously_known` (snapshotted
+        // above, before that drop is overwritten here) never contains it for
+        // this instance in the first place; the `pending_close_before` guard
+        // additionally covers the confirming `TabUpdate`, where the tab is
+        // still in `previously_known` from an earlier call. See #138.
+        let has_disappeared_known = previously_known.iter().any(|name| {
+            !self.tabs.iter().any(|t| &t.name == name) && !pending_close_before.contains(name)
+        });
+
+        if has_new_unmatched || has_disappeared_known {
             Action::Refresh
         } else {
             Action::None
@@ -2224,6 +2246,72 @@ mod tests {
             make_tab("notes", false),
         ]);
         assert_eq!(second, Action::None);
+    }
+
+    #[test]
+    fn tab_update_with_disappeared_known_tab_returns_refresh() {
+        // Mirrors #127's newly-appeared gate for the opposite case: a
+        // sibling sidebar instance (one that did NOT drive the remove, so
+        // it never populated `pending_close`) sees a previously-known tab
+        // vanish from the TabUpdate. It must self-heal via Refresh rather
+        // than keep showing the stale row until a manual `r`. See #138.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        let action = s.handle_tab_update(vec![make_tab("zelligent", true)]);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn tab_update_with_disappeared_known_tab_only_refreshes_once() {
+        // Once the vanished tab has dropped out of `previously_known` (it's
+        // no longer in `self.tabs`), a subsequent identical TabUpdate must
+        // NOT trigger another Refresh.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        let first = s.handle_tab_update(vec![make_tab("zelligent", true)]);
+        assert_eq!(first, Action::Refresh);
+
+        let second = s.handle_tab_update(vec![make_tab("zelligent", true)]);
+        assert_eq!(second, Action::None);
+    }
+
+    #[test]
+    fn tab_update_with_disappeared_pending_close_tab_does_not_double_refresh() {
+        // The disappeared-tab trigger must not fire for a close this same
+        // instance already initiated: `pending_close` marks it, and the
+        // confirming TabUpdate (the tab absent from the snapshot) is the
+        // existing #121 handshake's job, not this trigger's. This mirrors
+        // `tab_update_clears_pending_close_when_tab_is_gone` but also
+        // asserts on the returned Action.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        s.pending_close.insert("feat-a".into());
+        let action = s.handle_tab_update(vec![make_tab("zelligent", true)]);
+        assert_eq!(
+            action,
+            Action::None,
+            "a pending_close disappearance is handled by the #121 handshake, \
+             not the new disappeared-tab trigger"
+        );
+        assert!(
+            s.pending_close.is_empty(),
+            "pending_close still clears once the host confirms the close"
+        );
+    }
+
+    #[test]
+    fn tab_update_with_combined_appear_and_disappear_returns_single_refresh() {
+        // A single TabUpdate where one known tab vanishes and one unmatched
+        // tab appears must still resolve to exactly one Refresh action, not
+        // some doubled-up variant.
+        let mut s = State::default();
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"");
+        s.tabs = vec![make_tab("zelligent", true), make_tab("feat-a", false)];
+        let action = s.handle_tab_update(vec![
+            make_tab("zelligent", true),
+            make_tab("feat-b", false), // new, unmatched to any worktree
+        ]);
+        assert_eq!(action, Action::Refresh);
     }
 
     #[test]
