@@ -471,3 +471,50 @@ fn flow_browse_to_confirm_delete() {
     s.handle_key_confirming(&key(BareKey::Esc));
     assert_eq!(s.mode, Mode::BrowseWorktrees);
 }
+
+// --- No-trailing-newline / exact-row-count invariant (#149 re-review) ---
+
+/// Every `render_to` arm must write exactly `rows` physical lines with NO
+/// trailing newline after the footer's last line — see the comment on
+/// `render_footer`'s final `write!` (not `writeln!`) for why: a trailing
+/// `\n` advances the cursor one row past the last valid row, forcing a
+/// scroll that silently discards row 0 (the header), which is the verified
+/// root cause of #136. This exercises `render_to` — the same entry point
+/// production uses — across representative modes, through the same
+/// `render_to_string`/`physical_rows` helpers the #135/#136 wrapped-status
+/// regression tests above already rely on.
+#[test]
+fn render_never_ends_with_trailing_newline_and_fills_exactly_rows() {
+    let cols = 80;
+    let rows = 20;
+    let cases: Vec<(&str, State)> = vec![
+        ("BrowseWorktrees populated", state_with_worktrees()),
+        (
+            "BrowseWorktrees empty",
+            State { mode: Mode::BrowseWorktrees, ..Default::default() },
+        ),
+        (
+            "NotGitRepo",
+            State {
+                mode: Mode::NotGitRepo,
+                initial_cwd: std::path::PathBuf::from("/tmp/foo"),
+                ..Default::default()
+            },
+        ),
+        ("InputBranch", State { mode: Mode::InputBranch, ..Default::default() }),
+        ("SelectBranch", state_with_branches()),
+        ("Loading", State::default()),
+    ];
+    for (label, state) in cases {
+        let output = render_to_string(&state, rows, cols);
+        assert!(
+            !output.ends_with('\n'),
+            "{label}: render must not end with a trailing newline (re-triggers #136)"
+        );
+        assert_eq!(
+            physical_rows(&output, cols),
+            rows,
+            "{label}: render must fill exactly `rows` physical lines"
+        );
+    }
+}

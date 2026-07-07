@@ -200,7 +200,10 @@ pub struct State {
     /// `agent_statuses` once `handle_tab_update` sees the tab, and aged out
     /// after `PENDING_STATUS_MAX_TAB_UPDATES` unmatched updates. Bounded to
     /// 16 entries (see `handle_pipe`) so a flood of bogus tab names can't
-    /// grow this unbounded. See issue #141.
+    /// grow this unbounded; on overflow the entry with the highest `age`
+    /// (oldest, closest to expiring anyway) is evicted, tie-broken
+    /// lexicographically-first — see `evict_oldest_pending_status`. See
+    /// issue #141.
     pub pending_statuses: BTreeMap<String, PendingStatus>,
     /// The worktree cache is known-stale: a `zelligent-invalidate` pipe
     /// arrived (someone spawned or removed a worktree) and no successful
@@ -1512,6 +1515,33 @@ impl State {
         Action::None
     }
 
+    /// Evict one entry from `pending_statuses` to make room under the
+    /// 16-entry cap (see the field doc). Removes the entry with the
+    /// HIGHEST `age` — the one that's survived the most unmatched
+    /// `TabUpdate`s and is therefore closest to expiring on its own via
+    /// `PENDING_STATUS_MAX_TAB_UPDATES` anyway — rather than an arbitrary
+    /// lexicographic choice, so a flood of same-`age` bogus entries can't
+    /// evict a genuinely older, still-relevant one. Ties (equal age) break
+    /// on the lexicographically-first key for determinism. Shared by both
+    /// insertion sites: the live `zelligent-status` handler below and the
+    /// `PIPE_STATUS_REPLAY` unknown-tab branch.
+    fn evict_oldest_pending_status(&mut self) {
+        // `BTreeMap` iterates in ascending key order, so only replacing the
+        // running best on a STRICTLY greater age keeps the first
+        // (lexicographically smallest) key among ties.
+        let victim = self
+            .pending_statuses
+            .iter()
+            .fold(None::<(&str, u8)>, |best, (k, v)| match best {
+                Some((_, best_age)) if v.age <= best_age => best,
+                _ => Some((k.as_str(), v.age)),
+            })
+            .map(|(k, _)| k.to_string());
+        if let Some(key) = victim {
+            self.pending_statuses.remove(&key);
+        }
+    }
+
     pub fn handle_pipe(&mut self, msg: &PipeMessage) -> Action {
         // Cross-instance cache invalidation (#140/#138). No args needed:
         // the message means "a worktree was spawned or removed somewhere —
@@ -1549,6 +1579,32 @@ impl State {
             return Action::ReplayStatuses(self.serialize_statuses());
         }
         if msg.name == PIPE_STATUS_REPLAY {
+            // #148 re-review: explicit first-reply-wins contract. When
+            // MULTIPLE instances answer the same PIPE_STATUS_REQUEST, this
+            // loop never overwrites a tab it already has an opinion about
+            // (in `agent_statuses` OR `pending_statuses`) — so among
+            // several replies, the FIRST one to arrive for a given tab
+            // wins, which is not necessarily the freshest. This is a
+            // deliberate tradeoff, not an oversight:
+            //   - Divergence across sibling instances is rare in practice:
+            //     live `zelligent-status` pipes broadcast to every instance
+            //     in the session, including hidden ones (see
+            //     docs/references/zellij-plugin-api.md), so by the time a
+            //     late instance requests a replay, most siblings already
+            //     agree on each tab's latest status.
+            //   - Self-healing: any subsequent LIVE `zelligent-status`
+            //     event for that tab overwrites the replay-sourced entry
+            //     unconditionally (the live-event path below has no
+            //     "already known" guard), so a wrong first-reply-wins pick
+            //     is corrected by the next real event rather than
+            //     persisting.
+            //   - Statuses carry no ordering metadata (timestamp, sequence
+            //     number) by design — the payload is a glyph's worth of
+            //     state, and adding ordering machinery to resolve a rare,
+            //     self-healing edge case isn't worth the complexity. See
+            //     `status_replay_first_reply_wins_per_tab` for the
+            //     contract test (two racing replays plus a self-healing
+            //     live event).
             let payload = msg
                 .args
                 .get(STATUS_REPLAY_ARG)
@@ -1566,11 +1622,12 @@ impl State {
                 } else if !self.pending_statuses.contains_key(&tab) {
                     // Unknown-tab entries go through the same buffer
                     // semantics as a live `zelligent-status` event (#141):
-                    // capped at 16, evicting the lexicographically-first
-                    // key on overflow. An existing pending entry for this
-                    // tab is left alone (same monotone rule).
+                    // capped at 16, evicting the oldest (highest-`age`)
+                    // entry on overflow — see `evict_oldest_pending_status`.
+                    // An existing pending entry for this tab is left alone
+                    // (same monotone rule).
                     if self.pending_statuses.len() >= 16 {
-                        self.pending_statuses.pop_first();
+                        self.evict_oldest_pending_status();
                     }
                     self.pending_statuses
                         .insert(tab, PendingStatus { status, age: 0 });
@@ -1613,13 +1670,13 @@ impl State {
             if is_new_key && self.pending_statuses.len() >= 16 {
                 // Bound the buffer so a flood of bogus/unknown tab names
                 // (typos, stale CLI invocations, etc.) can't grow it
-                // unbounded. Evicting `first_key_value` (lexicographically
-                // smallest) is arbitrary — there's no ordering signal worth
-                // preserving here — but it keeps the map's size capped
-                // deterministically without extra bookkeeping. Overwrites of
-                // an already-buffered key never evict, since they don't grow
+                // unbounded. Evicts the oldest (highest-`age`) entry — see
+                // `evict_oldest_pending_status` — so a burst of fresh bogus
+                // entries can't push out a legitimate early status that's
+                // still within its grace period. Overwrites of an
+                // already-buffered key never evict, since they don't grow
                 // the map.
-                self.pending_statuses.pop_first();
+                self.evict_oldest_pending_status();
             }
             self.pending_statuses
                 .insert(tab_name, PendingStatus { status, age: 0 });
@@ -4347,6 +4404,59 @@ mod tests {
             ));
         }
         assert_eq!(s.pending_statuses.len(), 16);
+        // #145 re-review: with all 17 entries inserted at age 0, eviction
+        // ties break lexicographically-first — "unknown-0" is the smallest
+        // key, so it's the one dropped to make room for "unknown-16".
+        assert!(s.pending_statuses.get("unknown-0").is_none());
+        assert!(s.pending_statuses.get("unknown-16").is_some());
+    }
+
+    #[test]
+    fn pipe_buffered_statuses_flood_evicts_oldest_entry_first() {
+        // #145 re-review: eviction on overflow must remove the entry with
+        // the HIGHEST `age` (oldest, closest to expiring via
+        // PENDING_STATUS_MAX_TAB_UPDATES anyway), not the
+        // lexicographically-first key — otherwise a legitimate early
+        // status can be evicted purely because of its tab name, regardless
+        // of how fresh it is relative to a later flood of bogus entries.
+        let mut s = State::default();
+        // "old-tab" arrives first and ages by surviving one unmatched
+        // TabUpdate, so its age (1) is strictly higher than every entry
+        // that follows.
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "old-tab"), ("event", "Start")],
+        ));
+        s.handle_tab_update(vec![make_tab("unrelated", false)]);
+        assert_eq!(s.pending_statuses.get("old-tab").unwrap().age, 1);
+
+        // Fill the rest of the buffer with fresh (age 0) entries up to the
+        // cap of 16. Names are chosen to sort BEFORE "old-tab" so the old
+        // lexicographic policy would have evicted "old-tab" last, not
+        // first — isolating this test to the age-based behavior.
+        for i in 0..15 {
+            s.handle_pipe(&pipe_msg(
+                "zelligent-status",
+                &[("tab", &format!("aaa-fresh-{i}")), ("event", "Start")],
+            ));
+        }
+        assert_eq!(s.pending_statuses.len(), 16);
+
+        // One more arrival overflows the cap.
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "aaa-flood"), ("event", "Start")],
+        ));
+        assert_eq!(s.pending_statuses.len(), 16);
+        assert!(
+            s.pending_statuses.get("old-tab").is_none(),
+            "the oldest entry must be evicted first, regardless of its name"
+        );
+        assert!(
+            s.pending_statuses.get("aaa-fresh-0").is_some(),
+            "fresher entries must survive the flood"
+        );
+        assert!(s.pending_statuses.get("aaa-flood").is_some());
     }
 
     #[test]
@@ -4582,6 +4692,46 @@ mod tests {
     }
 
     #[test]
+    fn status_replay_first_reply_wins_per_tab() {
+        // #148 re-review contract test: among MULTIPLE replies to one
+        // PIPE_STATUS_REQUEST, the first reply to arrive for a given tab
+        // wins — not necessarily the freshest. A second, later replay for
+        // the same tab must be ignored. But any subsequent LIVE
+        // `zelligent-status` event self-heals the mask by overwriting it
+        // unconditionally, regardless of how the entry got there.
+        let mut s = State::default();
+        s.tabs = vec![make_tab("feat-a", false)];
+
+        // First reply: sticks.
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "feat-a:Working")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
+
+        // Second reply for the same tab, different status: ignored.
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "feat-a:NeedsInput")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Working));
+
+        // A live event for the same tab self-heals: it overrides the
+        // replay-sourced entry unconditionally, unlike a third replay.
+        let action = s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "feat-a"), ("event", "Stop")],
+        ));
+        assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
+        assert_eq!(
+            action,
+            Action::Notify { tab_name: "feat-a".to_string(), status: AgentStatus::Done }
+        );
+    }
+
+    #[test]
     fn status_replay_suppresses_notify_even_for_needs_input_or_done() {
         // Replay must never produce a user-visible side effect, unlike a
         // live `zelligent-status` pipe carrying the same statuses.
@@ -4660,6 +4810,46 @@ mod tests {
         ));
         assert_eq!(action, Action::None);
         assert_eq!(s.pending_statuses.len(), 16);
+        // #145 re-review: all 16 pre-existing entries share age 0, so the
+        // shared eviction helper ties-break lexicographically-first —
+        // "existing-0" is dropped to make room for the replayed tab.
+        assert!(s.pending_statuses.get("existing-0").is_none());
+        assert!(s.pending_statuses.get("new-unknown-tab").is_some());
+    }
+
+    #[test]
+    fn status_replay_flood_evicts_oldest_entry_first() {
+        // #145 re-review: the replay insertion site shares
+        // `evict_oldest_pending_status` with the live-event site, so it
+        // must exhibit the same age-based (not lexicographic) eviction.
+        let mut s = State::default();
+        s.handle_pipe(&pipe_msg(
+            "zelligent-status",
+            &[("tab", "old-tab"), ("event", "Start")],
+        ));
+        s.handle_tab_update(vec![make_tab("unrelated", false)]);
+        assert_eq!(s.pending_statuses.get("old-tab").unwrap().age, 1);
+
+        for i in 0..15 {
+            s.pending_statuses.insert(
+                format!("aaa-fresh-{i}"),
+                PendingStatus { status: AgentStatus::Working, age: 0 },
+            );
+        }
+        assert_eq!(s.pending_statuses.len(), 16);
+
+        let action = s.handle_pipe(&pipe_msg(
+            PIPE_STATUS_REPLAY,
+            &[(STATUS_REPLAY_ARG, "aaa-flood:Done")],
+        ));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.pending_statuses.len(), 16);
+        assert!(
+            s.pending_statuses.get("old-tab").is_none(),
+            "the oldest entry must be evicted first, regardless of its name"
+        );
+        assert!(s.pending_statuses.get("aaa-fresh-0").is_some());
+        assert!(s.pending_statuses.get("aaa-flood").is_some());
     }
 
     #[test]
