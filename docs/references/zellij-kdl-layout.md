@@ -19,6 +19,31 @@ Tabs opened with `zellij action new-tab --layout FILE` must include the sidebar
 plugin and any other chrome explicitly in `FILE`. `default_tab_template` only
 applies to tabs created without `--layout`.
 
+## `default_tab_template`'s `children` marker doesn't fill in for bare `new-tab` (#139)
+
+`default_tab_template`'s `{{zelligent_children}}` substitution (the bare
+`children` keyword) is only filled in when Zellij merges an **explicit** tab
+body into the template at layout-parse time — that's how the session's own
+initial `tab { }` block gets its shell+lazygit panes.
+
+A tab created later via `zellij action new-tab --name X` with **no**
+`--layout` has no explicit body to merge in. Zellij's fallback for that case
+(`Layout::new_tab()` in zellij-utils) does not recurse into nested panes to
+find the `children` marker — it only fills a marker that is a *direct* child
+of `default_tab_template`'s root. Since zelligent's `children` marker sits one
+level deep (inside the sidebar's `pane split_direction="Vertical" { ... }`
+wrapper), the fallback fill is a no-op and the tab renders as the sidebar
+alone, full width, with no shell pane.
+
+The fix is a separate KDL node, `new_tab_template { ... }`, which Zellij
+parses like a literal `tab { }` (no `children`-marker merge at all) and
+prefers over `default_tab_template` specifically for this no-layout case. The
+CLI writes both: `default_tab_template` still wraps the session's own
+explicit initial tab, and `new_tab_template` carries real, literal
+sidebar+shell+lazygit content (generic — no worktree cwd or agent command,
+since neither is known for a tab created later by the user) for every manual
+tab created afterward. See `write_session_layout` in `zelligent.sh`.
+
 ## Template variables
 
 Custom layouts (`.zelligent/layout.kdl`) are fragment-based pane lists. They use
