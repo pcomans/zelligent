@@ -233,6 +233,15 @@ design doc.
 - **WASM plugins inherit host env.** `std::env::var("ZELLIJ_SESSION_NAME")`
   works inside the plugin because Zellij calls `builder.inherit_env()` on
   the WASI engine. This is how the plugin discovers its session.
+- **`set_timeout` is not a replaceable single-shot slot.** Each call
+  spawns an independent one-shot host timer; calling it again before an
+  earlier one fires does NOT cancel it, so several `Event::Timer`s can be
+  in flight at once. The footer `status_message` TTL (8s, #152) accounts
+  for this with a pending-arm count rather than a plain epoch check — see
+  `State::set_status`/`State::handle_timer` in `plugin/src/lib.rs`.
+  Hidden instances receive no Events, so a timer armed just before a tab
+  is hidden is simply lost; the stale message clears on the next
+  timer/interaction after the tab is visible again.
 
 ## Where things live in the worktree
 
