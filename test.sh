@@ -1362,6 +1362,10 @@ contains "outside zellij (new): calls --new-session-with-layout" "zellij --new-s
 contains "outside zellij (new): sets default tab template"       "default_tab_template"               "$out"
 contains "outside zellij (new): layout has tab wrapper"          'tab name="some-branch"'             "$out"
 contains "outside zellij (new): layout names sidebar pane"       'pane name="zelligent"'             "$out"
+# #163: the explicit `tab { }` body must be content-only — a third sidebar
+# pane there gets merged INTO the template's children slot and renders a
+# nested duplicate sidebar. Exactly two: default_tab_template + new_tab_template.
+count_equals "outside zellij (new): exactly two sidebar panes (templates only, none in tab body)" 'pane name="zelligent"' 2 "$out"
 # #139: `default_tab_template`'s {{zelligent_children}} ("children" keyword)
 # is only filled in by Zellij when merging an EXPLICIT tab body into the
 # template — which is what makes the `tab name="some-branch"` block above
@@ -1395,7 +1399,7 @@ contains "outside zellij (new): commented layout keeps tab wrapper" 'tab name="s
 # 3, not 2: initial tab's rendered fragment + default_tab_template +
 # new_tab_template (#139) each carry their own copy of the custom-width
 # sidebar pane.
-count_equals "outside zellij (new): custom sidebar width reaches initial tab, default template, and new tab template" 'size="33%"' 3 "$out"
+count_equals "outside zellij (new): custom sidebar width reaches default template and new tab template (initial tab inherits it, #163)" 'size="33%"' 2 "$out"
 cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$TEST_REPO_LAYOUT"
 
 # Outside Zellij, repo session already exists: add tab and attach
