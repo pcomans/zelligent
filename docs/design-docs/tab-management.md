@@ -42,6 +42,16 @@ if self.tabs.iter().any(|t| t.name == tab_name) {
 
 There is no plugin API to obtain a tab's internal index. The only reliable identifier is the tab name.
 
+## Duplicate tab names
+
+Because all tab operations are name-based (see above), the plugin has no way to distinguish two tabs that share a name. If a manual tab is created with the same name as an existing worktree tab — e.g. `zellij action new-tab --name feature-a` while a `feature-a` worktree tab is already open — Zellij happily creates a second tab named `feature-a`, but the sidebar shows only **one** `feature-a` row (the worktree row). The duplicate gets no row of its own, and any sidebar action that targets `feature-a` (switch, close) resolves to whichever tab `go_to_tab_name` picks first, so the duplicate is unreachable from the sidebar.
+
+This follows directly from the workaround above: the plugin's tab list is keyed by name, and Zellij's own name-based actions (`go_to_tab_name`) have no concept of "the second tab named X" either. Index-based disambiguation is not an option here for the same reason it was ruled out for close/rename — the plugin cannot obtain a tab's internal index, only its position, and position drifts as tabs open and close (see [Tab index vs position bug](#tab-index-vs-position-bug) above).
+
+No corruption results: closing the duplicate (natively, via `zellij action close-tab` or the tab-mode `x` keybinding) leaves no stale sidebar row, since the sidebar was never tracking it. This is a documented limitation, not a bug to fix — see issue #142 and the repro in [tests/harness/plans/ui-audit-06-repro-verification.md](../../tests/harness/plans/ui-audit-06-repro-verification.md) (R9).
+
+**Guidance:** avoid naming manual tabs after worktree branch names. The sidebar intentionally shows one row per unique tab name; giving a manual tab the same name as a worktree tab is user error, not a plugin defect.
+
 ## Plugin tab operations
 
 The sidebar plugin provides:
