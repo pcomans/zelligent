@@ -1520,9 +1520,12 @@ impl State {
     /// HIGHEST `age` — the one that's survived the most unmatched
     /// `TabUpdate`s and is therefore closest to expiring on its own via
     /// `PENDING_STATUS_MAX_TAB_UPDATES` anyway — rather than an arbitrary
-    /// lexicographic choice, so a flood of same-`age` bogus entries can't
-    /// evict a genuinely older, still-relevant one. Ties (equal age) break
-    /// on the lexicographically-first key for determinism. Shared by both
+    /// lexicographic choice. Under flood pressure something legitimate may
+    /// still be sacrificed; this policy just guarantees the victim is
+    /// always the entry nearest its natural expiry, so fresh entries are
+    /// never evicted by older junk (the lexicographic policy could evict a
+    /// brand-new legitimate entry). Ties (equal age) break on the
+    /// lexicographically-first key for determinism. Shared by both
     /// insertion sites: the live `zelligent-status` handler below and the
     /// `PIPE_STATUS_REPLAY` unknown-tab branch.
     fn evict_oldest_pending_status(&mut self) {
@@ -1671,11 +1674,10 @@ impl State {
                 // Bound the buffer so a flood of bogus/unknown tab names
                 // (typos, stale CLI invocations, etc.) can't grow it
                 // unbounded. Evicts the oldest (highest-`age`) entry — see
-                // `evict_oldest_pending_status` — so a burst of fresh bogus
-                // entries can't push out a legitimate early status that's
-                // still within its grace period. Overwrites of an
-                // already-buffered key never evict, since they don't grow
-                // the map.
+                // `evict_oldest_pending_status` — the victim is whatever is
+                // nearest its natural expiry, never a fresh entry displaced
+                // by older junk. Overwrites of an already-buffered key
+                // never evict, since they don't grow the map.
                 self.evict_oldest_pending_status();
             }
             self.pending_statuses
