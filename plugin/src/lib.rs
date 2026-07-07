@@ -1,6 +1,7 @@
 pub mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -34,6 +35,15 @@ pub struct PendingStatus {
 pub const PENDING_STATUS_MAX_TAB_UPDATES: u8 = 8;
 
 pub const VERSION: &str = env!("ZELLIGENT_VERSION");
+
+/// How long a footer `status_message` (e.g. green "Spawned 'feature-c'", red
+/// "Unknown agent event: Bogus") stays visible before `set_status` and
+/// `handle_timer` clear it automatically. Long enough to read a short line
+/// without feeling rushed; short enough that a stale success/error message
+/// doesn't linger indefinitely once the sidebar has moved on (issue #152 —
+/// previously nothing ever cleared it, and a message could survive 10+
+/// subsequent actions). See `State::set_status` / `State::handle_timer`.
+pub const STATUS_MESSAGE_TTL_SECS: f64 = 8.0;
 
 // Command context keys used to route RunCommandResult
 pub const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
@@ -248,6 +258,36 @@ pub struct State {
     /// covers the other ordering, and is correct even against pre-hide
     /// `self.tabs` because the instance's own tab was active then too).
     pub resync_on_reveal: bool,
+    /// When the currently displayed `status_message` was set (`None` when
+    /// no message is showing). THE source of truth for expiry (#152):
+    /// `handle_timer` and `handle_visible` clear the message iff it is at
+    /// least `STATUS_MESSAGE_TTL_SECS` old. `Event::Timer` is only a
+    /// wake-up, never an authority — zellij's `set_timeout` spawns an
+    /// independent one-shot timer per call (see zellij-server), timers can
+    /// be lost entirely while the instance's pane is hidden (hidden
+    /// instances receive no Events), and any bookkeeping that must pair
+    /// arms with fires therefore wedges after a single loss. An age check
+    /// is immune: a stale timer firing early finds the newer message too
+    /// young and leaves it; a lost timer is covered by the next wake-up
+    /// (a later message's timer, or the reveal re-arm in
+    /// `handle_visible`). Uses the WASI monotonic clock, available to the
+    /// plugin sandbox.
+    pub status_message_set_at: Option<Instant>,
+    /// Set by `set_status` when it arms a new timer; consumed by the
+    /// `ZellijPlugin::update`/`pipe` shell, which performs the actual
+    /// `zellij_tile::shim::set_timeout` host call and clears this flag.
+    /// Keeps the host call out of `set_status` (a pure, unit-tested state
+    /// mutation) — the same imperative-shell/pure-core split already used
+    /// for `Action`/`execute` and `fire_invalidate_broadcast`. Tests
+    /// observe this flag directly instead of a real timer being armed.
+    pub status_timer_needs_arming: bool,
+    /// Seconds the next wake-up should be armed for. `set_status` requests
+    /// the full TTL; `handle_visible`/`handle_timer` request only the
+    /// REMAINING TTL of the current message — arming a full TTL on reveal
+    /// would let a nearly-expired message live almost twice its lifetime,
+    /// and an early-firing timer must re-chain for what's left rather than
+    /// leave the message stranded until an unrelated event.
+    pub status_timer_arm_secs: f64,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -331,6 +371,89 @@ pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
 }
 
 impl State {
+    /// Set the footer status message and arm its `STATUS_MESSAGE_TTL_SECS`
+    /// auto-clear (issue #152). This is the ONLY place that should assign
+    /// `self.status_message`/`self.status_is_error` for a non-empty message
+    /// — every call site that used to assign the fields directly now goes
+    /// through here, so a future call site can't forget the timer.
+    ///
+    /// A non-empty `msg` stamps `status_message_set_at` and sets
+    /// `status_timer_needs_arming` so the imperative shell (`update`/
+    /// `pipe`) arms a wake-up timer right after this event finishes
+    /// processing. Re-setting within the TTL simply re-stamps — the age
+    /// check in `handle_timer` gives the newer message its own full TTL
+    /// no matter how many older timers are still in flight.
+    ///
+    /// An empty `msg` (clearing the status) resets the stamp AND any
+    /// not-yet-performed arm request: there is nothing left to expire,
+    /// and arming for an already-cleared message would be pure noise.
+    pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
+        let msg = msg.into();
+        self.status_is_error = is_error;
+        if msg.is_empty() {
+            self.status_message = msg;
+            self.status_message_set_at = None;
+            self.status_timer_needs_arming = false;
+            return;
+        }
+        self.status_message = msg;
+        self.status_message_set_at = Some(Instant::now());
+        self.status_timer_needs_arming = true;
+        self.status_timer_arm_secs = STATUS_MESSAGE_TTL_SECS;
+    }
+
+    /// True when the currently displayed message has lived out its TTL.
+    /// Pure age check — see `status_message_set_at` for why expiry is
+    /// decided by age, never by pairing timer arms with fires. The small
+    /// tolerance absorbs the host timer firing marginally early relative
+    /// to our own clock reading.
+    fn status_message_expired(&self) -> bool {
+        self.status_message_set_at
+            .is_some_and(|t| t.elapsed().as_secs_f64() >= STATUS_MESSAGE_TTL_SECS - 0.25)
+    }
+
+    /// Seconds of TTL the current message has left (floored at a small
+    /// positive wake-up so a nearly-expired message still gets a timer).
+    fn status_message_remaining_secs(&self) -> f64 {
+        self.status_message_set_at
+            .map(|t| (STATUS_MESSAGE_TTL_SECS - t.elapsed().as_secs_f64()).max(0.3))
+            .unwrap_or(STATUS_MESSAGE_TTL_SECS)
+    }
+
+    /// Handle `Event::Timer` — a `STATUS_MESSAGE_TTL_SECS` wake-up armed by
+    /// the shell after a `set_status`. Pure (no host calls) so it stays
+    /// unit-testable; the real `set_timeout` call lives in the
+    /// `update`/`pipe` shell.
+    ///
+    /// The timer is only a wake-up: the clear decision is the age check in
+    /// `status_message_expired` (see `status_message_set_at` for why any
+    /// arm/fire pairing scheme wedges on lost timers). A stale timer from
+    /// an already-replaced message finds the newer message too young and
+    /// leaves it to be cleared by its own wake-up.
+    ///
+    /// Returns `true` (re-render needed) only when a message was actually
+    /// cleared.
+    pub fn handle_timer(&mut self) -> bool {
+        if self.status_message.is_empty() {
+            return false;
+        }
+        if self.status_message_expired() {
+            self.status_message.clear();
+            self.status_is_error = false;
+            self.status_message_set_at = None;
+            true
+        } else {
+            // Early wake-up (host timer fired ahead of our clock, or this
+            // was a stale timer from a replaced message): re-chain for the
+            // remaining TTL so the message never depends on an unrelated
+            // event to expire. Terminates — each fire either clears or
+            // re-arms exactly once for a strictly later deadline.
+            self.status_timer_needs_arming = true;
+            self.status_timer_arm_secs = self.status_message_remaining_secs();
+            false
+        }
+    }
+
     fn sidebar_item_key(item: &SidebarItem) -> String {
         match &item.matched_branch {
             Some(branch) => format!("branch:{branch}"),
@@ -369,6 +492,13 @@ impl State {
     /// fresh snapshot that typically follows re-syncs as well, whichever
     /// order the two events arrive in. Returns whether a re-render is
     /// needed (the cursor moved).
+    /// Reveal also reconciles the status footer (#152): a message that
+    /// expired while this pane was hidden is cleared lazily (its wake-up
+    /// timer may have been lost — hidden instances receive no Events),
+    /// and a still-live message gets a fresh wake-up armed for the same
+    /// reason. Both paths are safe no matter whether the original timer
+    /// actually fires later: expiry is decided by age, and a redundant
+    /// wake-up on a young message is a no-op.
     pub fn handle_visible(&mut self, visible: bool) -> bool {
         if !visible {
             return false;
@@ -376,7 +506,21 @@ impl State {
         let before = self.selected_index;
         self.select_active_sidebar_item();
         self.resync_on_reveal = true;
-        self.selected_index != before
+        let mut status_changed = false;
+        if !self.status_message.is_empty() {
+            if self.status_message_expired() {
+                self.status_message.clear();
+                self.status_is_error = false;
+                self.status_message_set_at = None;
+                status_changed = true;
+            } else {
+                // Only the REMAINING TTL: a full re-arm here would extend a
+                // nearly-expired message to almost twice its lifetime.
+                self.status_timer_needs_arming = true;
+                self.status_timer_arm_secs = self.status_message_remaining_secs();
+            }
+        }
+        self.selected_index != before || status_changed
     }
 
     fn ctx(cmd_type: &str) -> BTreeMap<String, String> {
@@ -625,6 +769,19 @@ impl State {
         );
     }
 
+    /// Imperative-shell counterpart to `set_status`'s
+    /// `status_timer_needs_arming` flag: performs the actual
+    /// `zellij_tile::shim::set_timeout` host call `set_status` requested
+    /// and clears the flag. Called from `update`/`pipe` after `execute`,
+    /// once per event, so a burst of `set_status` calls within a single
+    /// handler still only arms (at most) one timer per event.
+    fn arm_pending_status_timer(&mut self) {
+        if self.status_timer_needs_arming {
+            set_timeout(self.status_timer_arm_secs.max(0.3));
+            self.status_timer_needs_arming = false;
+        }
+    }
+
     fn execute(&self, action: &Action) {
         match action {
             Action::None => {}
@@ -728,8 +885,7 @@ impl State {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
             let cwd = self.initial_cwd.display();
-            self.status_message = format!("{cwd} is not a git repo: {err}");
-            self.status_is_error = true;
+            self.set_status(format!("{cwd} is not a git repo: {err}"), true);
             self.mode = Mode::NotGitRepo;
             return Action::None;
         }
@@ -742,8 +898,7 @@ impl State {
             }
         }
         if self.repo_root.is_empty() || self.repo_name.is_empty() {
-            self.status_message = "Failed to parse repo info".to_string();
-            self.status_is_error = true;
+            self.set_status("Failed to parse repo info", true);
             return Action::None;
         }
         self.mode = Mode::BrowseWorktrees;
@@ -759,8 +914,7 @@ impl State {
     ) {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
-            self.status_message = format!("Failed to list worktrees: {err}");
-            self.status_is_error = true;
+            self.set_status(format!("Failed to list worktrees: {err}"), true);
             return;
         }
         let output = String::from_utf8_lossy(stdout);
@@ -859,8 +1013,7 @@ impl State {
     pub fn handle_git_branches(&mut self, exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr);
-            self.status_message = format!("Failed to list branches: {err}");
-            self.status_is_error = true;
+            self.set_status(format!("Failed to list branches: {err}"), true);
             return;
         }
         let output = String::from_utf8_lossy(stdout);
@@ -1052,8 +1205,7 @@ impl State {
             .cloned()
             .unwrap_or_else(|| "<unknown>".to_string());
         if exit_code == Some(0) {
-            self.status_message = format!("Spawned '{branch}'");
-            self.status_is_error = false;
+            self.set_status(format!("Spawned '{branch}'"), false);
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
             let code_str = match exit_code {
@@ -1061,11 +1213,10 @@ impl State {
                 None => "no exit code".to_string(),
             };
             if err.is_empty() {
-                self.status_message = format!("Spawn '{branch}' failed ({code_str})");
+                self.set_status(format!("Spawn '{branch}' failed ({code_str})"), true);
             } else {
-                self.status_message = format!("Spawn '{branch}' failed: {err}");
+                self.set_status(format!("Spawn '{branch}' failed: {err}"), true);
             }
-            self.status_is_error = true;
         }
         Action::Refresh
     }
@@ -1082,8 +1233,7 @@ impl State {
             .unwrap_or_else(|| "<unknown>".to_string());
         self.mode = Mode::BrowseWorktrees;
         if exit_code == Some(0) {
-            self.status_message = format!("Removed '{branch}'");
-            self.status_is_error = false;
+            self.set_status(format!("Removed '{branch}'"), false);
             // Close the worktree's tab if it exists, then refresh.
             if self.has_tab_for_branch(&branch) {
                 let tab_name = Self::tab_name_for_branch(&branch);
@@ -1117,11 +1267,10 @@ impl State {
                 None => "no exit code".to_string(),
             };
             if err.is_empty() {
-                self.status_message = format!("Remove '{branch}' failed ({code_str})");
+                self.set_status(format!("Remove '{branch}' failed ({code_str})"), true);
             } else {
-                self.status_message = format!("Remove '{branch}' failed: {err}");
+                self.set_status(format!("Remove '{branch}' failed: {err}"), true);
             }
-            self.status_is_error = true;
         }
         Action::Refresh
     }
@@ -1240,8 +1389,7 @@ impl State {
             let tab_name = Self::tab_name_for_branch(&branch);
             return Action::SwitchToTab(tab_name);
         }
-        self.status_message = format!("Spawning '{branch}'...");
-        self.status_is_error = false;
+        self.set_status(format!("Spawning '{branch}'..."), false);
         Action::Spawn(branch)
     }
 
@@ -1272,14 +1420,12 @@ impl State {
                         if self.selected_sidebar_branch().is_some() {
                             self.mode = Mode::Confirming;
                         } else {
-                            self.status_message = "Only worktree tabs can be removed".to_string();
-                            self.status_is_error = true;
+                            self.set_status("Only worktree tabs can be removed", true);
                         }
                     }
                 }
                 BareKey::Char('r') => {
-                    self.status_message = "Refreshed".to_string();
-                    self.status_is_error = false;
+                    self.set_status("Refreshed", false);
                     return Action::Refresh;
                 }
                 BareKey::Char('q') | BareKey::Esc => {}
@@ -1328,8 +1474,7 @@ impl State {
                     self.mode = Mode::BrowseWorktrees;
                     return self.spawn_or_switch(branch);
                 } else {
-                    self.status_message = "Invalid branch name".to_string();
-                    self.status_is_error = true;
+                    self.set_status("Invalid branch name", true);
                 }
             }
             BareKey::Esc if no_mod => {
@@ -1354,8 +1499,7 @@ impl State {
                 BareKey::Char('y') => {
                     let branch = self.selected_sidebar_branch().map(ToOwned::to_owned);
                     if let Some(branch) = branch {
-                        self.status_message = format!("Removing '{branch}'...");
-                        self.status_is_error = false;
+                        self.set_status(format!("Removing '{branch}'..."), false);
                         return Action::Remove(branch);
                     }
                 }
@@ -1448,13 +1592,11 @@ impl State {
             Some("PermissionRequest") => AgentStatus::NeedsInput,
             Some("Stop") => AgentStatus::Done,
             Some(other) => {
-                self.status_message = format!("Unknown agent event: {other}");
-                self.status_is_error = true;
+                self.set_status(format!("Unknown agent event: {other}"), true);
                 return Action::None;
             }
             None => {
-                self.status_message = "Agent status missing 'event' arg".to_string();
-                self.status_is_error = true;
+                self.set_status("Agent status missing 'event' arg", true);
                 return Action::None;
             }
         };
@@ -1501,16 +1643,14 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('d') => {
-                    self.status_message = "Layout dumped".to_string();
-                    self.status_is_error = false;
+                    self.set_status("Layout dumped", false);
                     return Action::DumpLayout;
                 }
                 BareKey::Char('x') => {
                     if self.session_name.is_some() {
                         return Action::NukeSession;
                     } else {
-                        self.status_message = "Cannot determine session name".to_string();
-                        self.status_is_error = true;
+                        self.set_status("Cannot determine session name", true);
                     }
                 }
                 BareKey::Char('q') | BareKey::Esc => return Action::Close,
@@ -1709,6 +1849,9 @@ impl ZellijPlugin for State {
             // one after reveal — active-tab change detection alone can
             // never see a round trip. See #151 and `handle_visible`.
             EventType::Visible,
+            // Drives the footer status-message TTL (#152) — see
+            // `State::set_status` / `State::handle_timer`.
+            EventType::Timer,
         ]);
 
         // The status-replay request (#140 part B / Z-6) is fired from the
@@ -1720,11 +1863,22 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
-        // Handled outside the Action-producing match: pure state sync with
-        // no host effect to `execute`, and it must report whether the
-        // cursor actually moved. See `State::handle_visible` / #151.
+        // Handled outside the Action-producing match: pure state syncs with
+        // no host effect to `execute`, each reporting precisely whether a
+        // re-render is needed. See `State::handle_visible` (#151) and
+        // `State::handle_timer` (#152).
+        // Reveal may request a fresh wake-up timer for a still-live status
+        // message (its original timer can be lost while hidden), so the
+        // arm step runs on this path too.
         if let Event::Visible(visible) = event {
-            return self.handle_visible(visible);
+            let rerender = self.handle_visible(visible);
+            self.arm_pending_status_timer();
+            return rerender;
+        }
+        if let Event::Timer(_) = event {
+            let rerender = self.handle_timer();
+            self.arm_pending_status_timer(); // early-fire re-chain
+            return rerender;
         }
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
@@ -1739,8 +1893,7 @@ impl ZellijPlugin for State {
                 Action::FetchToplevel
             }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
-                self.status_message = "Permissions denied. Plugin cannot run commands.".to_string();
-                self.status_is_error = true;
+                self.set_status("Permissions denied. Plugin cannot run commands.", true);
                 Action::None
             }
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
@@ -1778,14 +1931,11 @@ impl ZellijPlugin for State {
                         Action::None
                     }
                     Some(other) => {
-                        self.status_message = format!("Unknown command result: {other}");
-                        self.status_is_error = true;
+                        self.set_status(format!("Unknown command result: {other}"), true);
                         Action::None
                     }
                     None => {
-                        self.status_message =
-                            "Received command result with no cmd_type".to_string();
-                        self.status_is_error = true;
+                        self.set_status("Received command result with no cmd_type", true);
                         Action::None
                     }
                 }
@@ -1806,12 +1956,14 @@ impl ZellijPlugin for State {
             _ => return false,
         };
         self.execute(&action);
+        self.arm_pending_status_timer();
         true
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         let action = self.handle_pipe(&pipe_message);
         self.execute(&action);
+        self.arm_pending_status_timer();
         true
     }
 
@@ -4757,5 +4909,157 @@ mod tests {
         assert!(notifiable(&AgentStatus::Done));
         assert!(!notifiable(&AgentStatus::Idle));
         assert!(!notifiable(&AgentStatus::Working));
+    }
+
+    // --- Status message TTL (#152) ---
+    //
+    // set_status/handle_timer/handle_visible are pure (no host calls), so —
+    // like every other handler in this module — they're exercised directly.
+    // The real `zellij_tile::shim::set_timeout` call lives in
+    // `arm_pending_status_timer` (called from `update`/`pipe`, never from
+    // unit tests, same as `execute`/`fire_*`); `status_timer_needs_arming`
+    // is the indirection these tests observe. Expiry is age-based: tests
+    // backdate `status_message_set_at` instead of sleeping.
+
+    fn backdate_status(s: &mut State, secs: u64) {
+        s.status_message_set_at = s
+            .status_message_set_at
+            .map(|t| t - std::time::Duration::from_secs(secs));
+    }
+
+    #[test]
+    fn set_status_stamps_age_and_requests_wakeup() {
+        let mut s = State::default();
+        assert!(s.status_message_set_at.is_none());
+        assert!(!s.status_timer_needs_arming);
+
+        s.set_status("Spawned 'feature-c'", false);
+
+        assert_eq!(s.status_message, "Spawned 'feature-c'");
+        assert!(!s.status_is_error);
+        assert!(s.status_message_set_at.is_some());
+        assert!(s.status_timer_needs_arming, "set_status must request a wake-up");
+        assert_eq!(
+            s.status_timer_arm_secs, STATUS_MESSAGE_TTL_SECS,
+            "a fresh message gets its full TTL"
+        );
+    }
+
+    #[test]
+    fn set_status_error_variant_sets_is_error() {
+        let mut s = State::default();
+        s.set_status("Unknown agent event: Bogus", true);
+        assert!(s.status_is_error);
+    }
+
+    #[test]
+    fn set_status_empty_message_clears_stamp_and_pending_arm() {
+        // Clearing in the same event that set a message must also retract
+        // the not-yet-performed arm request — arming a wake-up for an
+        // already-cleared message is noise (Codex review finding).
+        let mut s = State::default();
+        s.set_status("Refreshed", false);
+        assert!(s.status_timer_needs_arming);
+
+        s.set_status("", false);
+
+        assert!(s.status_message.is_empty());
+        assert!(s.status_message_set_at.is_none());
+        assert!(!s.status_timer_needs_arming);
+    }
+
+    #[test]
+    fn timer_before_ttl_does_not_clear_and_rechains_for_the_remainder() {
+        let mut s = State::default();
+        s.set_status("Spawned 'feature-c'", false);
+        backdate_status(&mut s, 5);
+        s.status_timer_needs_arming = false; // shell armed the original
+
+        assert!(!s.handle_timer(), "a fresh message must survive an early wake-up");
+        assert_eq!(s.status_message, "Spawned 'feature-c'");
+        assert!(
+            s.status_timer_needs_arming,
+            "an early wake-up must re-chain — the message must never depend on an unrelated event to expire"
+        );
+        assert!(
+            s.status_timer_arm_secs > 2.0 && s.status_timer_arm_secs <= 3.2,
+            "re-chain must be for the REMAINING TTL (~3s at age 5), got {}",
+            s.status_timer_arm_secs
+        );
+    }
+
+    #[test]
+    fn timer_after_ttl_clears() {
+        let mut s = State::default();
+        s.set_status("Spawned 'feature-c'", false);
+        backdate_status(&mut s, 9);
+
+        assert!(s.handle_timer(), "clearing must request a re-render");
+        assert!(s.status_message.is_empty());
+        assert!(!s.status_is_error);
+        assert!(s.status_message_set_at.is_none());
+    }
+
+    #[test]
+    fn stale_timer_does_not_clear_a_newer_message() {
+        // Message A's wake-up fires after A was replaced by B: B is younger
+        // than the TTL, so the age check leaves it to live out its own TTL
+        // no matter how many older timers are in flight.
+        let mut s = State::default();
+        s.set_status("Spawning 'feat-a'...", false);
+        backdate_status(&mut s, 5);
+        s.set_status("Spawned 'feat-a'", false); // B, re-stamps to now
+
+        assert!(!s.handle_timer(), "A's stale wake-up must not clear B");
+        assert_eq!(s.status_message, "Spawned 'feat-a'");
+
+        backdate_status(&mut s, 9);
+        assert!(s.handle_timer(), "B clears once IT is old enough");
+        assert!(s.status_message.is_empty());
+    }
+
+    #[test]
+    fn reveal_lazily_clears_a_message_that_expired_while_hidden() {
+        // The wake-up timer can be lost while the pane is hidden (hidden
+        // instances receive no Events). Reveal must reconcile: an expired
+        // message clears immediately.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        s.set_status("Spawned 'feat-b'", false);
+        s.status_timer_needs_arming = false; // shell armed it (then lost)
+        backdate_status(&mut s, 20);
+
+        assert!(s.handle_visible(true), "reveal must clear and re-render");
+        assert!(s.status_message.is_empty());
+        assert!(s.status_message_set_at.is_none());
+    }
+
+    #[test]
+    fn reveal_rearms_wakeup_for_a_still_live_message() {
+        // A young message whose timer may have been lost while hidden gets
+        // a fresh wake-up on reveal; a redundant wake-up is harmless (the
+        // age check just declines to clear).
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        s.set_status("Spawned 'feat-b'", false);
+        s.status_timer_needs_arming = false; // shell armed it (then lost)
+
+        backdate_status(&mut s, 5);
+        s.handle_visible(true);
+
+        assert_eq!(s.status_message, "Spawned 'feat-b'");
+        assert!(s.status_timer_needs_arming, "reveal must request a fresh wake-up");
+        assert!(
+            s.status_timer_arm_secs > 2.0 && s.status_timer_arm_secs <= 3.2,
+            "reveal must arm only the REMAINING TTL (~3s at age 5), not a full one, got {}",
+            s.status_timer_arm_secs
+        );
+    }
+
+    #[test]
+    fn timer_with_no_message_is_a_harmless_no_op() {
+        let mut s = State::default();
+        assert!(!s.handle_timer());
+        assert!(s.status_message_set_at.is_none());
     }
 }
