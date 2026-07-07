@@ -241,8 +241,18 @@ layout_stale_kind() {
 }
 
 # Drop a session's cache dirs and print the standard stale-session message.
+# Guards itself: re-checks the session is still EXITED immediately before
+# deleting, so no caller can race an exited->alive transition (a second
+# `zelligent`/attach elsewhere) into `delete-session --force` killing a
+# live session out from under its user. Callers must still pre-filter on
+# exited state for correct messaging; this check is the last line of
+# defense, not the primary gate.
 drop_stale_session() {
   local name="$1" bad_path="$2" dir
+  if [ "$(session_state "$name")" != "exited" ]; then
+    echo "ℹ️  Skipped dropping saved session '$name' — it came alive while being checked."
+    return 0
+  fi
   zellij delete-session --force "$name" 2>/dev/null || true
   while IFS= read -r dir; do
     [ -n "$dir" ] && rm -rf "$dir" 2>/dev/null || true
