@@ -73,7 +73,7 @@ cp -R "$PLUGIN_SRC" "$PLUGIN_DST"
 # cached one and no-ops when they match, so a static dev version would mean
 # `zelligent doctor` never re-syncs hook changes during local development.
 DEV_PLUGIN_JSON="$PLUGIN_DST/plugins/zelligent/.claude-plugin/plugin.json"
-DEV_PLUGIN_VERSION="${VERSION}-dev.${SHA}.$(date -u +%Y%m%d%H%M%S)"
+DEV_PLUGIN_VERSION="${VERSION}-dev.${SHA}.$(date -u +%Y%m%d%H%M%S).$$"
 sed -i.bak "s/\"version\": \"0.0.0-dev\"/\"version\": \"$DEV_PLUGIN_VERSION\"/" "$DEV_PLUGIN_JSON"
 if ! grep -q "\"version\": \"$DEV_PLUGIN_VERSION\"" "$DEV_PLUGIN_JSON"; then
   echo "Error: Failed to stamp version into $DEV_PLUGIN_JSON" >&2
