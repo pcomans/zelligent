@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && (zellij pipe --name zelligent-status --args \"event=Stop,tab=$ZELLIGENT_TAB_NAME\" >/dev/null 2>&1 &) || true"
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && ( (zellij pipe --name zelligent-status --args \"event=Stop,tab=$ZELLIGENT_TAB_NAME\" >/dev/null 2>&1 & P=$!; sleep 5; kill \"$P\" 2>/dev/null) >/dev/null 2>&1 & ) || true"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && (zellij pipe --name zelligent-status --args \"event=Start,tab=$ZELLIGENT_TAB_NAME\" >/dev/null 2>&1 &) || true"
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && ( (zellij pipe --name zelligent-status --args \"event=Start,tab=$ZELLIGENT_TAB_NAME\" >/dev/null 2>&1 & P=$!; sleep 5; kill \"$P\" 2>/dev/null) >/dev/null 2>&1 & ) || true"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && (zellij pipe --name zelligent-status --args \"event=PermissionRequest,tab=$ZELLIGENT_TAB_NAME\" >/dev/null 2>&1 &) || true"
+            "command": "[ -n \"$ZELLIGENT_TAB_NAME\" ] && [ -n \"$ZELLIJ\" ] && ( (zellij pipe --name zelligent-status --args \"event=PermissionRequest,tab=$ZELLIGENT_TAB_NAME\" >/dev/null 2>&1 & P=$!; sleep 5; kill \"$P\" 2>/dev/null) >/dev/null 2>&1 & ) || true"
           }
         ]
       }
