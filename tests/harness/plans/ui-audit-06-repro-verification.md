@@ -25,7 +25,7 @@ Conventions: as ui-audit-01 (tmux mouse on; press/release separate send-keys; AR
 - REPRODUCED if ▌ jumps to `local`.
 
 ## R2 — BUG-2: in-pane header missing, one leading blank line (tall window)
-- From the startup capture of R1: REPRODUCED if terminal row 2 (first in-pane content row) is blank and NO line anywhere in the sidebar contains `zelligent / zelligent-test-repo`.
+- From the startup capture of R1: REPRODUCED if terminal row 2 (first in-pane content row) is blank and NO line anywhere in the sidebar contains the repo-name header (` zelligent-test-repo ` since #156; ` zelligent / zelligent-test-repo ` on older builds).
 
 ## R3 — BUG-8: leading-line count shifts with status text (dynamic mapping offset)
 - Click `local` title once if not selected. Press `d` (sidebar focused) → red error `Only worktree tabs can be removed` wraps to 2 lines at 36 cols.
