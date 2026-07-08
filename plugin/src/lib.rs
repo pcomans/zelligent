@@ -2026,6 +2026,18 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        // Release the sender FIRST: a CLI `zellij pipe` blocks until some
+        // plugin unblocks the input pipe (or zellij's ~1s dispatch timeout
+        // fires — which is what every sender was silently paying before
+        // this call existed; #167). Unblocking here makes `zellij pipe`
+        // return in milliseconds for the Claude hooks, pipe_invalidate,
+        // and the status request/replay broadcasts alike. Idempotent
+        // across the many sidebar instances that all receive the same
+        // broadcast. Senders still need their own timeout for the
+        // no-plugin-loaded case — nothing exists to unblock them there.
+        if let PipeSource::Cli(_) = pipe_message.source {
+            unblock_cli_pipe_input(&pipe_message.name);
+        }
         let action = self.handle_pipe(&pipe_message);
         self.execute(&action);
         self.arm_pending_status_timer();
