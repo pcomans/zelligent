@@ -68,9 +68,10 @@ concurrent runs will conflict.
 Prerequisites:
 
 - `zellij` and `tmux` installed locally
-- a built sidebar plugin available to the repo-local script, typically via
-  `ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm"`
-  after `bash dev-install.sh`
+- the build under test installed as the `zelligent` on PATH (CLI + plugin),
+  normally via `bash dev-install.sh` from the branch under test — plans launch
+  the installed `zelligent`, never the fixture clone's `./zelligent.sh` (see
+  the CLI-under-test rule below)
 
 Current plans:
 
@@ -90,6 +91,9 @@ Current plans:
 - `ui-audit-06-repro-verification.md`: minimal from-clean-fixture repros for
   every bug found in the audit (Z-1 through Z-8). Use as a regression suite
   when fixing those bugs.
+- `session-resurrection.md`: serialized-session lifecycle — clean resurrection
+  after a hard server kill, the stale-plugin-path footgun (#155/#157), the
+  spawn-flow guard, and nuke recovery (#158).
 
 **CLI-under-test rule:** fixtures clone the source repo's checked-out branch
 (usually `main`) into `/tmp/zelligent-test-repo`, so `./zelligent.sh` inside the
@@ -99,12 +103,91 @@ test repo is the OLD CLI. Plugin changes are injected via
 `command -v zelligent` plus a `grep` for the change. A prior #140 verification
 produced a false FAILED verdict by running the fixture clone's script.
 
-Harness driving rules learned in the audit (apply to all mouse plans): enable
-`tmux set-option -g mouse on` on the harness socket before SGR click injection
-and send press/release as separate `send-keys` calls; there is no tab bar —
-verify the active tab via the main pane's frame title, the sidebar's bold-cyan
-row, and `zellij action query-tab-names`; never run `zelligent.sh spawn` from a
-control pane (it attaches a second Zellij client).
+## Driving rules (the playbook)
+
+Hard-won across the 2026-07 audit, fix verification, integration, and release
+qualification runs (~30 driver sessions). Every rule below exists because its
+absence produced a wasted run, a false verdict, or a wedged environment.
+
+### Identity first — prove WHAT you are testing
+
+- **Verify the build before the first test step.** The sidebar footer shows the
+  plugin version (`0.2.X+<sha>` for dev-install, `0.0.0-dev+<sha>` for a plain
+  cargo build); `zelligent --version` shows the CLI stamp. Both must match the
+  build under test, or STOP — a wrong-artifact run produces confident garbage.
+- **CLI-under-test rule** (burned twice): fixtures clone the source repo's
+  checked-out branch, so `./zelligent.sh` inside the test repo is the OLD CLI.
+  Always launch the installed `zelligent`.
+- **Build-identity integrity**: `plugin/build.rs` bakes `git rev-parse HEAD`
+  with NO dirty marker, so a build of uncommitted changes wears its parent's
+  sha. Verification artifacts must be built from committed trees; a plain
+  `cargo build` footer (`0.0.0-dev+<sha>`) cannot be produced by dev-install
+  and is therefore un-fakeable. Cross-check wasm byte size when in doubt.
+
+### Mouse and keyboard input
+
+- `tmux set-option -g mouse on` on the harness socket before any click; send
+  SGR press and release as SEPARATE `send-keys` calls.
+- Take a FRESH capture and locate the target row before every click — never
+  trust coordinates written in a plan.
+- **The focus-claim click**: a sidebar pane that is not click-focused eats
+  exactly one click (Zellij's click-to-focus), with zero state change. This
+  recurs after EVERY cross-tab landing, not just at startup. Count clicks from
+  the first one the plugin receives.
+- **Keyboard focus follows the new tab's main pane** after a click-driven
+  spawn/switch. Re-click the sidebar once before sending it keys, or the keys
+  land in the shell (a literal `dy` in a worktree prompt was the incident).
+
+### Reading state
+
+- There is no tab bar. Verify the active tab via the main pane's frame title,
+  the sidebar's bold-cyan row, and `zellij action query-tab-names` from ctrl.
+- **Two-axis cursor contract**: `▌` (spanning BOTH lines of the selected item)
+  is the browsing cursor and follows the active tab on reveal/switches;
+  bold-cyan marks the active tab and must ALWAYS be correct. Judge the axes
+  separately.
+- Capture plain (`capture-pane -p`) AND ANSI (`-p -e`) per step; glyph and
+  color assertions need the ANSI bytes.
+- **Zellij's alt-screen wipes tmux scrollback** — CLI stdout printed before an
+  attach (e.g. guard messages) is unrecoverable from capture-pane. Pipe the
+  CLI through `tee` to a log when its stdout is evidence.
+- Status messages self-clear after ~8s (#152). Timing-sensitive checks must
+  timestamp captures (`date +%s.%N`) and batch the whole sequence in one shell
+  call; tool-call overhead alone can exceed the TTL.
+- For structural claims (pane trees, duplicate panes), capture
+  `zellij action dump-layout` — screen captures can hide nesting.
+
+### What must NEVER run
+
+- **Never `pkill zellij`** — it kills the driver's own shell. Use
+  `zellij kill-session` / `zellij delete-session --force`. A hard
+  `kill -9 <server pid>` is legitimate ONLY when a plan prescribes simulating
+  a crash (leaves EXITED serialized state for resurrection tests).
+- **Never run `zelligent spawn` from the ctrl window.** Outside Zellij it ends
+  in `exec zellij attach`, turning ctrl into a second mirrored client whose
+  keystrokes leak into the live session's focused pane. Spawn via the sidebar
+  UI (`i` flow or clicks). Pipes (`zellij pipe`) and `zelligent remove` are
+  non-attaching and safe from ctrl.
+- **Never run `bash test.sh` concurrently with a harness driver** (or two
+  drivers in parallel). Both create real Zellij sessions and fixtures; the
+  collisions produce hangs and phantom failures (two incidents).
+
+### Hygiene and evidence
+
+- One Bash call per plan step: action + sleep + capture batched. Drivers have
+  a hard turn budget (75); per-keystroke calls exhaust it mid-plan.
+- ~8s wait after spawns/removes, ~1s after input, before capturing.
+- Archive every capture under `/tmp/zelligent-ui-run/<run-name>/` with
+  step-named files; quote evidence verbatim in reports.
+- Diff `zellij.log` per phase (count `magic header` / panic lines before and
+  after) when testing lifecycle/resurrection paths.
+- Tear down completely: kill/delete every test session, `tmux kill-server` on
+  the harness socket, run `fixtures/teardown.sh`. An EXITED serialized session
+  left behind can resurrect into a later run.
+- Known environmental noise (not product findings): `lazygit` missing in
+  containers (`Command not found` pane), zellij's "non-fatal" pty-resize log
+  lines, `Action CliPipe did not complete within 1s timeout` around hard
+  kills, and devcontainer login banners in fresh shells.
 
 ## Writing a new test plan
 
@@ -114,7 +197,7 @@ control pane (it attaches a second Zellij client).
 ```markdown
 ---
 fixture: setup-my-scenario.sh
-launch: ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh
+launch: zelligent  # INSTALLED CLI — never the fixture clone's ./zelligent.sh
 session_name: zelligent-test-repo
 ---
 
