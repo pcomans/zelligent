@@ -327,6 +327,57 @@ resolve_default_layout_path() {
   resolve_shared_asset_path ZELLIGENT_DEFAULT_LAYOUT_SRC default-layout.kdl
 }
 
+# Look up the install path Claude Code has on file for a named marketplace in
+# known_marketplaces.json, so doctor can tell a stale registration (e.g. a
+# dev install migrating to Homebrew, or vice versa) from a healthy one before
+# calling `claude plugin marketplace add` — which errors on a name collision
+# and, for the healthy/idempotent case, would otherwise be re-run needlessly
+# on every doctor invocation. Tries jq, then python3, then a best-effort
+# awk scan of pretty-printed JSON. Fails OPEN: any parse trouble (missing
+# file, missing entry, no parser available, malformed JSON) prints nothing
+# and returns success with an empty result — callers must treat that as
+# "unknown", not "no marketplace registered".
+resolve_known_marketplace_path() {
+  local name="$1" file="$2"
+  [ -f "$file" ] || return 0
+
+  if command -v jq &>/dev/null; then
+    jq -r --arg name "$name" '.[$name].installLocation // empty' "$file" 2>/dev/null
+    return 0
+  fi
+
+  if command -v python3 &>/dev/null; then
+    python3 - "$name" "$file" <<'PY' 2>/dev/null
+import json
+import sys
+
+name, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    print(data.get(name, {}).get("installLocation", ""))
+except Exception:
+    pass
+PY
+    return 0
+  fi
+
+  # Grep-based fallback: only handles Claude Code's pretty-printed
+  # (2-space-indent) format. If the file is minified or shaped differently,
+  # this simply finds nothing, which callers treat as "unknown" (fail open).
+  awk -v name="\"$name\"" '
+    index($0, name) && $0 ~ /:[[:space:]]*\{/ { in_block = 1; next }
+    in_block && /"installLocation"/ {
+      line = $0
+      sub(/.*"installLocation"[[:space:]]*:[[:space:]]*"/, "", line)
+      sub(/".*/, "", line)
+      print line
+      exit
+    }
+    in_block && /^[[:space:]]*\}/ { in_block = 0 }
+  ' "$file" 2>/dev/null
+}
+
 resolve_layout_source() {
   local repo_layout user_layout
   repo_layout="$REPO_ROOT/.zelligent/layout.kdl"
@@ -875,19 +926,47 @@ PERMS
     if [ -z "$PLUGIN_MARKETPLACE" ]; then
       echo "  claude plugin: not bundled (skipped)"
     else
-      claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
-      if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
-        if claude plugin update zelligent@zelligent 2>/dev/null; then
-          echo "  claude plugin: updated"
-        else
-          echo "  claude plugin: ok (update check failed)"
-        fi
-      else
-        if claude plugin install zelligent@zelligent 2>/dev/null; then
-          echo "  claude plugin: installed"
-        else
-          echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
+      # known_marketplaces.json is keyed by name, so a stale "zelligent"
+      # entry (e.g. left over from a dev install after switching to
+      # Homebrew, or vice versa) makes `marketplace add` fail on a name
+      # collision — previously swallowed silently, leaving `plugin update`
+      # reading a path that may no longer exist. Repair it by removing the
+      # stale registration before re-adding. When the registered path
+      # already matches, skip `marketplace add` entirely: re-adding an
+      # identical registration is a redundant, and possibly erroring,
+      # no-op we don't want to have to distinguish from a real failure.
+      KNOWN_MARKETPLACES="$HOME/.claude/plugins/known_marketplaces.json"
+      REGISTERED_MARKETPLACE_PATH=$(resolve_known_marketplace_path "zelligent" "$KNOWN_MARKETPLACES")
+      if [ -n "$REGISTERED_MARKETPLACE_PATH" ] && [ "$REGISTERED_MARKETPLACE_PATH" != "$PLUGIN_MARKETPLACE" ]; then
+        claude plugin marketplace remove zelligent 2>/dev/null || true
+        REGISTERED_MARKETPLACE_PATH=""
+      fi
+
+      MARKETPLACE_OK=1
+      if [ "$REGISTERED_MARKETPLACE_PATH" != "$PLUGIN_MARKETPLACE" ]; then
+        if ! claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null; then
+          MARKETPLACE_OK=0
+          echo "  claude plugin: failed to register marketplace ($PLUGIN_MARKETPLACE)"
           ERRORS=1
+        fi
+      fi
+
+      if [ "$MARKETPLACE_OK" -eq 1 ]; then
+        if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
+          if claude plugin update zelligent@zelligent 2>/dev/null; then
+            echo "  claude plugin: updated"
+            echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
+          else
+            echo "  claude plugin: ok (update check failed)"
+          fi
+        else
+          if claude plugin install zelligent@zelligent 2>/dev/null; then
+            echo "  claude plugin: installed"
+            echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
+          else
+            echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
+            ERRORS=1
+          fi
         fi
       fi
     fi

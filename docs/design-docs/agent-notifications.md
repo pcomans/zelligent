@@ -76,6 +76,8 @@ Statuses are stored in `agent_statuses: BTreeMap<String, AgentStatus>` keyed by 
 - Grants `ReadCliPipes` permission to the Zellij plugin
 - Installs the Claude Code plugin via `claude plugin marketplace add` + `claude plugin install zelligent@zelligent`
 
+The plugin (`claude-plugin/`, containing `hooks.json` above) is bundled with zelligent itself rather than fetched separately: `release.yml` copies it into the release tarball and stamps `plugin.json`'s `"version"` field (checked-in placeholder `0.0.0-dev`) with the release version, and `dev-install.sh` stamps its own copy of `plugin.json` with a unique `<VERSION>-dev.<sha>.<timestamp>` string on every install. Both exist because Claude Code's `plugin update` compares the resolved `plugin.json` version against the cached one and skips the update when they match — an unstamped or stale version means `zelligent doctor` reports success while the user keeps stale hooks. `zelligent doctor` also detects a `zelligent` marketplace registered under a different path than the one it resolved (e.g. left over from switching between a dev install and Homebrew) and repairs it with `claude plugin marketplace remove` before re-adding, since `known_marketplaces.json` is keyed by name and a stale entry otherwise makes `marketplace add` fail — previously silently. **Restart running Claude Code sessions** after an install or update; hook changes only apply to new sessions.
+
 ## PipeMessage format
 
 ```rust
