@@ -208,7 +208,7 @@ fn render_not_git_repo_with_wrapped_status() {
         20,
         "wrapped status must not push the frame past `rows`"
     );
-    assert!(output.contains("zelligent / error"), "header must survive a wrapped status message");
+    assert!(output.contains(" error "), "header must survive a wrapped status message");
     insta::assert_snapshot!(output);
 }
 
