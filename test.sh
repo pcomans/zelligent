@@ -1269,13 +1269,17 @@ contains "release.yml verifies the plugin.json stamp" 'Failed to stamp' "$RELEAS
 # Pin the actual uniqueness ingredients (sha + timestamp + pid), not just
 # the variable's existence.
 contains "dev-install stamps the claude-plugin copy with a unique dev version" 'DEV_PLUGIN_VERSION="${VERSION}-dev.${SHA}.$(date -u +%Y%m%d%H%M%S).$$"' "$DEV_INSTALL_CONTENT"
-# Pin that the sed's target path is under $PLUGIN_DST (the installed copy) —
-# a grep for PLUGIN_DST anywhere would pass even if the sed hit the source.
-DEV_STAMP_SED_LINE=$(printf '%s\n' "$DEV_INSTALL_CONTENT" | grep 'DEV_PLUGIN_VERSION' | grep '^\s*sed\|sed -i' | head -1)
-case "$DEV_STAMP_SED_LINE" in
-  *'$PLUGIN_DST'*) pass "dev-install stamp sed targets the installed copy path" ;;
-  *) fail "dev-install stamp sed targets the installed copy path (got: $DEV_STAMP_SED_LINE)" ;;
-esac
+# Pin that the sed's target is the installed copy: the sed must write to
+# $DEV_PLUGIN_JSON, and $DEV_PLUGIN_JSON must be derived from $PLUGIN_DST.
+# (A grep for PLUGIN_DST anywhere would pass even if the sed hit the source.)
+DEV_STAMP_SED_LINE=$(printf '%s\n' "$DEV_INSTALL_CONTENT" | grep 'DEV_PLUGIN_VERSION' | grep 'sed' | head -1)
+DEV_JSON_DEF_LINE=$(printf '%s\n' "$DEV_INSTALL_CONTENT" | grep '^DEV_PLUGIN_JSON=' | head -1)
+if [ "${DEV_STAMP_SED_LINE#*\$DEV_PLUGIN_JSON}" != "$DEV_STAMP_SED_LINE" ] \
+   && [ "${DEV_JSON_DEF_LINE#*\$PLUGIN_DST}" != "$DEV_JSON_DEF_LINE" ]; then
+  pass "dev-install stamp sed targets the installed copy path"
+else
+  fail "dev-install stamp sed targets the installed copy path (sed: $DEV_STAMP_SED_LINE | def: $DEV_JSON_DEF_LINE)"
+fi
 
 # hooks.json's pipe name and event args are one half of a wire protocol whose
 # other half is plugin/src/lib.rs's pipe parser — they must never drift
