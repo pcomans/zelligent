@@ -30,6 +30,17 @@ plugin by id/url and may launch a new instance on a miss — so
 cross-instance broadcast goes through `run_command` invoking the host
 `zellij pipe` instead.)
 
+**`zellij pipe` BLOCKS the calling process until a plugin consumes the
+message** (#167): with sidebars loaded that can take up to zellij's ~1s
+CliPipe dispatch timeout (the `Action CliPipe did not complete within 1s
+timeout` log line), and in a session with NO consuming plugin it blocks
+indefinitely. Never call it synchronously on a latency-sensitive or
+unconditional path — background it under a timeout (`run_with_timeout N
+zellij pipe … &`, see `pipe_invalidate` in zelligent.sh, and the
+backgrounded hook commands in claude-plugin). Inside the plugin,
+`run_command`-launched pipes don't block the plugin itself (the host
+runs them async), only the spawned process.
+
 Consequences: per-tab plugin instances (like the sidebar) cannot observe
 anything that happens while hidden, and any `run_command` result racing a
 tab switch may never reach a now-hidden instance. Self-heal logic

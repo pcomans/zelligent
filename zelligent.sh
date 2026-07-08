@@ -977,12 +977,21 @@ WORKTREES_DIR="$WORKTREES_BASE/$REPO_NAME"
 # issues #138/#140 and docs/references/zellij-plugin-api.md ("Event delivery
 # and hidden panes"). Mirrors how the Claude Code status hooks invoke
 # `zellij pipe`. Guarded so it can never fail the calling command.
+#
+# Fire-and-forget (#167): `zellij pipe` BLOCKS until a plugin consumes the
+# message — up to zellij's ~1s CliPipe dispatch timeout with sidebars
+# loaded, and indefinitely in a session with no zelligent plugin at all
+# (measured: the pipe was the entire >1s of perceived spawn latency; the
+# tab itself is ready in ~150ms). The caller never uses the result, so run
+# it in the background under a hard timeout; delivery still happens
+# milliseconds later, and the no-consumer case is bounded instead of
+# wedging the CLI.
 pipe_invalidate() {
   command -v zellij &>/dev/null || return 0
   if [ -n "$ZELLIJ" ]; then
-    zellij pipe --name zelligent-invalidate 2>/dev/null || true
+    run_with_timeout 5 zellij pipe --name zelligent-invalidate >/dev/null 2>&1 &
   else
-    zellij --session "$REPO_NAME" pipe --name zelligent-invalidate 2>/dev/null || true
+    run_with_timeout 5 zellij --session "$REPO_NAME" pipe --name zelligent-invalidate >/dev/null 2>&1 &
   fi
 }
 
