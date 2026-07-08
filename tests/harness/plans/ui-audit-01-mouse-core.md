@@ -31,7 +31,7 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 
 ## Rendering contract (assert against this)
 
-- Sidebar pane = 36 cols. Header: ` zelligent / zelligent-test-repo ` + `─` fill, bold cyan.
+- Sidebar pane = 36 cols. Header: ` zelligent-test-repo ` + `─` fill, bold cyan (repo name only, #156).
 - Each item = 2 lines. Title line: `▌ name` (cyan bar + space) when the cursor is on it, else two spaces + name. Subtitle line (dim): `branch: X` for worktrees, `current repo` for local, `user tab` for manual tabs.
 - The Zellij-active tab's row title is BOLD CYAN — independent axis from the ▌ cursor.
 - Footer (36 cols = narrow variant): `↑/k up  ↓/j down  Enter open` / `n branch  i new  d del  r ↻` / version line.
@@ -70,7 +70,7 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 - Expected: ▌ moves to `feature-a` (title+subtitle map to one item). No activation (feature-a was not selected).
 
 ## Test 9: Click on header line is a no-op
-- Action: click the ` zelligent / ...` header line.
+- Action: click the ` zelligent-test-repo ` header line.
 - Expected: ▌ stays on `feature-a`; no activation, no spawn message. If ▌ jumps to `local` or any activation fires, that is an offset-mapping bug — FAIL and write repro.
 
 ## Test 10: Click on the blank separator line (between header and first row) is a no-op
