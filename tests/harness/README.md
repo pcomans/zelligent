@@ -186,8 +186,12 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   left behind can resurrect into a later run.
 - Known environmental noise (not product findings): `lazygit` missing in
   containers (`Command not found` pane), zellij's "non-fatal" pty-resize log
-  lines, `Action CliPipe did not complete within 1s timeout` around hard
-  kills, and devcontainer login banners in fresh shells.
+  lines, and devcontainer login banners in fresh shells.
+- `Action CliPipe did not complete within 1s timeout` is NOT noise — it
+  means some process synchronously waited ~1s on a `zellij pipe` call
+  (#167's root cause hid behind exactly this line for weeks, misfiled as
+  environmental). Around hard server kills it's expected; anywhere else,
+  find the caller and background it.
 
 ## Writing a new test plan
 

@@ -1324,6 +1324,44 @@ excludes "inside zellij: layout has no tab wrapper" 'tab name='         "$out"
 contains "inside zellij: shell agent pane uses session name" 'pane name="some-branch"' "$out"
 excludes "inside zellij: shell agent pane is not 'shell'"    'pane name="shell"'       "$out"
 
+# #167: the invalidate pipe is fire-and-forget. `zellij pipe` blocks until a
+# plugin consumes the message (~1s with sidebars, forever with none), so
+# spawn must NOT wait on it. Mock zellij's pipe subcommand to hang for 30s
+# and assert spawn still returns promptly, then that the pipe was actually
+# fired (its argv lands in the log asynchronously).
+MOCK_BIN_HANGPIPE=$(mktemp -d)
+HANGPIPE_LOG=$(mktemp)
+cat > "$MOCK_BIN_HANGPIPE/zellij" <<MOCK
+#!/bin/bash
+echo "zellij \$*" >> "$HANGPIPE_LOG"
+if [ "\$1" = "pipe" ]; then sleep 30; fi
+exit 0
+MOCK
+cp "$MOCK_BIN/lazygit" "$MOCK_BIN_HANGPIPE/lazygit"
+chmod +x "$MOCK_BIN_HANGPIPE/zellij"
+register_managed_cleanup "$HOME" some-branch
+SPAWN_START=$(date +%s)
+out=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_HANGPIPE:$PATH" "$SCRIPT" spawn some-branch 2>&1); code=$?
+SPAWN_ELAPSED=$(( $(date +%s) - SPAWN_START ))
+cleanup_test_branch
+check "async pipe: spawn exits 0 despite hanging pipe" "0" "$code"
+if [ "$SPAWN_ELAPSED" -lt 10 ]; then
+  pass "async pipe: spawn returns promptly (${SPAWN_ELAPSED}s) while the pipe hangs"
+else
+  fail "async pipe: spawn returns promptly while the pipe hangs" "<10s" "${SPAWN_ELAPSED}s"
+fi
+PIPE_SEEN=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if grep -q "pipe --name zelligent-invalidate" "$HANGPIPE_LOG" 2>/dev/null; then PIPE_SEEN=1; break; fi
+  sleep 0.2
+done
+if [ -n "$PIPE_SEEN" ]; then
+  pass "async pipe: invalidate pipe was still fired (async)"
+else
+  fail "async pipe: invalidate pipe was still fired (async)" "pipe --name zelligent-invalidate in mock log" "absent after 2s"
+fi
+rm -rf "$MOCK_BIN_HANGPIPE" "$HANGPIPE_LOG"
+
 # Regression: a non-shell agent command must still drive the pane name
 # (the `*) echo "$base" ;;` arm in pane_name_for_agent_cmd). With agent_cmd
 # `claude`, the pane should be named "claude", not "some-branch" or "shell".
