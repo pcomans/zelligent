@@ -332,50 +332,22 @@ resolve_default_layout_path() {
 # dev install migrating to Homebrew, or vice versa) from a healthy one before
 # calling `claude plugin marketplace add` — which errors on a name collision
 # and, for the healthy/idempotent case, would otherwise be re-run needlessly
-# on every doctor invocation. Tries jq, then python3, then a best-effort
-# awk scan of pretty-printed JSON. Fails OPEN: any parse trouble (missing
-# file, missing entry, no parser available, malformed JSON) prints nothing
-# and returns success with an empty result — callers must treat that as
-# "unknown", not "no marketplace registered".
+# on every doctor invocation. Parsed with perl JSON::PP: perl is already a
+# hard dependency of this script (run_with_timeout, permissions.kdl edits)
+# and JSON::PP is in perl core since 5.14, so this is one deterministic code
+# path on macOS and Linux — no jq requirement, and no python3 (which on a
+# stock Mac without the CLT pops an interactive install dialog). Fails OPEN:
+# any trouble (missing file, missing entry, malformed JSON) prints nothing
+# and returns success — callers must treat empty as "unknown", not "no
+# marketplace registered".
 resolve_known_marketplace_path() {
   local name="$1" file="$2"
   [ -f "$file" ] || return 0
-
-  if command -v jq &>/dev/null; then
-    jq -r --arg name "$name" '.[$name].installLocation // empty' "$file" 2>/dev/null
-    return 0
-  fi
-
-  if command -v python3 &>/dev/null; then
-    python3 - "$name" "$file" <<'PY' 2>/dev/null
-import json
-import sys
-
-name, path = sys.argv[1], sys.argv[2]
-try:
-    with open(path) as f:
-        data = json.load(f)
-    print(data.get(name, {}).get("installLocation", ""))
-except Exception:
-    pass
-PY
-    return 0
-  fi
-
-  # Grep-based fallback: only handles Claude Code's pretty-printed
-  # (2-space-indent) format. If the file is minified or shaped differently,
-  # this simply finds nothing, which callers treat as "unknown" (fail open).
-  awk -v name="\"$name\"" '
-    index($0, name) && $0 ~ /:[[:space:]]*\{/ { in_block = 1; next }
-    in_block && /"installLocation"/ {
-      line = $0
-      sub(/.*"installLocation"[[:space:]]*:[[:space:]]*"/, "", line)
-      sub(/".*/, "", line)
-      print line
-      exit
-    }
-    in_block && /^[[:space:]]*\}/ { in_block = 0 }
-  ' "$file" 2>/dev/null
+  MARKETPLACE_NAME="$name" perl -MJSON::PP -0777 -ne '
+    my $data = eval { JSON::PP::decode_json($_) } or exit 0;
+    my $entry = $data->{$ENV{MARKETPLACE_NAME}} or exit 0;
+    print $entry->{installLocation} // "";
+  ' "$file" 2>/dev/null || true
 }
 
 resolve_layout_source() {
