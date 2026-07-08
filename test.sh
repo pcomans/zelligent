@@ -18,6 +18,11 @@ FAIL=0
 CLEANUP_WORKTREE_PATHS=()
 CLEANUP_WORKTREE_BRANCHES=()
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/zelligent.sh"
+# The checkout this test.sh actually lives in. In a `git worktree` checkout,
+# --git-common-dir resolves to the *main* repo's .git (REPO_ROOT below), not
+# this worktree — so any check that reads this branch's own file contents
+# must use SCRIPT_DIR, not REPO_ROOT.
+SCRIPT_DIR="$(dirname "$SCRIPT")"
 GIT_COMMON_DIR="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)"
 REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
@@ -1093,15 +1098,176 @@ check "doctor does not use ~/.config when XDG set" "false" \
 
 rm -rf "$MOCK_DR_BIN4" "$MOCK_DR_HOME4" "$MOCK_XDG" "$FAKE_WASM_DIR4"
 
+# doctor claude-plugin registration (mocked `claude`, the way `zellij` is
+# mocked above). Contract (maintainer decision, #169): doctor NEVER
+# introspects or mutates Claude Code's marketplace registrations —
+# `marketplace add` is attempted idempotently and a name-collision failure
+# is tolerated (it happens for the healthy already-registered case AND the
+# stale-path case alike); what matters is whether the plugin then
+# installs/updates. Stale dev registrations are dev hygiene:
+# `bash dev-install.sh --uninstall`. A genuine install failure must surface
+# the one-command fix, not be swallowed.
+mock_claude_recording_argv() {
+  # Writes a `claude` mock into $1 that appends every invocation's argv to
+  # $2 (one line per call) and dispatches canned responses for the doctor
+  # flow's plugin subcommands.
+  local bin_dir="$1" log_file="$2" list_output="$3" add_exit="$4" install_exit="${5:-0}"
+  cat > "$bin_dir/claude" <<EOF
+#!/bin/bash
+echo "\$*" >> "$log_file"
+case "\$1 \$2 \$3" in
+  "plugin marketplace add") exit $add_exit ;;
+  "plugin marketplace remove") exit 0 ;;
+esac
+case "\$1 \$2" in
+  "plugin list") echo "$list_output"; exit 0 ;;
+  "plugin update") exit 0 ;;
+  "plugin install") exit $install_exit ;;
+esac
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+}
+
+# Healthy steady state: add hits the name collision (already registered),
+# plugin is installed — doctor must tolerate the collision, update, never
+# call marketplace remove, and exit 0.
+MOCK_DR_MP1=$(mktemp -d)
+MOCK_DR_MP1_HOME=$(mktemp -d)
+FAKE_WASM_MP1_DIR=$(mktemp -d)
+FAKE_WASM_MP1="$FAKE_WASM_MP1_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MP1"
+FAKE_PLUGIN_DIR_MP1=$(mktemp -d)/claude-plugin
+mkdir -p "$FAKE_PLUGIN_DIR_MP1"
+cat > "$MOCK_DR_MP1/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_MP1/zellij"
+CLAUDE_ARGV_LOG_MP1="$MOCK_DR_MP1_HOME/claude-argv.log"
+mock_claude_recording_argv "$MOCK_DR_MP1" "$CLAUDE_ARGV_LOG_MP1" "zelligent@zelligent" 1
+out=$(HOME="$MOCK_DR_MP1_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP1" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP1" \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
+  PATH="$MOCK_DR_MP1:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+MP1_ARGV=$(cat "$CLAUDE_ARGV_LOG_MP1")
+check "doctor collision: exits 0 (collision is not an error)" "0" "$code"
+not_contains "doctor collision: never calls marketplace remove" "plugin marketplace remove" "$MP1_ARGV"
+contains "doctor collision: still updates the plugin" "claude plugin: updated" "$out"
+contains "doctor collision: hints at restarting sessions" \
+  "restart running Claude Code sessions to pick up hook changes" "$out"
+rm -rf "$MOCK_DR_MP1" "$MOCK_DR_MP1_HOME" "$FAKE_WASM_MP1_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP1")"
+
+# Fresh install: add succeeds, plugin not yet installed — doctor installs
+# and hints at the restart.
+MOCK_DR_MP2=$(mktemp -d)
+MOCK_DR_MP2_HOME=$(mktemp -d)
+FAKE_WASM_MP2_DIR=$(mktemp -d)
+FAKE_WASM_MP2="$FAKE_WASM_MP2_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MP2"
+FAKE_PLUGIN_DIR_MP2=$(mktemp -d)/claude-plugin
+mkdir -p "$FAKE_PLUGIN_DIR_MP2"
+cat > "$MOCK_DR_MP2/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_MP2/zellij"
+CLAUDE_ARGV_LOG_MP2="$MOCK_DR_MP2_HOME/claude-argv.log"
+mock_claude_recording_argv "$MOCK_DR_MP2" "$CLAUDE_ARGV_LOG_MP2" "no plugins" 0
+out=$(HOME="$MOCK_DR_MP2_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP2" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP2" \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
+  PATH="$MOCK_DR_MP2:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor fresh: exits 0" "0" "$code"
+contains "doctor fresh: installs the plugin" "claude plugin: installed" "$out"
+contains "doctor fresh: hints at restarting sessions" \
+  "restart running Claude Code sessions to pick up hook changes" "$out"
+rm -rf "$MOCK_DR_MP2" "$MOCK_DR_MP2_HOME" "$FAKE_WASM_MP2_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP2")"
+
+# Genuine failure: add collides, plugin absent, install fails — doctor must
+# print the one-command fix (marketplace remove + re-run) and exit nonzero.
+MOCK_DR_MP3=$(mktemp -d)
+MOCK_DR_MP3_HOME=$(mktemp -d)
+FAKE_WASM_MP3_DIR=$(mktemp -d)
+FAKE_WASM_MP3="$FAKE_WASM_MP3_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MP3"
+FAKE_PLUGIN_DIR_MP3=$(mktemp -d)/claude-plugin
+mkdir -p "$FAKE_PLUGIN_DIR_MP3"
+cat > "$MOCK_DR_MP3/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_MP3/zellij"
+CLAUDE_ARGV_LOG_MP3="$MOCK_DR_MP3_HOME/claude-argv.log"
+mock_claude_recording_argv "$MOCK_DR_MP3" "$CLAUDE_ARGV_LOG_MP3" "no plugins" 1 1
+out=$(HOME="$MOCK_DR_MP3_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP3" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP3" \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
+  PATH="$MOCK_DR_MP3:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+contains "doctor install-failure: prints the one-command fix" \
+  "claude plugin marketplace remove zelligent && zelligent doctor" "$out"
+check "doctor install-failure: exits nonzero" "1" "$code"
+rm -rf "$MOCK_DR_MP3" "$MOCK_DR_MP3_HOME" "$FAKE_WASM_MP3_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP3")"
+
+# dev-install --uninstall removes the Claude plugin + marketplace and the
+# dev artifacts (grep-level contract; the flag is the designated home for
+# dev-environment hygiene that doctor deliberately does not do).
+contains "dev-install --uninstall removes the plugin"      'claude plugin uninstall zelligent@zelligent' "$(cat "$SCRIPT_DIR/dev-install.sh")"
+contains "dev-install --uninstall removes the marketplace" 'claude plugin marketplace remove zelligent'  "$(cat "$SCRIPT_DIR/dev-install.sh")"
+
 # ── Install script contract ──────────────────────────────────────────────────
 echo "Install script contract:"
 
-DEV_INSTALL_CONTENT=$(cat "$REPO_ROOT/dev-install.sh")
+DEV_INSTALL_CONTENT=$(cat "$SCRIPT_DIR/dev-install.sh")
 contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
 contains "dev-install creates user layout if missing" 'USER_LAYOUT_DST' "$DEV_INSTALL_CONTENT"
 contains "dev-install preserves existing user layout" 'Preserved existing user layout' "$DEV_INSTALL_CONTENT"
 contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
+
+# ── Claude Code plugin bundling ─────────────────────────────────────────────
+echo "Claude Code plugin bundling:"
+
+PLUGIN_JSON_CONTENT=$(cat "$SCRIPT_DIR/claude-plugin/plugins/zelligent/.claude-plugin/plugin.json")
+RELEASE_YML_CONTENT=$(cat "$SCRIPT_DIR/.github/workflows/release.yml")
+HOOKS_JSON_CONTENT=$(cat "$SCRIPT_DIR/claude-plugin/plugins/zelligent/hooks/hooks.json")
+LIB_RS_CONTENT=$(cat "$SCRIPT_DIR/plugin/src/lib.rs")
+
+# plugin.json ships a placeholder version, and release.yml's sed stamp targets
+# that exact placeholder — cross-grepped so neither can drift alone (a bump to
+# one without the other silently breaks version-based update detection; see
+# docs/design-docs and the plugin.json version-skip caveat).
+contains "plugin.json ships the 0.0.0-dev placeholder" '"version": "0.0.0-dev"' "$PLUGIN_JSON_CONTENT"
+contains "release.yml stamps the matching placeholder pattern" '\"version\": \"0.0.0-dev\"' "$RELEASE_YML_CONTENT"
+
+# release.yml staging step must bundle claude-plugin/ into the tarball, or
+# doctor's Homebrew-path probe finds nothing to install ("not bundled").
+contains "release.yml stages claude-plugin into the tarball" 'cp -R claude-plugin release-staging/' "$RELEASE_YML_CONTENT"
+contains "release.yml verifies the plugin.json stamp" 'Failed to stamp' "$RELEASE_YML_CONTENT"
+
+# dev-install.sh must stamp the COPY (not the source tree) with a version
+# that's unique per install, so `claude plugin update` never same-version-
+# skips a dev refresh.
+# Pin the actual uniqueness ingredients (sha + timestamp + pid), not just
+# the variable's existence.
+contains "dev-install stamps the claude-plugin copy with a unique dev version" 'DEV_PLUGIN_VERSION="${VERSION}-dev.${SHA}.$(date -u +%Y%m%d%H%M%S).$$"' "$DEV_INSTALL_CONTENT"
+# Pin that the sed's target is the installed copy: the sed must write to
+# $DEV_PLUGIN_JSON, and $DEV_PLUGIN_JSON must be derived from $PLUGIN_DST.
+# (A grep for PLUGIN_DST anywhere would pass even if the sed hit the source.)
+DEV_STAMP_SED_LINE=$(printf '%s\n' "$DEV_INSTALL_CONTENT" | grep 'DEV_PLUGIN_VERSION' | grep 'sed' | head -1)
+DEV_JSON_DEF_LINE=$(printf '%s\n' "$DEV_INSTALL_CONTENT" | grep '^DEV_PLUGIN_JSON=' | head -1)
+if [ "${DEV_STAMP_SED_LINE#*\$DEV_PLUGIN_JSON}" != "$DEV_STAMP_SED_LINE" ] \
+   && [ "${DEV_JSON_DEF_LINE#*\$PLUGIN_DST}" != "$DEV_JSON_DEF_LINE" ]; then
+  pass "dev-install stamp sed targets the installed copy path"
+else
+  fail "dev-install stamp sed targets the installed copy path (sed: $DEV_STAMP_SED_LINE | def: $DEV_JSON_DEF_LINE)"
+fi
+
+# hooks.json's pipe name and event args are one half of a wire protocol whose
+# other half is plugin/src/lib.rs's pipe parser — they must never drift
+# independently of each other.
+contains "hooks.json uses the zelligent-status pipe name" 'zellij pipe --name zelligent-status' "$HOOKS_JSON_CONTENT"
+contains "hooks.json sends event=Start" 'event=Start' "$HOOKS_JSON_CONTENT"
+contains "hooks.json sends event=Stop" 'event=Stop' "$HOOKS_JSON_CONTENT"
+contains "hooks.json sends event=PermissionRequest" 'event=PermissionRequest' "$HOOKS_JSON_CONTENT"
+contains "plugin/src/lib.rs parses the zelligent-status pipe name" '"zelligent-status"' "$LIB_RS_CONTENT"
+contains "plugin/src/lib.rs matches on \"Start\"" 'Some("Start")' "$LIB_RS_CONTENT"
+contains "plugin/src/lib.rs matches on \"Stop\"" 'Some("Stop")' "$LIB_RS_CONTENT"
+contains "plugin/src/lib.rs matches on \"PermissionRequest\"" 'Some("PermissionRequest")' "$LIB_RS_CONTENT"
 
 # ── Query subcommands ────────────────────────────────────────────────────────
 echo "Query subcommands:"
