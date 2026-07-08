@@ -1731,7 +1731,10 @@ impl State {
 
         match self.mode {
             Mode::Loading => {
-                ui::render_header(w, "loading...", cols);
+                // No repo name yet: the empty-name fallback renders " zelligent "
+                // rather than a fake repo title (retro-review of #166 — a bare
+                // "loading..." header read as if the repo were named that).
+                ui::render_header(w, "", cols);
                 if self.status_is_error {
                     ui::render_status(w, &self.status_message, self.status_is_error);
                 } else {
@@ -1744,7 +1747,10 @@ impl State {
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::NotGitRepo => {
-                ui::render_header(w, "error", cols);
+                // Same fallback rationale as the Loading arm: the red error text in
+                // the pane body carries the state; the header shouldn't fake a
+                // repo name.
+                ui::render_header(w, "", cols);
                 ui::render_not_git_repo(w, &self.initial_cwd.display().to_string());
                 let status_height = ui::status_height(&self.status_message, cols);
                 let used_lines = 1 + 7 + status_height + 2;

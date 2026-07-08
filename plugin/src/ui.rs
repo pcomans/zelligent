@@ -459,3 +459,37 @@ pub fn render_status(w: &mut impl Write, message: &str, is_error: bool) {
     writeln!(w).unwrap();
     writeln!(w, "  {color}{message}{RESET}").unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header_string(repo_name: &str, cols: usize) -> String {
+        let mut buf = Vec::new();
+        render_header(&mut buf, repo_name, cols);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn header_shows_repo_name_only() {
+        // #156: no brand prefix — the pane frame title carries the tool name.
+        let h = header_string("my-service", 40);
+        assert!(h.contains(" my-service "));
+        assert!(!h.contains("zelligent"));
+    }
+
+    #[test]
+    fn header_empty_name_falls_back_to_brand() {
+        // Loading / not-a-repo arms pass "" — the fallback must be the brand,
+        // never an empty rule (retro-review of #166).
+        assert!(header_string("", 40).contains(" zelligent "));
+    }
+
+    #[test]
+    fn header_repo_named_zelligent_gets_no_special_treatment() {
+        // The old repo_name == "zelligent" special case is gone; pinned so a
+        // future edit can't quietly reintroduce it (it would be invisible in
+        // snapshots that use other repo names).
+        assert!(header_string("zelligent", 40).contains(" zelligent "));
+    }
+}

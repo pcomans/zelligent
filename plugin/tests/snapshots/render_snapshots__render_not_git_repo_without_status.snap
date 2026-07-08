@@ -2,7 +2,7 @@
 source: tests/render_snapshots.rs
 expression: "render_to_string(&s, 20, 80)"
 ---
-[?1049h[H[2J[1m[36m error ─────────────────────────────────────────────────────────────────────────[0m
+[?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
   [1m[31mNot a git repository.[0m
   [2mCurrent directory: /tmp/foo[0m

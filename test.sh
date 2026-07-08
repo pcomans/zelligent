@@ -1152,6 +1152,8 @@ MP1_ARGV=$(cat "$CLAUDE_ARGV_LOG_MP1")
 check "doctor collision: exits 0 (collision is not an error)" "0" "$code"
 not_contains "doctor collision: never calls marketplace remove" "plugin marketplace remove" "$MP1_ARGV"
 contains "doctor collision: still updates the plugin" "claude plugin: updated" "$out"
+contains "doctor collision: never a bare green — prints the stale-registration note" \
+  "using a previously registered 'zelligent' marketplace" "$out"
 contains "doctor collision: hints at restarting sessions" \
   "restart running Claude Code sessions to pick up hook changes" "$out"
 rm -rf "$MOCK_DR_MP1" "$MOCK_DR_MP1_HOME" "$FAKE_WASM_MP1_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP1")"
