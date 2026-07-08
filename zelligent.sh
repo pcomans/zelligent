@@ -893,10 +893,21 @@ PERMS
       # (that's `bash dev-install.sh --uninstall`). If the plugin then
       # installs/updates fine the user is served; if not, the fix is one
       # command, printed in the failure line.
-      claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
+      MARKETPLACE_ADD_OK=1
+      claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || MARKETPLACE_ADD_OK=0
       if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
         if claude plugin update zelligent@zelligent 2>/dev/null; then
           echo "  claude plugin: updated"
+          # The add failing while update succeeds usually just means the
+          # marketplace was already registered (healthy) — but it can also
+          # mean the update ran against a STALE registration while THIS
+          # install's path failed to register for a real reason. Doctor
+          # can't tell the difference without introspecting Claude's
+          # registration files (deliberately out of scope), so never print
+          # a bare green here: state the assumption and the one-command fix.
+          if [ "$MARKETPLACE_ADD_OK" -eq 0 ]; then
+            echo "  claude plugin: note — using a previously registered 'zelligent' marketplace; if hooks seem stale, run: claude plugin marketplace remove zelligent && zelligent doctor"
+          fi
           echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
           echo "  claude plugin: ok (update check failed)"
