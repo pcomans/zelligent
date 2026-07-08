@@ -210,6 +210,12 @@ How it works:
 - After each step, it captures `tmux capture-pane` output and verifies
   visible expectations — sidebar contents, focused tab, prompts,
   notifications.
+- The driving rules that make runs trustworthy (build-identity gate,
+  SGR click protocol, focus-claim semantics, capture/teardown
+  discipline, what must never run) are consolidated in
+  [tests/harness/README.md](../tests/harness/README.md) under
+  "Driving rules (the playbook)" — read it before writing or running
+  a plan.
 
 Active plans live in `tests/harness/plans/`:
 
