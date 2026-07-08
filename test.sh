@@ -1098,19 +1098,20 @@ check "doctor does not use ~/.config when XDG set" "false" \
 
 rm -rf "$MOCK_DR_BIN4" "$MOCK_DR_HOME4" "$MOCK_XDG" "$FAKE_WASM_DIR4"
 
-# doctor claude-plugin marketplace repair (mocked `claude`, the way `zellij`
-# is mocked above). known_marketplaces.json is keyed by name, so a stale
-# "zelligent" entry (dev->brew migration or vice versa) makes `marketplace
-# add` fail on a name collision; doctor must detect the path mismatch and
-# `marketplace remove` before re-adding. A matching path must skip both
-# calls (re-adding an identical registration is a redundant no-op we
-# shouldn't treat as failure-worthy). A failing `add` must be surfaced, not
-# swallowed.
+# doctor claude-plugin registration (mocked `claude`, the way `zellij` is
+# mocked above). Contract (maintainer decision, #169): doctor NEVER
+# introspects or mutates Claude Code's marketplace registrations —
+# `marketplace add` is attempted idempotently and a name-collision failure
+# is tolerated (it happens for the healthy already-registered case AND the
+# stale-path case alike); what matters is whether the plugin then
+# installs/updates. Stale dev registrations are dev hygiene:
+# `bash dev-install.sh --uninstall`. A genuine install failure must surface
+# the one-command fix, not be swallowed.
 mock_claude_recording_argv() {
   # Writes a `claude` mock into $1 that appends every invocation's argv to
   # $2 (one line per call) and dispatches canned responses for the doctor
   # flow's plugin subcommands.
-  local bin_dir="$1" log_file="$2" list_output="$3" add_exit="$4"
+  local bin_dir="$1" log_file="$2" list_output="$3" add_exit="$4" install_exit="${5:-0}"
   cat > "$bin_dir/claude" <<EOF
 #!/bin/bash
 echo "\$*" >> "$log_file"
@@ -1121,14 +1122,16 @@ esac
 case "\$1 \$2" in
   "plugin list") echo "$list_output"; exit 0 ;;
   "plugin update") exit 0 ;;
-  "plugin install") exit 0 ;;
+  "plugin install") exit $install_exit ;;
 esac
 exit 0
 EOF
   chmod +x "$bin_dir/claude"
 }
 
-# Mismatched path: doctor must remove the stale entry, then add the correct one.
+# Healthy steady state: add hits the name collision (already registered),
+# plugin is installed — doctor must tolerate the collision, update, never
+# call marketplace remove, and exit 0.
 MOCK_DR_MP1=$(mktemp -d)
 MOCK_DR_MP1_HOME=$(mktemp -d)
 FAKE_WASM_MP1_DIR=$(mktemp -d)
@@ -1141,39 +1144,20 @@ cat > "$MOCK_DR_MP1/zellij" <<'MOCK'
 MOCK
 chmod +x "$MOCK_DR_MP1/zellij"
 CLAUDE_ARGV_LOG_MP1="$MOCK_DR_MP1_HOME/claude-argv.log"
-mock_claude_recording_argv "$MOCK_DR_MP1" "$CLAUDE_ARGV_LOG_MP1" "no plugins" 0
-mkdir -p "$MOCK_DR_MP1_HOME/.claude/plugins"
-cat > "$MOCK_DR_MP1_HOME/.claude/plugins/known_marketplaces.json" <<JSON
-{
-  "zelligent": {
-    "source": {"source": "directory", "path": "/stale/path/claude-plugin"},
-    "installLocation": "/stale/path/claude-plugin",
-    "lastUpdated": "2026-01-01T00:00:00.000Z"
-  }
-}
-JSON
+mock_claude_recording_argv "$MOCK_DR_MP1" "$CLAUDE_ARGV_LOG_MP1" "zelligent@zelligent" 1
 out=$(HOME="$MOCK_DR_MP1_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP1" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP1" \
   ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
-  PATH="$MOCK_DR_MP1:/usr/bin:/bin" "$SCRIPT" doctor 2>&1)
+  PATH="$MOCK_DR_MP1:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
 MP1_ARGV=$(cat "$CLAUDE_ARGV_LOG_MP1")
-contains "doctor mismatch: calls marketplace remove" \
-  "plugin marketplace remove zelligent" "$MP1_ARGV"
-contains "doctor mismatch: calls marketplace add with the resolved path" \
-  "plugin marketplace add $FAKE_PLUGIN_DIR_MP1" "$MP1_ARGV"
-# Order matters: add-first would hit the name collision the repair exists to
-# avoid. Assert remove's line number precedes add's in the argv log.
-MP1_REMOVE_LINE=$(grep -n "plugin marketplace remove zelligent" "$CLAUDE_ARGV_LOG_MP1" | head -1 | cut -d: -f1)
-MP1_ADD_LINE=$(grep -n "plugin marketplace add" "$CLAUDE_ARGV_LOG_MP1" | head -1 | cut -d: -f1)
-if [ -n "$MP1_REMOVE_LINE" ] && [ -n "$MP1_ADD_LINE" ] && [ "$MP1_REMOVE_LINE" -lt "$MP1_ADD_LINE" ]; then
-  pass "doctor mismatch: remove precedes add (line $MP1_REMOVE_LINE < $MP1_ADD_LINE)"
-else
-  fail "doctor mismatch: remove precedes add (remove=$MP1_REMOVE_LINE add=$MP1_ADD_LINE)"
-fi
-contains "doctor mismatch: installs after repairing the marketplace" \
-  "claude plugin: installed" "$out"
+check "doctor collision: exits 0 (collision is not an error)" "0" "$code"
+not_contains "doctor collision: never calls marketplace remove" "plugin marketplace remove" "$MP1_ARGV"
+contains "doctor collision: still updates the plugin" "claude plugin: updated" "$out"
+contains "doctor collision: hints at restarting sessions" \
+  "restart running Claude Code sessions to pick up hook changes" "$out"
 rm -rf "$MOCK_DR_MP1" "$MOCK_DR_MP1_HOME" "$FAKE_WASM_MP1_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP1")"
 
-# Matching path: doctor must NOT call remove or add (already correctly registered).
+# Fresh install: add succeeds, plugin not yet installed — doctor installs
+# and hints at the restart.
 MOCK_DR_MP2=$(mktemp -d)
 MOCK_DR_MP2_HOME=$(mktemp -d)
 FAKE_WASM_MP2_DIR=$(mktemp -d)
@@ -1186,29 +1170,18 @@ cat > "$MOCK_DR_MP2/zellij" <<'MOCK'
 MOCK
 chmod +x "$MOCK_DR_MP2/zellij"
 CLAUDE_ARGV_LOG_MP2="$MOCK_DR_MP2_HOME/claude-argv.log"
-mock_claude_recording_argv "$MOCK_DR_MP2" "$CLAUDE_ARGV_LOG_MP2" "zelligent@zelligent" 0
-mkdir -p "$MOCK_DR_MP2_HOME/.claude/plugins"
-cat > "$MOCK_DR_MP2_HOME/.claude/plugins/known_marketplaces.json" <<JSON
-{
-  "zelligent": {
-    "source": {"source": "directory", "path": "$FAKE_PLUGIN_DIR_MP2"},
-    "installLocation": "$FAKE_PLUGIN_DIR_MP2",
-    "lastUpdated": "2026-01-01T00:00:00.000Z"
-  }
-}
-JSON
+mock_claude_recording_argv "$MOCK_DR_MP2" "$CLAUDE_ARGV_LOG_MP2" "no plugins" 0
 out=$(HOME="$MOCK_DR_MP2_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP2" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP2" \
   ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
-  PATH="$MOCK_DR_MP2:/usr/bin:/bin" "$SCRIPT" doctor 2>&1)
-MP2_ARGV=$(cat "$CLAUDE_ARGV_LOG_MP2")
-not_contains "doctor match: does not call marketplace remove" "plugin marketplace remove" "$MP2_ARGV"
-not_contains "doctor match: does not call marketplace add" "plugin marketplace add" "$MP2_ARGV"
-contains "doctor match: updates without repairing" "claude plugin: updated" "$out"
-contains "doctor match: hints at restarting sessions" \
+  PATH="$MOCK_DR_MP2:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor fresh: exits 0" "0" "$code"
+contains "doctor fresh: installs the plugin" "claude plugin: installed" "$out"
+contains "doctor fresh: hints at restarting sessions" \
   "restart running Claude Code sessions to pick up hook changes" "$out"
 rm -rf "$MOCK_DR_MP2" "$MOCK_DR_MP2_HOME" "$FAKE_WASM_MP2_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP2")"
 
-# Failing add: doctor must surface the failure (not swallow it) and exit nonzero.
+# Genuine failure: add collides, plugin absent, install fails — doctor must
+# print the one-command fix (marketplace remove + re-run) and exit nonzero.
 MOCK_DR_MP3=$(mktemp -d)
 MOCK_DR_MP3_HOME=$(mktemp -d)
 FAKE_WASM_MP3_DIR=$(mktemp -d)
@@ -1221,17 +1194,20 @@ cat > "$MOCK_DR_MP3/zellij" <<'MOCK'
 MOCK
 chmod +x "$MOCK_DR_MP3/zellij"
 CLAUDE_ARGV_LOG_MP3="$MOCK_DR_MP3_HOME/claude-argv.log"
-mock_claude_recording_argv "$MOCK_DR_MP3" "$CLAUDE_ARGV_LOG_MP3" "no plugins" 1
+mock_claude_recording_argv "$MOCK_DR_MP3" "$CLAUDE_ARGV_LOG_MP3" "no plugins" 1 1
 out=$(HOME="$MOCK_DR_MP3_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP3" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP3" \
   ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
   PATH="$MOCK_DR_MP3:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
-contains "doctor add-failure: prints the failure line" \
-  "claude plugin: failed to register marketplace ($FAKE_PLUGIN_DIR_MP3)" "$out"
-check "doctor add-failure: exits nonzero" "1" "$code"
-MP3_ARGV=$(cat "$CLAUDE_ARGV_LOG_MP3")
-not_contains "doctor add-failure: does not attempt install after a failed add" \
-  "plugin install" "$MP3_ARGV"
+contains "doctor install-failure: prints the one-command fix" \
+  "claude plugin marketplace remove zelligent && zelligent doctor" "$out"
+check "doctor install-failure: exits nonzero" "1" "$code"
 rm -rf "$MOCK_DR_MP3" "$MOCK_DR_MP3_HOME" "$FAKE_WASM_MP3_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP3")"
+
+# dev-install --uninstall removes the Claude plugin + marketplace and the
+# dev artifacts (grep-level contract; the flag is the designated home for
+# dev-environment hygiene that doctor deliberately does not do).
+contains "dev-install --uninstall removes the plugin"      'claude plugin uninstall zelligent@zelligent' "$(cat "$SCRIPT_DIR/dev-install.sh")"
+contains "dev-install --uninstall removes the marketplace" 'claude plugin marketplace remove zelligent'  "$(cat "$SCRIPT_DIR/dev-install.sh")"
 
 # ── Install script contract ──────────────────────────────────────────────────
 echo "Install script contract:"
