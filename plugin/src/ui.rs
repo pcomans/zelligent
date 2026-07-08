@@ -32,7 +32,8 @@ pub struct SidebarViewport {
 /// disagreeing whenever the guesses drifted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarLayout {
-    /// Whether the ` zelligent / <repo> ` banner line is drawn this frame.
+    /// Whether the ` <repo> ` header banner line is drawn this frame (#156:
+    /// repo name only — the pane frame title carries the tool name).
     pub show_header: bool,
     /// Whether a blank separator line is drawn between the header (or the
     /// pane top, if the header itself was dropped) and the first item.
@@ -198,11 +199,17 @@ fn status_symbol(status: &AgentStatus) -> Option<&'static str> {
     }
 }
 
+// The header carries ONLY the repo name (#156): the pane frame title already
+// says "zelligent" (the lazygit convention — every pane's frame names its
+// tool), so a brand prefix here reads as a stutter directly under the frame.
+// The brand also lives in the footer next to the version. An empty repo name
+// (state not loaded yet; error arms pass their own label) falls back to the
+// tool name rather than an empty rule.
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
-    let title = if repo_name.is_empty() || repo_name == "zelligent" {
+    let title = if repo_name.is_empty() {
         " zelligent ".to_string()
     } else {
-        format!(" zelligent / {repo_name} ")
+        format!(" {repo_name} ")
     };
     let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();

@@ -6,7 +6,8 @@ Fixes two interlocked bugs found by the 2026-07 real-input UI audit
 - **Z-1 / #135** — clicking a sidebar item's subtitle line (`branch: X`)
   selected the *next* item, and the last item's subtitle mapped past the
   end of the list (dead zone).
-- **Z-2 / #136** — the in-pane header (` zelligent / <repo> `) never
+- **Z-2 / #136** — the in-pane header (` zelligent / <repo> ` then; just
+  ` <repo> ` since #156) never
   displayed in a live session, and the number of leading (non-item) lines
   shifted at runtime whenever a status message wrapped to two physical
   rows, which in turn shifted the Z-1 offset dynamically.
