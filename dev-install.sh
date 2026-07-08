@@ -3,6 +3,22 @@ set -e
 
 cd "$(dirname "$0")"
 
+# --uninstall: remove everything a dev install put on this machine,
+# including the Claude Code marketplace/plugin registration — the cleanup
+# `zelligent doctor` deliberately does not do (production code stays out of
+# dev-environment hygiene). Run this before switching to a Homebrew install
+# so the brew-registered marketplace isn't shadowed by the stale dev path.
+if [ "$1" = "--uninstall" ]; then
+  claude plugin uninstall zelligent@zelligent 2>/dev/null || true
+  claude plugin marketplace remove zelligent 2>/dev/null || true
+  rm -f "$HOME/.local/bin/zelligent"
+  rm -rf "$HOME/.local/share/zelligent"
+  echo "Removed dev zelligent (binary, share dir, Claude plugin + marketplace)."
+  echo "Left untouched: ~/.config/zellij/config.kdl and zellij permissions —"
+  echo "re-run 'zelligent doctor' after your next install to repoint them."
+  exit 0
+fi
+
 VERSION=$(cat VERSION)
 SHA=$(git rev-parse --short HEAD)
 STAMP="${VERSION}-dev+${SHA}"
@@ -67,7 +83,21 @@ if [ ! -d "$PLUGIN_SRC" ]; then
 fi
 rm -rf "$PLUGIN_DST"
 cp -R "$PLUGIN_SRC" "$PLUGIN_DST"
-echo "Installed Claude plugin to $PLUGIN_DST"
+
+# Stamp the COPY (never the source tree) with a version that is unique per
+# install. `claude plugin update` compares the resolved version against the
+# cached one and no-ops when they match, so a static dev version would mean
+# `zelligent doctor` never re-syncs hook changes during local development.
+DEV_PLUGIN_JSON="$PLUGIN_DST/plugins/zelligent/.claude-plugin/plugin.json"
+DEV_PLUGIN_VERSION="${VERSION}-dev.${SHA}.$(date -u +%Y%m%d%H%M%S).$$"
+sed -i.bak "s/\"version\": \"0.0.0-dev\"/\"version\": \"$DEV_PLUGIN_VERSION\"/" "$DEV_PLUGIN_JSON"
+if ! grep -q "\"version\": \"$DEV_PLUGIN_VERSION\"" "$DEV_PLUGIN_JSON"; then
+  echo "Error: Failed to stamp version into $DEV_PLUGIN_JSON" >&2
+  mv "$DEV_PLUGIN_JSON.bak" "$DEV_PLUGIN_JSON"
+  exit 1
+fi
+rm -f "$DEV_PLUGIN_JSON.bak"
+echo "Installed Claude plugin to $PLUGIN_DST (version $DEV_PLUGIN_VERSION)"
 
 # Optionally build and install a patched Zellij from local source
 if [ -n "$ZELLIGENT_ZELLIJ_SRC" ]; then

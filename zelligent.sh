@@ -327,6 +327,7 @@ resolve_default_layout_path() {
   resolve_shared_asset_path ZELLIGENT_DEFAULT_LAYOUT_SRC default-layout.kdl
 }
 
+
 resolve_layout_source() {
   local repo_layout user_layout
   repo_layout="$REPO_ROOT/.zelligent/layout.kdl"
@@ -875,18 +876,37 @@ PERMS
     if [ -z "$PLUGIN_MARKETPLACE" ]; then
       echo "  claude plugin: not bundled (skipped)"
     else
+      # known_marketplaces.json is keyed by name, so a stale "zelligent"
+      # entry (e.g. left over from a dev install after switching to
+      # Homebrew, or vice versa) makes `marketplace add` fail on a name
+      # collision — previously swallowed silently, leaving `plugin update`
+      # reading a path that may no longer exist. Repair it by removing the
+      # stale registration before re-adding. When the registered path
+      # already matches, skip `marketplace add` entirely: re-adding an
+      # identical registration is a redundant, and possibly erroring,
+      # no-op we don't want to have to distinguish from a real failure.
+      # `marketplace add` fails on a name collision whether the existing
+      # registration points at THIS path (healthy, idempotent re-run) or a
+      # stale one (e.g. an old dev install). Doctor deliberately does NOT
+      # introspect or mutate Claude Code's registration files to tell the
+      # difference — production code stays out of dev-environment hygiene
+      # (that's `bash dev-install.sh --uninstall`). If the plugin then
+      # installs/updates fine the user is served; if not, the fix is one
+      # command, printed in the failure line.
       claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || true
       if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
         if claude plugin update zelligent@zelligent 2>/dev/null; then
           echo "  claude plugin: updated"
+          echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
           echo "  claude plugin: ok (update check failed)"
         fi
       else
         if claude plugin install zelligent@zelligent 2>/dev/null; then
           echo "  claude plugin: installed"
+          echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
-          echo "  claude plugin: failed to install (run 'claude plugin install zelligent@zelligent' manually)"
+          echo "  claude plugin: failed to install — if a stale 'zelligent' marketplace is registered from an old install, run: claude plugin marketplace remove zelligent && zelligent doctor"
           ERRORS=1
         fi
       fi

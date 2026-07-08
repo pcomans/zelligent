@@ -89,6 +89,7 @@ Design docs are implementation history and decision context. They may be superse
 - **Push gate:** `git push` is blocked unless prefixed with `DOCS_VERIFIED=1`. Confirm `docs/` and `AGENTS.md` are up to date before pushing.
 - **Plugin builds require a PATH workaround** for Homebrew Rust. See [docs/BUILD.md](docs/BUILD.md) for the exact incantation.
 - **Tab position != tab index** in the Zellij plugin API. Always use name-based tab operations. See [docs/design-docs/tab-management.md](docs/design-docs/tab-management.md).
+- **Use perl for text/JSON surgery in `zelligent.sh`** — never jq or python3. perl is already a hard dependency (`run_with_timeout`, permissions.kdl edits) and ships on macOS and Linux; JSON::PP is perl-core since 5.14. jq is absent on stock macOS, and python3 without the Xcode CLT pops an interactive install dialog — the worst possible behavior inside `doctor`. One deterministic code path beats a fallback chain.
 - **`CLAUDE.md` is a symlink to `AGENTS.md`.** Keep the symlink intact when making changes.
 
 ## Skills

@@ -174,7 +174,7 @@ When using Claude Code (or another agent with hook support), zelligent tracks ag
 
 On macOS, you also get desktop notifications with a sound when an agent needs input or finishes. This uses `osascript` and is currently macOS-only.
 
-`zelligent doctor` sets up the required hooks automatically when Claude Code is installed.
+`zelligent doctor` sets up the required hooks automatically when Claude Code is installed. The hooks ship as a Claude Code plugin bundled with zelligent itself (in the Homebrew tarball and in `dev-install.sh`'s copy), with a version stamped per release so `claude plugin update` reliably picks up changes instead of skipping a same-version cache hit; `zelligent doctor` also repairs a stale marketplace registration left over from switching between a dev install and Homebrew. **Restart any running Claude Code sessions** after `zelligent doctor` installs or updates the plugin — hook changes only take effect in new sessions.
 
 ## Navigating tabs
 

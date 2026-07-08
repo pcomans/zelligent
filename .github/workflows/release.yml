@@ -36,12 +36,20 @@ jobs:
       - name: Stage release artifacts
         run: |
           VERSION="${GITHUB_REF_NAME}"
+          VERSION_NO_V="${VERSION#v}"
           mkdir -p release-staging
           sed "s/__COMMIT_SHA__/$VERSION/" zelligent.sh > release-staging/zelligent.sh
           chmod +x release-staging/zelligent.sh
           cp plugin/target/wasm32-wasip1/release/zelligent-plugin.wasm release-staging/
           cp share/default-layout.kdl release-staging/
           cp README.md release-staging/
+
+          PLUGIN_JSON="claude-plugin/plugins/zelligent/.claude-plugin/plugin.json"
+          sed -i.bak "s/\"version\": \"0.0.0-dev\"/\"version\": \"$VERSION_NO_V\"/" "$PLUGIN_JSON"
+          grep -q "\"version\": \"$VERSION_NO_V\"" "$PLUGIN_JSON" || { echo "Failed to stamp $PLUGIN_JSON"; exit 1; }
+          rm -f "$PLUGIN_JSON.bak"
+          cp -R claude-plugin release-staging/
+
           tar -czf "zelligent-${VERSION}.tar.gz" -C release-staging .
           SHA256=$(shasum -a 256 "zelligent-${VERSION}.tar.gz" | awk '{print $1}')
           echo "SHA256=$SHA256" >> "$GITHUB_ENV"
