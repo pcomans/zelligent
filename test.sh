@@ -1156,10 +1156,19 @@ out=$(HOME="$MOCK_DR_MP1_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP1" ZELLIGENT_P
   ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
   PATH="$MOCK_DR_MP1:/usr/bin:/bin" "$SCRIPT" doctor 2>&1)
 MP1_ARGV=$(cat "$CLAUDE_ARGV_LOG_MP1")
-contains "doctor mismatch: calls marketplace remove before add" \
+contains "doctor mismatch: calls marketplace remove" \
   "plugin marketplace remove zelligent" "$MP1_ARGV"
 contains "doctor mismatch: calls marketplace add with the resolved path" \
   "plugin marketplace add $FAKE_PLUGIN_DIR_MP1" "$MP1_ARGV"
+# Order matters: add-first would hit the name collision the repair exists to
+# avoid. Assert remove's line number precedes add's in the argv log.
+MP1_REMOVE_LINE=$(grep -n "plugin marketplace remove zelligent" "$CLAUDE_ARGV_LOG_MP1" | head -1 | cut -d: -f1)
+MP1_ADD_LINE=$(grep -n "plugin marketplace add" "$CLAUDE_ARGV_LOG_MP1" | head -1 | cut -d: -f1)
+if [ -n "$MP1_REMOVE_LINE" ] && [ -n "$MP1_ADD_LINE" ] && [ "$MP1_REMOVE_LINE" -lt "$MP1_ADD_LINE" ]; then
+  pass "doctor mismatch: remove precedes add (line $MP1_REMOVE_LINE < $MP1_ADD_LINE)"
+else
+  fail "doctor mismatch: remove precedes add (remove=$MP1_REMOVE_LINE add=$MP1_ADD_LINE)"
+fi
 contains "doctor mismatch: installs after repairing the marketplace" \
   "claude plugin: installed" "$out"
 rm -rf "$MOCK_DR_MP1" "$MOCK_DR_MP1_HOME" "$FAKE_WASM_MP1_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP1")"
@@ -1257,8 +1266,16 @@ contains "release.yml verifies the plugin.json stamp" 'Failed to stamp' "$RELEAS
 # dev-install.sh must stamp the COPY (not the source tree) with a version
 # that's unique per install, so `claude plugin update` never same-version-
 # skips a dev refresh.
-contains "dev-install stamps the claude-plugin copy with a unique dev version" 'DEV_PLUGIN_VERSION=' "$DEV_INSTALL_CONTENT"
-contains "dev-install stamp targets the installed copy, not the source tree" 'PLUGIN_DST' "$DEV_INSTALL_CONTENT"
+# Pin the actual uniqueness ingredients (sha + timestamp + pid), not just
+# the variable's existence.
+contains "dev-install stamps the claude-plugin copy with a unique dev version" 'DEV_PLUGIN_VERSION="${VERSION}-dev.${SHA}.$(date -u +%Y%m%d%H%M%S).$$"' "$DEV_INSTALL_CONTENT"
+# Pin that the sed's target path is under $PLUGIN_DST (the installed copy) —
+# a grep for PLUGIN_DST anywhere would pass even if the sed hit the source.
+DEV_STAMP_SED_LINE=$(printf '%s\n' "$DEV_INSTALL_CONTENT" | grep 'DEV_PLUGIN_VERSION' | grep '^\s*sed\|sed -i' | head -1)
+case "$DEV_STAMP_SED_LINE" in
+  *'$PLUGIN_DST'*) pass "dev-install stamp sed targets the installed copy path" ;;
+  *) fail "dev-install stamp sed targets the installed copy path (got: $DEV_STAMP_SED_LINE)" ;;
+esac
 
 # hooks.json's pipe name and event args are one half of a wire protocol whose
 # other half is plugin/src/lib.rs's pipe parser — they must never drift
