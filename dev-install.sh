@@ -3,6 +3,22 @@ set -e
 
 cd "$(dirname "$0")"
 
+# --uninstall: remove everything a dev install put on this machine,
+# including the Claude Code marketplace/plugin registration — the cleanup
+# `zelligent doctor` deliberately does not do (production code stays out of
+# dev-environment hygiene). Run this before switching to a Homebrew install
+# so the brew-registered marketplace isn't shadowed by the stale dev path.
+if [ "$1" = "--uninstall" ]; then
+  claude plugin uninstall zelligent@zelligent 2>/dev/null || true
+  claude plugin marketplace remove zelligent 2>/dev/null || true
+  rm -f "$HOME/.local/bin/zelligent"
+  rm -rf "$HOME/.local/share/zelligent"
+  echo "Removed dev zelligent (binary, share dir, Claude plugin + marketplace)."
+  echo "Left untouched: ~/.config/zellij/config.kdl and zellij permissions —"
+  echo "re-run 'zelligent doctor' after your next install to repoint them."
+  exit 0
+fi
+
 VERSION=$(cat VERSION)
 SHA=$(git rev-parse --short HEAD)
 STAMP="${VERSION}-dev+${SHA}"
