@@ -18,9 +18,41 @@ Use the tmux skill for all tmux session, window, pane, send-keys, and capture-pa
 ## Architecture
 
 - **tmux session `zt-driver`** wraps everything
-  - **window 0 `view`**: runs `zellij --session test-harness`
+  - **window 0 `view`**: runs the plan's `launch` command (normally the
+    installed `zelligent`; the session name is the repo dir name)
   - **window 1 `ctrl`**: runs shell commands that drive the test
 - Use a **dedicated tmux socket** to avoid collisions: `zt-driver-test`
+
+## Standing driving rules (non-negotiable)
+
+Read `tests/harness/README.md` → "Driving rules (the playbook)" before your
+first step; the rules below are the subset that most often invalidates runs.
+
+1. **Version gate first**: verify the sidebar footer (and `zelligent
+   --version` when the CLI is under test) matches the build you were asked to
+   test. Mismatch → STOP and report; do not run a single step.
+2. **Launch the installed `zelligent`**, never the fixture clone's
+   `./zelligent.sh` (that is the OLD CLI by construction).
+3. **Budget your turns**: one Bash call per plan step, batching
+   action + sleep + capture. You have a hard turn cap.
+4. **Clicks**: `set-option -g mouse on` once; SGR press and release as
+   separate send-keys; fresh capture before every click; expect one
+   focus-claim click to be eaten on every fresh cross-tab landing; re-click
+   the sidebar before sending keys after any click-driven tab switch.
+5. **Capture** plain + ANSI per step into your archive dir; `tee` CLI stdout
+   when it is evidence (zellij's alt-screen wipes tmux scrollback); use
+   `dump-layout` for structural claims; timestamp timing-sensitive captures.
+6. **Never** `pkill zellij` (kill-session/delete-session instead; `kill -9`
+   on a server pid only when the plan prescribes a crash), **never** spawn
+   from the ctrl window (it attaches a second client — sidebar UI only;
+   pipes and `zelligent remove` are safe), **never** overlap with `bash
+   test.sh` or another driver.
+7. **Tear down completely** (sessions killed AND deleted, tmux server on the
+   harness socket killed, `fixtures/teardown.sh` run) — leftover EXITED
+   sessions resurrect into later runs.
+8. Report honestly: verdict per step with verbatim evidence quotes and
+   capture filenames; separate environmental noise (missing lazygit,
+   zellij's "non-fatal" pty log lines) from product findings.
 
 ## Execution flow
 
@@ -29,8 +61,8 @@ Use the tmux skill for all tmux session, window, pane, send-keys, and capture-pa
 1. `Read` the test plan markdown file
 2. Parse the YAML frontmatter fields:
    - `fixture`
-   - `launch` (default: `ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh`)
-   - `session_name` (default: `test-harness`)
+   - `launch` (default: `zelligent` — the installed CLI)
+   - `session_name` (default: `zelligent-test-repo`)
 3. Note all test steps
 
 ### Phase 2: Setup
