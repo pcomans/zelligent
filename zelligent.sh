@@ -790,8 +790,66 @@ if [ "$1" = "doctor" ]; then
   CONFIG="$ZELLIJ_CONFIG_HOME/config.kdl"
   mkdir -p "$(dirname "$CONFIG")"
   touch "$CONFIG"
+  # Dotfiles setups often symlink config.kdl into a repo. `perl -i` (below)
+  # replaces the directory entry, silently severing such a symlink — resolve
+  # to the real file first so edits write through instead.
+  if [ -L "$CONFIG" ]; then
+    CONFIG=$(perl -MCwd=abs_path -e 'print abs_path(shift)' "$CONFIG")
+  fi
 
-  echo "  keybinding: skipped (persistent sidebar only)"
+  # 4. Focus-sidebar keybinding (Alt+z). The bind sends a URL-less
+  #    `MessagePlugin` pipe named `zelligent-focus`, which zellij broadcasts
+  #    to every loaded plugin instance (verified in zellij 0.43/0.44 source:
+  #    no plugin URL routes through pipe_to_all_plugins and never launches
+  #    anything). The sidebar instance in the visible tab focuses itself;
+  #    hidden instances ignore it. No plugin path is embedded in the bind,
+  #    so it survives plugin reinstalls and version bumps unchanged.
+  if grep -v '^\s*//' "$CONFIG" | grep -qF 'zelligent-focus'; then
+    echo "  keybinding: ok (Alt z in $CONFIG)"
+  elif grep -v '^\s*//' "$CONFIG" | grep -qF '"Alt z"'; then
+    # The user already bound Alt z to something else — respect it. Match the
+    # bare key string, not `bind "Alt z"`: zellij binds take multiple keys
+    # (`bind "Alt x" "Alt z" { … }`) and whitespace varies in hand-edited
+    # configs. Over-matching errs toward an honest skip, never a duplicate.
+    echo "  keybinding: skipped (Alt z already bound in $CONFIG)"
+  elif grep -qE '^[[:space:]]*keybinds\b' "$CONFIG"; then
+    # An existing `keybinds` block: zellij parses only the FIRST top-level
+    # `keybinds` node (kdl_config.get("keybinds") — duplicates are silently
+    # ignored, see the TODO in zellij-utils kdl/mod.rs), so appending a
+    # second block would do nothing. Insert our own `shared_except` section
+    # right after the block's opening brace instead — sibling mode sections
+    # inside one keybinds node all apply, and the user's sections are left
+    # untouched.
+    # The match consumes trailing whitespace/newline after the opening brace
+    # and the replacement re-terminates with a newline: content sharing the
+    # opening line (`keybinds { normal {` — valid KDL) must land on its own
+    # line after our section, or the edit would glue `}` and `normal {` into
+    # one invalid line.
+    perl -i -0pe 's/^([ \t]*keybinds\b[^\n{]*\{)[ \t]*\n?/$1\n    shared_except "locked" {\n        bind "Alt z" {\n            MessagePlugin {\n                name "zelligent-focus"\n            }\n        }\n    }\n/m' "$CONFIG"
+    # Honest output: the opener regex can miss unusual shapes (e.g. the
+    # brace on its own line). perl exits 0 either way, so confirm the bind
+    # actually landed before claiming success.
+    if grep -qF 'zelligent-focus' "$CONFIG"; then
+      echo "  keybinding: added Alt-z (focus sidebar) to keybinds block in $CONFIG"
+    else
+      echo "  keybinding: could not insert Alt-z into the keybinds block in $CONFIG"
+      echo "              Add it manually inside 'keybinds': shared_except \"locked\" { bind \"Alt z\" { MessagePlugin { name \"zelligent-focus\"; } } }"
+    fi
+  else
+    cat >> "$CONFIG" <<'KDL'
+
+keybinds {
+    shared_except "locked" {
+        bind "Alt z" {
+            MessagePlugin {
+                name "zelligent-focus"
+            }
+        }
+    }
+}
+KDL
+    echo "  keybinding: added Alt-z (focus sidebar) to $CONFIG"
+  fi
 
   if [ "$(uname)" = "Darwin" ]; then
     if grep -v '^\s*//' "$CONFIG" | grep -qF 'copy_command'; then

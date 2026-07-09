@@ -178,6 +178,14 @@ On macOS, you also get desktop notifications with a sound when an agent needs in
 
 ## Navigating tabs
 
+`zelligent doctor` installs one keybinding of its own:
+
+| Action | Keybinding |
+|---|---|
+| Focus the zelligent sidebar | `Alt-z` |
+
+`Alt-z` focuses the sidebar in your current tab (never switching tabs), so you can immediately navigate with `j`/`k` and Enter. If you already have `Alt z` bound to something else, doctor leaves your binding alone and skips this step. On macOS your terminal must send Option as Alt/Meta (e.g. iTerm2's "Option key: Esc+") — the same setting Zellij's own Alt bindings need.
+
 These are Zellij's default keybindings:
 
 | Action | Keybinding |

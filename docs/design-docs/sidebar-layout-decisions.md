@@ -113,6 +113,11 @@ in existence was on the maintainer's own machine and was removed manually.
 key now focuses the persistent sidebar pane instead of opening a duplicate
 floating instance.
 
+> **Superseded (2026-07):** doctor installs a keybinding again — `Alt-z`
+> focuses the sidebar via a URL-less `MessagePlugin` broadcast pipe
+> (`zelligent-focus`). See decision 50 and
+> [../references/zellij-plugin-api.md](../references/zellij-plugin-api.md).
+
 ## 12. No-args startup requirement
 
 Q: Should the no-args path refuse to start unless the sidebar plugin is
@@ -471,3 +476,20 @@ Q: Are there any other high-priority product questions?
 A: No more high-priority product questions remained. The remaining open items
 were implementation and documentation details, plus lower-priority validation
 rules left for later.
+
+## 50. Focus-sidebar keybinding (Alt-z)
+
+Q: Should there be a keyboard shortcut that focuses the sidebar, and which
+key? The pre-sidebar era used `Ctrl-y` (decision 11 removed it).
+
+A: Yes — `Alt-z`, installed by `zelligent doctor` (2026-07). `Alt` matches
+Zellij's own quick-action idiom (`Alt-n`, `Alt-f`, `Alt-hjkl`); bare `Ctrl`
+keys shadow in-pane apps (readline yank, vim scroll) and are the pattern
+Zellij is moving away from. Mechanism: the bind is a URL-less
+`MessagePlugin { name "zelligent-focus" }`, which zellij broadcasts to every
+plugin instance without launching anything; only the visible sidebar
+instance focuses itself, so the key never switches tabs. Doctor inserts the
+bind inside an existing `keybinds` block (zellij only parses the first
+top-level block), appends a fresh block when none exists, and skips
+entirely when the user already has their own `Alt z` binding. A tab
+without a sidebar pane makes the key a deliberate no-op.
