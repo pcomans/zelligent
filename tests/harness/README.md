@@ -19,6 +19,7 @@ validation, and `doctor` behavior remains in `bash test.sh`.
 ```
 tests/harness/
 ├── plans/          # Test plan markdown files
+│   ├── alt-z-focus-keybinding.md
 │   ├── empty-repo.md
 │   ├── sidebar-mouse-interaction.md
 │   ├── sidebar-layout-smoke.md
