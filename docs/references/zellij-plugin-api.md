@@ -30,6 +30,29 @@ plugin by id/url and may launch a new instance on a miss — so
 cross-instance broadcast goes through `run_command` invoking the host
 `zellij pipe` instead.)
 
+**Keybind `MessagePlugin` with NO plugin URL is also a broadcast**: zellij
+routes a URL-less `MessagePlugin { name "…" }` keybind action through
+`pipe_to_all_plugins` (`PipeSource::Keybind`) — every loaded plugin
+instance receives it, nothing is launched on a miss, and no plugin path is
+embedded in the binding. Verified in zellij 0.43.1 and 0.44.3 source
+(`zellij-server/src/plugins/mod.rs`, `KeybindPipe` handling). This is the
+transport for the Alt-z focus-sidebar keybinding (`PIPE_FOCUS`,
+`zelligent-focus`): each instance gates on `State::is_visible`, so only
+the active tab's sidebar focuses itself (`show_self`). WITH a plugin URL,
+`MessagePlugin`/`LaunchOrFocusPlugin` match existing instances by location
+AND configuration — the sidebar's per-tab instances carry `agent_cmd` /
+`repo_root` config a static keybind can't reproduce, so a URL-bearing
+keybind would mismatch and launch a bare duplicate instance. Never use
+one to target the sidebar.
+
+**`Visible` events are not delivered symmetrically**: a plugin gets
+`Visible(true/false)` when its tab is revealed/hidden by a switch, and
+new-tab creation sends `Visible(true)` to the created tab's plugins — but
+tabs applied WITHOUT client focus (session resurrection's background
+tabs) never receive an initial `Visible` at all. Any "am I visible" state
+must therefore default to hidden and ALSO treat receiving any Event
+(e.g. `TabUpdate`) as proof of visibility — see `State::is_visible`.
+
 **`zellij pipe` BLOCKS the calling process until a plugin consumes the
 message** (#167): with sidebars loaded that can take up to zellij's ~1s
 CliPipe dispatch timeout (the `Action CliPipe did not complete within 1s

@@ -925,6 +925,10 @@ check "doctor creates config.kdl" "true" \
   "$([ -f "$MOCK_DR_HOME/.config/zellij/config.kdl" ] && echo true || echo false)"
 CONFIG_CONTENT=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
 not_contains "doctor does not add launcher keybinding" "Ctrl y" "$CONFIG_CONTENT"
+contains "doctor adds Alt-z focus keybinding" 'bind "Alt z"' "$CONFIG_CONTENT"
+contains "doctor keybinding pipes zelligent-focus" "zelligent-focus" "$CONFIG_CONTENT"
+not_contains "doctor keybinding embeds no plugin path" "file:" "$CONFIG_CONTENT"
+contains "doctor reports keybinding added" "keybinding: added Alt-z (focus sidebar)" "$out"
 check "doctor creates user layout" "true" \
   "$([ -f "$MOCK_DR_HOME/.zelligent/layout.kdl" ] && echo true || echo false)"
 check "doctor copies shipped default layout" \
@@ -951,7 +955,7 @@ out2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
   PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code2=$?
 check "doctor idempotent exits 0" "0" "$code2"
 contains "doctor idempotent: plugin ok" "plugin: ok" "$out2"
-contains "doctor idempotent: keybinding skipped" "keybinding: skipped (persistent sidebar only)" "$out2"
+contains "doctor idempotent: keybinding ok" "keybinding: ok (Alt z" "$out2"
 contains "doctor idempotent: claude plugin skipped" "claude plugin: claude CLI not found" "$out2"
 contains "doctor idempotent: layout ok" "layout: ok" "$out2"
 CONFIG_AFTER=$(cat "$MOCK_DR_HOME/.config/zellij/config.kdl")
@@ -1057,8 +1061,154 @@ check "doctor with existing keybinds exits 0" "0" "$code"
 CONFIG_CONTENT2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
 contains "doctor preserves existing keybinds" "Ctrl x" "$CONFIG_CONTENT2"
 not_contains "doctor does not add new keybinding" "Ctrl y" "$CONFIG_CONTENT2"
+# Alt-z must land INSIDE the existing keybinds block: zellij parses only the
+# first top-level `keybinds` node, so a second appended block would be
+# silently ignored.
+contains "doctor adds Alt-z into existing keybinds block" 'bind "Alt z"' "$CONFIG_CONTENT2"
+contains "doctor reports insertion into existing block" "keybinding: added Alt-z (focus sidebar) to keybinds block" "$out"
+check "doctor keeps a single top-level keybinds block" "1" \
+  "$(grep -c '^keybinds' "$MOCK_DR_HOME2/.config/zellij/config.kdl")"
+
+# doctor idempotent with merged keybinds block: second run leaves it alone
+CONFIG_BEFORE2=$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")
+out=$(HOME="$MOCK_DR_HOME2" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM2" \
+  PATH="$MOCK_DR_BIN2:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor rerun with merged keybinds exits 0" "0" "$code"
+contains "doctor rerun reports keybinding ok" "keybinding: ok (Alt z" "$out"
+check "doctor rerun leaves merged config unchanged" "$CONFIG_BEFORE2" \
+  "$(cat "$MOCK_DR_HOME2/.config/zellij/config.kdl")"
 
 rm -rf "$MOCK_DR_BIN2" "$MOCK_DR_HOME2" "$FAKE_WASM_DIR2"
+
+# doctor with a user-owned Alt-z binding: respects it, does not touch config
+MOCK_DR_BIN_ALTZ=$(mktemp -d)
+MOCK_DR_HOME_ALTZ=$(mktemp -d)
+FAKE_WASM_DIR_ALTZ=$(mktemp -d)
+FAKE_WASM_ALTZ="$FAKE_WASM_DIR_ALTZ/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_ALTZ"
+cat > "$MOCK_DR_BIN_ALTZ/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN_ALTZ/zellij"
+mkdir -p "$MOCK_DR_HOME_ALTZ/.config/zellij"
+cat > "$MOCK_DR_HOME_ALTZ/.config/zellij/config.kdl" <<'KDL'
+keybinds {
+    shared_except "locked" {
+        bind "Alt z" {
+            ToggleFloatingPanes
+        }
+    }
+}
+KDL
+ALTZ_CONFIG_BEFORE=$(cat "$MOCK_DR_HOME_ALTZ/.config/zellij/config.kdl")
+
+out=$(HOME="$MOCK_DR_HOME_ALTZ" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_ALTZ" \
+  PATH="$MOCK_DR_BIN_ALTZ:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with user Alt-z exits 0" "0" "$code"
+contains "doctor with user Alt-z reports skip" "keybinding: skipped (Alt z already bound" "$out"
+not_contains "doctor with user Alt-z adds no zelligent-focus bind" "zelligent-focus" \
+  "$(cat "$MOCK_DR_HOME_ALTZ/.config/zellij/config.kdl")"
+check "doctor with user Alt-z leaves keybinds unchanged" "$ALTZ_CONFIG_BEFORE" \
+  "$(grep -Ev 'serialization_interval|copy_command' "$MOCK_DR_HOME_ALTZ/.config/zellij/config.kdl")"
+
+rm -rf "$MOCK_DR_BIN_ALTZ" "$MOCK_DR_HOME_ALTZ" "$FAKE_WASM_DIR_ALTZ"
+
+# doctor with content sharing the keybinds opening line (`keybinds { normal {`
+# is valid KDL): the displaced content must land on its own line, not get
+# glued to our section's closing brace (which would corrupt a working config)
+MOCK_DR_BIN_GLUE=$(mktemp -d)
+MOCK_DR_HOME_GLUE=$(mktemp -d)
+FAKE_WASM_DIR_GLUE=$(mktemp -d)
+FAKE_WASM_GLUE="$FAKE_WASM_DIR_GLUE/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_GLUE"
+cat > "$MOCK_DR_BIN_GLUE/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN_GLUE/zellij"
+mkdir -p "$MOCK_DR_HOME_GLUE/.config/zellij"
+cat > "$MOCK_DR_HOME_GLUE/.config/zellij/config.kdl" <<'KDL'
+keybinds { normal {
+        bind "Ctrl x" { Quit; }
+    }
+}
+KDL
+
+out=$(HOME="$MOCK_DR_HOME_GLUE" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_GLUE" \
+  PATH="$MOCK_DR_BIN_GLUE:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with inline keybinds content exits 0" "0" "$code"
+GLUE_CONFIG=$(cat "$MOCK_DR_HOME_GLUE/.config/zellij/config.kdl")
+contains "doctor inline: Alt-z inserted" 'bind "Alt z"' "$GLUE_CONFIG"
+contains "doctor inline: reports added" "keybinding: added Alt-z (focus sidebar) to keybinds block" "$out"
+contains "doctor inline: user mode block preserved" 'bind "Ctrl x" { Quit; }' "$GLUE_CONFIG"
+# The displaced `normal {` must start its own line — a `}` glued before it
+# is the corruption this fixture guards against.
+check "doctor inline: displaced content on its own line" "1" \
+  "$(grep -c '^normal {' "$MOCK_DR_HOME_GLUE/.config/zellij/config.kdl")"
+not_contains "doctor inline: no glued brace before displaced content" '} normal {' "$GLUE_CONFIG"
+check "doctor inline: single top-level keybinds block" "1" \
+  "$(grep -c '^keybinds' "$MOCK_DR_HOME_GLUE/.config/zellij/config.kdl")"
+
+rm -rf "$MOCK_DR_BIN_GLUE" "$MOCK_DR_HOME_GLUE" "$FAKE_WASM_DIR_GLUE"
+
+# doctor with a multi-key user binding (`bind "Alt x" "Alt z"` — zellij's own
+# default config uses this form): must be detected as a conflict and skipped
+MOCK_DR_BIN_MK=$(mktemp -d)
+MOCK_DR_HOME_MK=$(mktemp -d)
+FAKE_WASM_DIR_MK=$(mktemp -d)
+FAKE_WASM_MK="$FAKE_WASM_DIR_MK/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MK"
+cat > "$MOCK_DR_BIN_MK/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN_MK/zellij"
+mkdir -p "$MOCK_DR_HOME_MK/.config/zellij"
+cat > "$MOCK_DR_HOME_MK/.config/zellij/config.kdl" <<'KDL'
+keybinds {
+    shared_except "locked" {
+        bind "Alt x" "Alt z" { ToggleFloatingPanes; }
+    }
+}
+KDL
+
+out=$(HOME="$MOCK_DR_HOME_MK" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MK" \
+  PATH="$MOCK_DR_BIN_MK:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with multi-key Alt-z exits 0" "0" "$code"
+contains "doctor multi-key Alt-z reports skip" "keybinding: skipped (Alt z already bound" "$out"
+not_contains "doctor multi-key Alt-z adds no duplicate" "zelligent-focus" \
+  "$(cat "$MOCK_DR_HOME_MK/.config/zellij/config.kdl")"
+
+rm -rf "$MOCK_DR_BIN_MK" "$MOCK_DR_HOME_MK" "$FAKE_WASM_DIR_MK"
+
+# doctor with a symlinked config.kdl (dotfiles setups): the edit must write
+# through the symlink, not replace it with a regular file
+MOCK_DR_BIN_SYM=$(mktemp -d)
+MOCK_DR_HOME_SYM=$(mktemp -d)
+FAKE_WASM_DIR_SYM=$(mktemp -d)
+FAKE_WASM_SYM="$FAKE_WASM_DIR_SYM/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_SYM"
+cat > "$MOCK_DR_BIN_SYM/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_BIN_SYM/zellij"
+mkdir -p "$MOCK_DR_HOME_SYM/.config/zellij" "$MOCK_DR_HOME_SYM/dotfiles"
+cat > "$MOCK_DR_HOME_SYM/dotfiles/config.kdl" <<'KDL'
+keybinds {
+    normal {
+        bind "Ctrl x" { Quit; }
+    }
+}
+KDL
+ln -s "$MOCK_DR_HOME_SYM/dotfiles/config.kdl" "$MOCK_DR_HOME_SYM/.config/zellij/config.kdl"
+
+out=$(HOME="$MOCK_DR_HOME_SYM" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_SYM" \
+  PATH="$MOCK_DR_BIN_SYM:$PATH" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor with symlinked config exits 0" "0" "$code"
+check "doctor preserves config symlink" "true" \
+  "$([ -L "$MOCK_DR_HOME_SYM/.config/zellij/config.kdl" ] && echo true || echo false)"
+contains "doctor writes Alt-z through the symlink" "zelligent-focus" \
+  "$(cat "$MOCK_DR_HOME_SYM/dotfiles/config.kdl")"
+
+rm -rf "$MOCK_DR_BIN_SYM" "$MOCK_DR_HOME_SYM" "$FAKE_WASM_DIR_SYM"
 
 # doctor with plugin source not found: prints error
 MOCK_DR_BIN3=$(mktemp -d)

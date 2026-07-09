@@ -87,6 +87,17 @@ pub const PIPE_STATUS_REPLAY: &str = "zelligent-status-replay";
 /// The single `--args` key carried by `PIPE_STATUS_REPLAY`.
 pub const STATUS_REPLAY_ARG: &str = "statuses";
 
+/// Pipe name for "focus the sidebar" (the Alt+z keybinding installed by
+/// `zelligent doctor`). The keybind is `MessagePlugin { name "…" }` with NO
+/// plugin URL: zellij routes a URL-less MessagePlugin through
+/// `pipe_to_all_plugins` (verified in zellij 0.43.1 and 0.44.3 source), so
+/// every loaded plugin instance receives it — nothing is launched, and the
+/// binding carries no per-install plugin path that could go stale. Each
+/// sidebar instance checks `State::is_visible`; only the instance in the
+/// active tab focuses itself (`show_self`). See
+/// docs/references/zellij-plugin-api.md.
+pub const PIPE_FOCUS: &str = "zelligent-focus";
+
 /// Defensive cap (bytes) on the serialized replay payload. Tab names are
 /// sanitized branch names limited to `[a-zA-Z0-9_-]` (see zelligent.sh), so
 /// `:` and `;` below are safe, unambiguous separators. Well above any real
@@ -153,6 +164,11 @@ pub enum Action {
     /// Broadcast `PIPE_STATUS_REPLAY` carrying the given serialized
     /// payload, in response to a received `PIPE_STATUS_REQUEST`.
     ReplayStatuses(String),
+    /// Focus this instance's own pane (`show_self`). Emitted for a
+    /// `PIPE_FOCUS` pipe by the instance whose pane is currently visible —
+    /// hidden siblings return `Action::None`, so exactly the active tab's
+    /// sidebar takes focus and no tab switch occurs.
+    FocusSelf,
 }
 
 #[derive(Default)]
@@ -261,6 +277,19 @@ pub struct State {
     /// covers the other ordering, and is correct even against pre-hide
     /// `self.tabs` because the instance's own tab was active then too).
     pub resync_on_reveal: bool,
+    /// Whether this instance's pane is in the currently visible tab. Gates
+    /// the `PIPE_FOCUS` response: the pipe broadcasts to every instance,
+    /// and only the visible one may focus itself. Starts false and is set
+    /// by `Event::Visible` in both directions — but ALSO forced true by any
+    /// received `TabUpdate`, because zellij delivers Events only to
+    /// instances in the visible tab (live-verified, see
+    /// docs/references/zellij-plugin-api.md). The TabUpdate path covers
+    /// instances that never receive an initial `Visible(true)` (e.g.
+    /// resurrected background tabs never get one, and the active tab's
+    /// instance must not depend on event-vs-load ordering). A hidden
+    /// instance receives no Events at all, so nothing can wrongly flip
+    /// this to true while hidden.
+    pub is_visible: bool,
     /// When the currently displayed `status_message` was set (`None` when
     /// no message is showing). THE source of truth for expiry (#152):
     /// `handle_timer` and `handle_visible` clear the message iff it is at
@@ -503,6 +532,7 @@ impl State {
     /// actually fires later: expiry is decided by age, and a redundant
     /// wake-up on a young message is a no-op.
     pub fn handle_visible(&mut self, visible: bool) -> bool {
+        self.is_visible = visible;
         if !visible {
             return false;
         }
@@ -826,6 +856,11 @@ impl State {
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
             }
+            Action::FocusSelf => {
+                // Pane is visible (guaranteed by the PIPE_FOCUS gate), so
+                // should_float_if_hidden never applies.
+                show_self(false);
+            }
             Action::Refresh => {
                 self.fire_list_worktrees();
                 self.fire_git_branches();
@@ -1024,6 +1059,9 @@ impl State {
     }
 
     pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) -> Action {
+        // Receiving any Event means this instance's pane is in the visible
+        // tab (hidden instances get no Events) — see `is_visible`.
+        self.is_visible = true;
         let had_tabs = !self.tabs.is_empty();
         // Snapshot pending_close before the confirm loop below mutates it.
         // The disappeared-tab check further down needs to know which names
@@ -1560,6 +1598,18 @@ impl State {
             self.cache_dirty = true;
             self.invalidate_generation += 1;
             return Action::Refresh;
+        }
+        // "Focus the sidebar" (Alt+z keybind — see PIPE_FOCUS). The pipe
+        // reaches every instance; only the one whose pane is visible
+        // focuses itself, so focus lands on the active tab's sidebar and
+        // never causes a tab switch. If the user is on a tab with no
+        // sidebar pane (e.g. one created before doctor installed the
+        // new-tab template), no instance is visible and the key is a no-op.
+        if msg.name == PIPE_FOCUS {
+            if self.is_visible {
+                return Action::FocusSelf;
+            }
+            return Action::None;
         }
         // Late-created-instance status replay (#140 part B / Z-6). A
         // freshly-loaded instance broadcasts PIPE_STATUS_REQUEST; any
@@ -4247,6 +4297,39 @@ mod tests {
             }
         );
         assert_eq!(s.agent_statuses.get("feat-a"), Some(&AgentStatus::Done));
+    }
+
+    // --- PIPE_FOCUS (Alt+z focus-sidebar keybind) tests ---
+
+    #[test]
+    fn focus_pipe_visible_instance_focuses_self() {
+        let mut s = State::default();
+        s.handle_visible(true);
+        let action = s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[]));
+        assert_eq!(action, Action::FocusSelf);
+    }
+
+    #[test]
+    fn focus_pipe_hidden_instance_ignores() {
+        // Default state: never revealed (e.g. a resurrected background tab
+        // that got no initial Visible event at all).
+        let mut s = State::default();
+        assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::None);
+
+        // Explicitly hidden after having been visible.
+        s.handle_visible(true);
+        s.handle_visible(false);
+        assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::None);
+    }
+
+    #[test]
+    fn tab_update_marks_instance_visible_for_focus_pipe() {
+        // An instance that never saw Visible(true) but receives a TabUpdate
+        // is visible by definition (hidden instances get no Events) and
+        // must answer the focus pipe.
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::FocusSelf);
     }
 
     #[test]
