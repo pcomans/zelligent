@@ -219,6 +219,37 @@ git -C "$REPO_ROOT" worktree remove --force \
   "$HOME/.zelligent/worktrees/$REPO_NAME/original-dir-name" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D renamed-dir-branch &>/dev/null || true
 
+# Test (#174 follow-up): the branch checked out in the MAIN repository must
+# never be "reused" as a worktree — `git worktree list` includes the main
+# checkout, and opening an agent tab there breaks the isolation model.
+MAIN_CHECKOUT_BRANCH=$(git -C "$REPO_ROOT" branch --show-current)
+out_mainwt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
+  "$SCRIPT" spawn "$MAIN_CHECKOUT_BRANCH" claude 2>&1); code_mainwt=$?
+check "main-checkout branch: spawn exits non-zero" "1" "$code_mainwt"
+contains "main-checkout branch: names the main repository" \
+  "checked out in the main repository" "$out_mainwt"
+excludes "main-checkout branch: never reuses the main checkout" \
+  "Worktree already exists" "$out_mainwt"
+excludes "main-checkout branch: no tab opened" 'cwd="'"$REPO_ROOT"'"' "$out_mainwt"
+
+# Test (#174 follow-up): a stale registration (worktree dir deleted without
+# `git worktree remove`) must produce an actionable error, not git's
+# confusing "already used by worktree" fatal from `git worktree add`.
+register_cleanup_worktree "$HOME/.zelligent/worktrees/$REPO_NAME/stale-reg-dir" stale-reg-branch
+git -C "$REPO_ROOT" worktree add -b stale-reg-branch \
+  "$HOME/.zelligent/worktrees/$REPO_NAME/stale-reg-dir" HEAD &>/dev/null
+rm -rf "$HOME/.zelligent/worktrees/$REPO_NAME/stale-reg-dir"
+out_stale=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
+  "$SCRIPT" spawn stale-reg-branch claude 2>&1); code_stale=$?
+check "stale registration: spawn exits non-zero" "1" "$code_stale"
+contains "stale registration: explains the missing directory" \
+  "that directory is missing" "$out_stale"
+contains "stale registration: suggests git worktree prune" \
+  "git worktree prune" "$out_stale"
+not_contains "stale registration: no raw git fatal" "already used by worktree" "$out_stale"
+git -C "$REPO_ROOT" worktree prune &>/dev/null || true
+git -C "$REPO_ROOT" branch -D stale-reg-branch &>/dev/null || true
+
 # Test: new worktree WITHOUT setup.sh should use direct command
 SETUP_SH="$REPO_ROOT/.zelligent/setup.sh"
 SETUP_SH_BAK="$SETUP_SH.bak"

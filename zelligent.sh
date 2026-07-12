@@ -1450,7 +1450,23 @@ NEW_WORKTREE=false
 # check below misses and `git worktree add` fatals with "already used by
 # worktree at …". Same resolution the remove path uses.
 EXISTING_WORKTREE=$(worktree_path_for_branch "$BRANCH_NAME")
-if [ -n "$EXISTING_WORKTREE" ] && [ -d "$EXISTING_WORKTREE" ]; then
+if [ -n "$EXISTING_WORKTREE" ] && [ ! -d "$EXISTING_WORKTREE" ]; then
+  # Stale registration: the branch is still recorded against a directory
+  # that no longer exists, so the `git worktree add` below would fatal
+  # anyway ("already used by worktree"). Say why instead of letting git
+  # print a confusing error.
+  echo "Error: branch '$BRANCH_NAME' has a worktree registered at $EXISTING_WORKTREE, but that directory is missing." >&2
+  echo "Run 'git worktree prune' in the repo, then spawn again." >&2
+  exit 1
+elif [ -n "$EXISTING_WORKTREE" ] && [ "$(cd "$EXISTING_WORKTREE" && pwd -P)" = "$REPO_ROOT" ]; then
+  # `git worktree list` includes the MAIN checkout. Never "reuse" it: an
+  # agent tab in the primary checkout breaks the isolation model (pre-#174,
+  # git itself rejected this spawn). Compare resolved paths so a symlinked
+  # repo path can't slip past the guard.
+  echo "Error: branch '$BRANCH_NAME' is checked out in the main repository at $REPO_ROOT." >&2
+  echo "zelligent only opens isolated worktrees — check out another branch there first, or spawn a different branch." >&2
+  exit 1
+elif [ -n "$EXISTING_WORKTREE" ]; then
   WORKTREE_PATH="$EXISTING_WORKTREE"
   echo "⚠️  Worktree already exists, opening new tab..."
 # Fall back to the canonical directory (covers detached-HEAD worktrees,
