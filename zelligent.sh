@@ -1075,6 +1075,10 @@ zellij_socket_dir() {
 }
 
 derive_session_name() {
+  # Byte semantics throughout: sun_path is a BYTE limit, but ${#var} and
+  # ${var:0:n} count CHARACTERS under a UTF-8 locale — a multibyte repo
+  # name or socket dir would undercount and still overflow the socket path.
+  local LC_ALL=C
   local name="$1" limit=108 sock_dir budget hash keep
   [ "$(uname)" = "Darwin" ] && limit=104
   sock_dir=$(zellij_socket_dir)
@@ -1161,20 +1165,28 @@ if [ "$1" = "nuke" ]; then
     exit 1
   fi
   note_shortened_session
-  # Kill the session if it's currently active
+  # Kill the session if it's currently active. Also try the full repo name:
+  # a session created before the #179 shortening (or under a different
+  # socket-dir budget) may still carry it — harmless no-op otherwise.
   zellij delete-session --force "$REPO_SESSION" 2>/dev/null || true
+  if [ "$REPO_SESSION" != "$REPO_NAME" ]; then
+    zellij delete-session --force "$REPO_NAME" 2>/dev/null || true
+  fi
   # Also kill any lingering server/client processes for this session.
   # delete-session --force removes the socket but stale server processes can survive
   # and keep re-serializing the session layout to the cache directory.
-  zellij_version=$(zellij --version 2>/dev/null | awk '{print $2}')
-  if [ -n "$zellij_version" ]; then
-    # The socket-dir NAME drifts across zellij releases — 0.43.x used the
-    # bare version string, 0.44.x uses contract_version_1 (issue #179 side
-    # finding: the old version-only path silently no-oped on 0.44). Sweep
-    # both layouts.
-    for socket_path in \
-      "$(zellij_socket_dir)/$REPO_SESSION" \
-      "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_SESSION"; do
+  #
+  # The socket-dir NAME drifts across zellij releases — 0.43.x used the bare
+  # version string, 0.44.x uses contract_version_1, and it can drift again
+  # (issue #179 side finding: guessing the dir from `zellij --version`
+  # silently no-ops whenever the layout doesn't match). Instead of guessing,
+  # glob the REAL sockets on disk: every `<sock_base>/*/<session>` that
+  # exists is a live or stale socket for this session, whatever zellij
+  # version created it.
+  SOCK_PARENT=$(dirname "$(zellij_socket_dir)")
+  for name_candidate in "$REPO_SESSION" "$REPO_NAME"; do
+    for socket_path in "$SOCK_PARENT"/*/"$name_candidate"; do
+      [ -e "$socket_path" ] || continue
       # Force-kill server processes for this session's socket.
       # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
       # Use grep -F instead of pkill -f to avoid regex metacharacter issues.
@@ -1183,11 +1195,12 @@ if [ "$1" = "nuke" ]; then
         kill -9 $server_pids 2>/dev/null || true
       fi
     done
-    # Kill client processes attached to this session
-    client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_SESSION" | grep -v grep | awk '{print $1}' || true)
-    if [ -n "$client_pids" ]; then
-      kill -9 $client_pids 2>/dev/null || true
-    fi
+    [ "$REPO_SESSION" = "$REPO_NAME" ] && break
+  done
+  # Kill client processes attached to this session
+  client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_SESSION" | grep -v grep | awk '{print $1}' || true)
+  if [ -n "$client_pids" ]; then
+    kill -9 $client_pids 2>/dev/null || true
   fi
   # Wait for processes to exit and finish any final serialization
   sleep 1
@@ -1204,10 +1217,17 @@ if [ "$1" = "nuke" ]; then
   while IFS= read -r cache_dir; do
     [ -n "$cache_dir" ] && rm -rf "$cache_dir" 2>/dev/null || true
   done < <(serialized_session_dirs "$REPO_SESSION")
-  # Clean up stale sockets if still present (both dir layouts, as above)
-  rm -f "$(zellij_socket_dir)/$REPO_SESSION" 2>/dev/null || true
-  if [ -n "$zellij_version" ]; then
-    rm -f "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_SESSION" 2>/dev/null || true
+  if [ "$REPO_SESSION" != "$REPO_NAME" ]; then
+    # Same full-name insurance as the delete-session above.
+    while IFS= read -r cache_dir; do
+      [ -n "$cache_dir" ] && rm -rf "$cache_dir" 2>/dev/null || true
+    done < <(serialized_session_dirs "$REPO_NAME")
+  fi
+  # Clean up stale sockets if still present — same glob as the kill sweep
+  # above (any socket-dir layout, any zellij version)
+  rm -f "$SOCK_PARENT"/*/"$REPO_SESSION" 2>/dev/null || true
+  if [ "$REPO_SESSION" != "$REPO_NAME" ]; then
+    rm -f "$SOCK_PARENT"/*/"$REPO_NAME" 2>/dev/null || true
   fi
   echo "Deleted session '$REPO_SESSION'. Next 'zelligent' will start fresh."
   exit 0
