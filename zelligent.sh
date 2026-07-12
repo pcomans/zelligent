@@ -1049,6 +1049,62 @@ fi
 
 REPO_ROOT=$(cd "${GIT_COMMON_DIR%/.git}" && pwd -P)
 REPO_NAME=$(basename "$REPO_ROOT")
+
+# zellij session names must fit the Unix-socket path budget (issue #179):
+# the server socket lives at <sock_dir>/<session-name>, sun_path caps at 104
+# bytes on macOS (108 on Linux), and zellij 0.44 lengthened sock_dir with a
+# contract_version_1/ component — a stock macOS $TMPDIR leaves only ~24
+# characters of session name. Mirror zellij's socket-dir derivation
+# (zellij-utils consts.rs: $ZELLIJ_SOCKET_DIR override, else the runtime
+# dir on Linux, else $TMPDIR/zellij-<uid>), measure what fits, and derive a
+# stable shortened session name (prefix + cksum hash) when the repo name is
+# over budget — distinct repos keep distinct sessions across runs. Only the
+# SESSION identity shortens; tab names and display strings keep the full
+# repo name.
+zellij_socket_dir() {
+  local base
+  if [ -n "${ZELLIJ_SOCKET_DIR:-}" ]; then
+    base="${ZELLIJ_SOCKET_DIR%/}"
+  elif [ "$(uname)" != "Darwin" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    base="${XDG_RUNTIME_DIR%/}/zellij"
+  else
+    local tmp="${TMPDIR:-/tmp}"
+    base="${tmp%/}/zellij-$(id -u)"
+  fi
+  printf '%s/contract_version_1' "$base"
+}
+
+derive_session_name() {
+  local name="$1" limit=108 sock_dir budget hash keep
+  [ "$(uname)" = "Darwin" ] && limit=104
+  sock_dir=$(zellij_socket_dir)
+  # "<sock_dir>/<name>" must stay strictly under the limit.
+  budget=$(( limit - ${#sock_dir} - 2 ))
+  if [ "${#name}" -le "$budget" ]; then
+    printf '%s' "$name"
+    return
+  fi
+  # cksum is POSIX and stable; hex CRC is at most 8 chars.
+  hash=$(printf '%s' "$name" | cksum | awk '{printf "%x", $1}')
+  keep=$(( budget - ${#hash} - 1 ))
+  if [ "$keep" -lt 1 ]; then
+    # Pathologically long socket dir — nothing sane fits. Return the full
+    # name and let zellij's own validation surface the error.
+    printf '%s' "$name"
+    return
+  fi
+  printf '%s-%s' "${name:0:$keep}" "$hash"
+}
+
+REPO_SESSION=$(derive_session_name "$REPO_NAME")
+
+# One-line heads-up on paths that touch the session; query subcommands
+# (show-repo, list-worktrees, …) stay silent.
+note_shortened_session() {
+  if [ "$REPO_SESSION" != "$REPO_NAME" ]; then
+    echo "Note: using session name '$REPO_SESSION' — '$REPO_NAME' exceeds zellij's socket-path budget (issue #179)."
+  fi
+}
 # Resolve symlinks on the base dir (e.g. /tmp → /private/tmp on macOS) so path prefix matching works.
 # Only resolve the parent (~/.zelligent/worktrees) which always exists after first spawn;
 # don't mkdir the repo-specific dir as a side effect of read-only commands.
@@ -1080,7 +1136,7 @@ pipe_invalidate() {
   if [ -n "$ZELLIJ" ]; then
     run_with_timeout 5 zellij pipe --name zelligent-invalidate >/dev/null 2>&1 &
   else
-    run_with_timeout 5 zellij --session "$REPO_NAME" pipe --name zelligent-invalidate >/dev/null 2>&1 &
+    run_with_timeout 5 zellij --session "$REPO_SESSION" pipe --name zelligent-invalidate >/dev/null 2>&1 &
   fi
 }
 
@@ -1104,23 +1160,31 @@ if [ "$1" = "nuke" ]; then
     echo "Error: cannot nuke from inside a Zellij session. Detach first." >&2
     exit 1
   fi
+  note_shortened_session
   # Kill the session if it's currently active
-  zellij delete-session --force "$REPO_NAME" 2>/dev/null || true
+  zellij delete-session --force "$REPO_SESSION" 2>/dev/null || true
   # Also kill any lingering server/client processes for this session.
   # delete-session --force removes the socket but stale server processes can survive
   # and keep re-serializing the session layout to the cache directory.
   zellij_version=$(zellij --version 2>/dev/null | awk '{print $2}')
   if [ -n "$zellij_version" ]; then
-    socket_path="${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME"
-    # Force-kill server processes for this session's socket.
-    # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
-    # Use grep -F instead of pkill -f to avoid regex metacharacter issues.
-    server_pids=$(ps -eo pid=,args= | grep -F "zellij --server $socket_path" | grep -v grep | awk '{print $1}' || true)
-    if [ -n "$server_pids" ]; then
-      kill -9 $server_pids 2>/dev/null || true
-    fi
+    # The socket-dir NAME drifts across zellij releases — 0.43.x used the
+    # bare version string, 0.44.x uses contract_version_1 (issue #179 side
+    # finding: the old version-only path silently no-oped on 0.44). Sweep
+    # both layouts.
+    for socket_path in \
+      "$(zellij_socket_dir)/$REPO_SESSION" \
+      "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_SESSION"; do
+      # Force-kill server processes for this session's socket.
+      # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
+      # Use grep -F instead of pkill -f to avoid regex metacharacter issues.
+      server_pids=$(ps -eo pid=,args= | grep -F "zellij --server $socket_path" | grep -v grep | awk '{print $1}' || true)
+      if [ -n "$server_pids" ]; then
+        kill -9 $server_pids 2>/dev/null || true
+      fi
+    done
     # Kill client processes attached to this session
-    client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_NAME" | grep -v grep | awk '{print $1}' || true)
+    client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_SESSION" | grep -v grep | awk '{print $1}' || true)
     if [ -n "$client_pids" ]; then
       kill -9 $client_pids 2>/dev/null || true
     fi
@@ -1139,12 +1203,13 @@ if [ "$1" = "nuke" ]; then
   # `session_info/<name>` entry instead.
   while IFS= read -r cache_dir; do
     [ -n "$cache_dir" ] && rm -rf "$cache_dir" 2>/dev/null || true
-  done < <(serialized_session_dirs "$REPO_NAME")
-  # Clean up stale socket if still present
+  done < <(serialized_session_dirs "$REPO_SESSION")
+  # Clean up stale sockets if still present (both dir layouts, as above)
+  rm -f "$(zellij_socket_dir)/$REPO_SESSION" 2>/dev/null || true
   if [ -n "$zellij_version" ]; then
-    rm -f "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_NAME" 2>/dev/null || true
+    rm -f "${TMPDIR:-/tmp}/zellij-$(id -u)/$zellij_version/$REPO_SESSION" 2>/dev/null || true
   fi
-  echo "Deleted session '$REPO_NAME'. Next 'zelligent' will start fresh."
+  echo "Deleted session '$REPO_SESSION'. Next 'zelligent' will start fresh."
   exit 0
 fi
 
@@ -1164,11 +1229,12 @@ if [ -z "$1" ]; then
   # bad-magic staleness without a current path to compare against; the
   # "not installed" error below still fires from the real resolve attempt.
   PLUGIN_PATH_STARTUP=$(resolve_plugin_path 2>/dev/null || true)
-  reconcile_serialized_session "$REPO_NAME" "$PLUGIN_PATH_STARTUP"
+  note_shortened_session
+  reconcile_serialized_session "$REPO_SESSION" "$PLUGIN_PATH_STARTUP"
 
-  if zellij_list_sessions | grep -qxF "$REPO_NAME"; then
-    echo "Attaching to session '$REPO_NAME'..."
-    exec zellij attach "$REPO_NAME"
+  if zellij_list_sessions | grep -qxF "$REPO_SESSION"; then
+    echo "Attaching to session '$REPO_SESSION'..."
+    exec zellij attach "$REPO_SESSION"
   else
     if [ -z "$PLUGIN_PATH_STARTUP" ]; then
       if [ -n "$ZELLIGENT_PLUGIN_SRC" ]; then
@@ -1217,8 +1283,8 @@ if [ -z "$1" ]; then
     render_layout_fragment "$LAYOUT_SOURCE_STARTUP" "$RENDERED_STARTUP_NEW_TAB_TEMPLATE" "$REPO_ROOT" "$STARTUP_MANUAL_AGENT_RENDER" "$STARTUP_SIDEBAR" "$STARTUP_NEW_TAB_CHILDREN"
     write_session_layout "$STARTUP_LAYOUT" "$RENDERED_STARTUP_TEMPLATE" "$RENDERED_STARTUP_CHILDREN" "$REPO_NAME" "$RENDERED_STARTUP_NEW_TAB_TEMPLATE"
 
-    echo "Creating Zellij session '$REPO_NAME'..."
-    zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_NAME"
+    echo "Creating Zellij session '$REPO_SESSION'..."
+    zellij --new-session-with-layout "$STARTUP_LAYOUT" --session "$REPO_SESSION"
     exit $?
   fi
 fi
@@ -1547,10 +1613,11 @@ if [ -n "$ZELLIJ" ]; then
 else
   # Same guard as the no-arg startup path (#155/#157): this probe is the
   # other flow that can walk into resurrecting a broken EXITED session
-  # (`attach-session` mode below calls `zellij attach "$REPO_NAME"`).
+  # (`attach-session` mode below calls `zellij attach "$REPO_SESSION"`).
   # PLUGIN_PATH_LAYOUT is already resolved above (line ~1270).
-  reconcile_serialized_session "$REPO_NAME" "$PLUGIN_PATH_LAYOUT"
-  if zellij_list_sessions | grep -qxF "$REPO_NAME"; then
+  note_shortened_session
+  reconcile_serialized_session "$REPO_SESSION" "$PLUGIN_PATH_LAYOUT"
+  if zellij_list_sessions | grep -qxF "$REPO_SESSION"; then
     SPAWN_MODE="attach-session"
   else
     SPAWN_MODE="new-session"
@@ -1578,17 +1645,17 @@ case "$SPAWN_MODE" in
     pipe_invalidate
     ;;
   attach-session)
-    echo "🪟 Attaching to session '$REPO_NAME', opening tab '$SESSION_NAME'..."
-    ZELLIJ_SESSION_NAME="$REPO_NAME" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
+    echo "🪟 Attaching to session '$REPO_SESSION', opening tab '$SESSION_NAME'..."
+    ZELLIJ_SESSION_NAME="$REPO_SESSION" zellij action new-tab --layout "$LAYOUT" --name "$SESSION_NAME"
     # Fire before the blocking `attach` below, so existing instances heal
     # even if the user later detaches without interacting. See #138/#140.
     pipe_invalidate
-    zellij attach "$REPO_NAME"
+    zellij attach "$REPO_SESSION"
     ;;
   new-session)
     # No pipe_invalidate: the session is brand new, so every plugin
     # instance in it bootstraps a fresh worktree list anyway.
-    echo "🪟 Creating Zellij session '$REPO_NAME'..."
-    zellij --new-session-with-layout "$LAYOUT" --session "$REPO_NAME"
+    echo "🪟 Creating Zellij session '$REPO_SESSION'..."
+    zellij --new-session-with-layout "$LAYOUT" --session "$REPO_SESSION"
     ;;
 esac

@@ -949,6 +949,94 @@ rm -rf "$NONGIT_NUKE"
 out=$("$SCRIPT" --help 2>&1)
 contains "--help lists nuke" "nuke" "$out"
 
+# ── Session name budget (#179) ───────────────────────────────────────────────
+echo "Session name budget:"
+
+# zellij session names must fit the Unix-socket budget (104 bytes on macOS /
+# 108 on Linux for <sock_dir>/<name>). Repos with long directory names must
+# get a derived (prefix + hash) session name; short ones keep the repo name.
+SNB_LIMIT=108
+[ "$(uname)" = "Darwin" ] && SNB_LIMIT=104
+
+MOCK_SNB=$(mktemp -d)
+cat > "$MOCK_SNB/zellij" <<'MOCK'
+#!/bin/bash
+echo "zellij $*"
+MOCK
+cat > "$MOCK_SNB/lazygit" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_SNB/zellij" "$MOCK_SNB/lazygit"
+
+SNB_HOME=$(mktemp -d)
+mkdir -p "$SNB_HOME/.zelligent"
+cp "$ZELLIGENT_DEFAULT_LAYOUT_SRC" "$SNB_HOME/.zelligent/layout.kdl"
+
+SNB_REPO_PARENT=$(mktemp -d)
+SNB_REPO="$SNB_REPO_PARENT/interview-coding-projects-with-a-very-long-name"
+git init -q -b main "$SNB_REPO" && git -C "$SNB_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+
+# A socket dir long enough that the 46-char repo name cannot fit on either
+# platform: budget = LIMIT - len(<dir>/contract_version_1) - 2.
+SNB_SOCK_BASE="$SNB_REPO_PARENT/$(printf 'x%.0s' $(seq 1 40))"
+mkdir -p "$SNB_SOCK_BASE"
+SNB_SOCK_DIR="$SNB_SOCK_BASE/contract_version_1"
+SNB_BUDGET=$(( SNB_LIMIT - ${#SNB_SOCK_DIR} - 2 ))
+
+snb_run() {
+  (cd "$SNB_REPO" && HOME="$SNB_HOME" ZELLIJ="" ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" \
+    ZELLIGENT_PLUGIN_SRC="$MOCK_SNB/zellij" PATH="$MOCK_SNB:$PATH" "$SCRIPT" 2>&1)
+}
+out_snb=$(snb_run)
+contains "long repo name: prints shortened-session note" "Note: using session name" "$out_snb"
+SNB_SESSION=$(printf '%s\n' "$out_snb" | grep -o -- "--session [^ ]*" | awk '{print $2}' | head -1)
+check "long repo name: session name is shortened" "false" \
+  "$([ "$SNB_SESSION" = "interview-coding-projects-with-a-very-long-name" ] && echo true || echo false)"
+check "long repo name: socket path fits the budget" "true" \
+  "$([ $(( ${#SNB_SOCK_DIR} + 1 + ${#SNB_SESSION} )) -lt "$SNB_LIMIT" ] && echo true || echo false)"
+contains "long repo name: shortened name keeps a readable prefix" "interview" "$SNB_SESSION"
+
+# Deterministic: a second run derives the identical session name (sessions
+# must be re-attachable across runs)
+out_snb2=$(snb_run)
+SNB_SESSION2=$(printf '%s\n' "$out_snb2" | grep -o -- "--session [^ ]*" | awk '{print $2}' | head -1)
+check "long repo name: derivation is deterministic" "$SNB_SESSION" "$SNB_SESSION2"
+
+# Distinct long names must not collide
+SNB_REPO_B="$SNB_REPO_PARENT/interview-coding-projects-with-a-very-long-nomen"
+git init -q -b main "$SNB_REPO_B" && git -C "$SNB_REPO_B" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+out_snb_b=$( (cd "$SNB_REPO_B" && HOME="$SNB_HOME" ZELLIJ="" ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" \
+  ZELLIGENT_PLUGIN_SRC="$MOCK_SNB/zellij" PATH="$MOCK_SNB:$PATH" "$SCRIPT" 2>&1) )
+SNB_SESSION_B=$(printf '%s\n' "$out_snb_b" | grep -o -- "--session [^ ]*" | awk '{print $2}' | head -1)
+check "distinct long repo names get distinct sessions" "false" \
+  "$([ "$SNB_SESSION" = "$SNB_SESSION_B" ] && echo true || echo false)"
+
+# Short repo names are untouched — no note, session name == repo name
+SNB_REPO_SHORT="$SNB_REPO_PARENT/tiny"
+git init -q -b main "$SNB_REPO_SHORT" && git -C "$SNB_REPO_SHORT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+out_short=$( (cd "$SNB_REPO_SHORT" && HOME="$SNB_HOME" ZELLIJ="" ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" \
+  ZELLIGENT_PLUGIN_SRC="$MOCK_SNB/zellij" PATH="$MOCK_SNB:$PATH" "$SCRIPT" 2>&1) )
+not_contains "short repo name: no shortened-session note" "Note: using session name" "$out_short"
+contains "short repo name: session keeps the repo name" "--session tiny" "$out_short"
+
+# Against the REAL zellij binary (when present): the full long name must
+# trip zellij's own validator under this socket dir, and the derived name
+# must pass it — this pins the budget math to the actual binary, so a future
+# zellij release changing the socket layout fails here instead of in the
+# field.
+if command -v zellij &>/dev/null; then
+  snb_real_rejected=$(ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" zellij \
+    --session interview-coding-projects-with-a-very-long-name action dump-layout 2>&1 || true)
+  contains "real zellij rejects the full long name" "session name must be less than" "$snb_real_rejected"
+  snb_real_accepted=$(ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" zellij \
+    --session "$SNB_SESSION" action dump-layout 2>&1 || true)
+  not_contains "real zellij accepts the derived name" "session name must be less than" "$snb_real_accepted"
+else
+  echo "  ⚠️  Zellij not found, skipping real-binary session-name validation"
+fi
+
+rm -rf "$MOCK_SNB" "$SNB_HOME" "$SNB_REPO_PARENT"
+
 # ── Doctor subcommand ────────────────────────────────────────────────────────
 echo "Doctor subcommand:"
 
