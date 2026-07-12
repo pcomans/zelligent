@@ -1084,6 +1084,20 @@ pipe_invalidate() {
   fi
 }
 
+# Resolve the on-disk worktree directory that has BRANCH checked out by
+# asking git — never by guessing "$WORKTREES_DIR/$branch". A worktree's
+# directory name and its branch can diverge: the branch gets renamed inside
+# the worktree (agents do this routinely — issue #174), or the worktree was
+# created out-of-band with an explicit path. Prints nothing when the branch
+# has no worktree. Used by both `spawn` (reuse instead of a doomed
+# `git worktree add`) and `remove`.
+worktree_path_for_branch() {
+  git -C "$REPO_ROOT" worktree list --porcelain | awk -v branch="branch refs/heads/$1" '
+    /^worktree / { path = substr($0, 10) }
+    $0 == branch { print path; exit }
+  '
+}
+
 # Handle nuke subcommand — delete the repo's Zellij session so it won't resurrect
 if [ "$1" = "nuke" ]; then
   if [ -n "$ZELLIJ" ]; then
@@ -1284,10 +1298,7 @@ if [ "$1" = "remove" ]; then
   BRANCH_NAME=$1
   SESSION_NAME="${BRANCH_NAME//\//-}"
   SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -cd 'a-zA-Z0-9_-')
-  WORKTREE_PATH=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v branch="branch refs/heads/$BRANCH_NAME" '
-    /^worktree / { path = substr($0, 10) }
-    $0 == branch { print path; exit }
-  ')
+  WORKTREE_PATH=$(worktree_path_for_branch "$BRANCH_NAME")
   if [ -z "$WORKTREE_PATH" ] || [ ! -d "$WORKTREE_PATH" ]; then
     echo "Error: no worktree found for branch '$BRANCH_NAME'." >&2
     exit 1
@@ -1433,8 +1444,18 @@ fi
 
 NEW_WORKTREE=false
 
-# Check if the worktree directory already exists
-if [ -d "$WORKTREE_PATH" ]; then
+# Reuse an existing worktree for this branch wherever it lives (issue #174):
+# the branch may be checked out in a directory whose name no longer matches
+# it (renamed branch, out-of-band worktree), in which case the canonical-path
+# check below misses and `git worktree add` fatals with "already used by
+# worktree at …". Same resolution the remove path uses.
+EXISTING_WORKTREE=$(worktree_path_for_branch "$BRANCH_NAME")
+if [ -n "$EXISTING_WORKTREE" ] && [ -d "$EXISTING_WORKTREE" ]; then
+  WORKTREE_PATH="$EXISTING_WORKTREE"
+  echo "⚠️  Worktree already exists, opening new tab..."
+# Fall back to the canonical directory (covers detached-HEAD worktrees,
+# which have no branch line to resolve by)
+elif [ -d "$WORKTREE_PATH" ]; then
   echo "⚠️  Worktree already exists, opening new tab..."
 else
   NEW_WORKTREE=true

@@ -196,6 +196,29 @@ git -C "$REPO_ROOT" branch -D test-layout-branch &>/dev/null || true
 contains "existing worktree: uses direct command" 'exec claude' "$out_existing"
 excludes "existing worktree: no setup preamble"   'setup.sh'         "$out_existing"
 
+# Test (#174): branch checked out in a worktree whose DIRECTORY name differs
+# from the branch (renamed branch / out-of-band worktree). Spawn must resolve
+# the existing worktree by branch and reuse it — the old canonical-path check
+# missed it and `git worktree add` fataled with "already used by worktree at".
+register_cleanup_worktree "$HOME/.zelligent/worktrees/$REPO_NAME/original-dir-name" renamed-dir-branch
+git -C "$REPO_ROOT" worktree add -b renamed-dir-branch \
+  "$HOME/.zelligent/worktrees/$REPO_NAME/original-dir-name" HEAD &>/dev/null
+out_renamed=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
+  "$SCRIPT" spawn renamed-dir-branch claude 2>&1); code_renamed=$?
+
+check "renamed-branch worktree: spawn exits 0" "0" "$code_renamed"
+contains "renamed-branch worktree: reuses existing worktree" "Worktree already exists" "$out_renamed"
+contains "renamed-branch worktree: cwd is the real worktree dir" \
+  "cwd=\"$HOME/.zelligent/worktrees/$REPO_NAME/original-dir-name\"" "$out_renamed"
+not_contains "renamed-branch worktree: no git fatal" "already used by worktree" "$out_renamed"
+check "renamed-branch worktree: no duplicate dir created" "false" \
+  "$([ -d "$HOME/.zelligent/worktrees/$REPO_NAME/renamed-dir-branch" ] && echo true || echo false)"
+excludes "renamed-branch worktree: no setup preamble (existing worktree)" 'setup.sh' "$out_renamed"
+
+git -C "$REPO_ROOT" worktree remove --force \
+  "$HOME/.zelligent/worktrees/$REPO_NAME/original-dir-name" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D renamed-dir-branch &>/dev/null || true
+
 # Test: new worktree WITHOUT setup.sh should use direct command
 SETUP_SH="$REPO_ROOT/.zelligent/setup.sh"
 SETUP_SH_BAK="$SETUP_SH.bak"
