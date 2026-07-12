@@ -1061,6 +1061,12 @@ REPO_NAME=$(basename "$REPO_ROOT")
 # over budget — distinct repos keep distinct sessions across runs. Only the
 # SESSION identity shortens; tab names and display strings keep the full
 # repo name.
+#
+# Deliberate non-goal: startup does NOT discover or migrate a session still
+# running under the full repo name. Such a session can only exist when the
+# budget shrank after it was created (changed $TMPDIR/$ZELLIJ_SOCKET_DIR) —
+# pre-#179, zellij rejected over-budget names at creation. `zelligent nuke`
+# sweeps both names.
 zellij_socket_dir() {
   local base
   if [ -n "${ZELLIJ_SOCKET_DIR:-}" ]; then
@@ -1097,7 +1103,16 @@ derive_session_name() {
     printf '%s' "$name"
     return
   fi
-  printf '%s-%s' "${name:0:$keep}" "$hash"
+  # The prefix is truncated at a BYTE offset, which could split a multibyte
+  # character and hand zellij invalid UTF-8 — so build it from the name's
+  # ASCII-safe characters only. The hash is computed over the FULL original
+  # name (above), so uniqueness is unaffected.
+  local prefix
+  prefix=$(printf '%s' "$name" | tr -cd 'A-Za-z0-9._-')
+  if [ -z "$prefix" ]; then
+    prefix="session"
+  fi
+  printf '%s-%s' "${prefix:0:$keep}" "$hash"
 }
 
 REPO_SESSION=$(derive_session_name "$REPO_NAME")
@@ -1180,13 +1195,16 @@ if [ "$1" = "nuke" ]; then
   # version string, 0.44.x uses contract_version_1, and it can drift again
   # (issue #179 side finding: guessing the dir from `zellij --version`
   # silently no-ops whenever the layout doesn't match). Instead of guessing,
-  # glob the REAL sockets on disk: every `<sock_base>/*/<session>` that
-  # exists is a live or stale socket for this session, whatever zellij
-  # version created it.
+  # enumerate the layout DIRECTORIES that exist on disk and construct
+  # <layout>/<session> candidates from them. The dirs are what persists:
+  # the socket FILE itself may already be gone — `delete-session --force`
+  # above removes it while a stale server can survive — so requiring the
+  # socket to exist would skip exactly the processes this sweep is for.
   SOCK_PARENT=$(dirname "$(zellij_socket_dir)")
   for name_candidate in "$REPO_SESSION" "$REPO_NAME"; do
-    for socket_path in "$SOCK_PARENT"/*/"$name_candidate"; do
-      [ -e "$socket_path" ] || continue
+    for layout_dir in "$SOCK_PARENT"/*/; do
+      [ -d "$layout_dir" ] || continue
+      socket_path="${layout_dir%/}/$name_candidate"
       # Force-kill server processes for this session's socket.
       # SIGTERM is often ignored by Zellij servers, so use SIGKILL.
       # Use grep -F instead of pkill -f to avoid regex metacharacter issues.
@@ -1197,11 +1215,15 @@ if [ "$1" = "nuke" ]; then
     done
     [ "$REPO_SESSION" = "$REPO_NAME" ] && break
   done
-  # Kill client processes attached to this session
-  client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $REPO_SESSION" | grep -v grep | awk '{print $1}' || true)
-  if [ -n "$client_pids" ]; then
-    kill -9 $client_pids 2>/dev/null || true
-  fi
+  # Kill client processes attached to this session (both name candidates:
+  # a client could still be attached to a legacy full-name session)
+  for name_candidate in "$REPO_SESSION" "$REPO_NAME"; do
+    client_pids=$(ps -eo pid=,args= | grep -F "zellij attach $name_candidate" | grep -v grep | awk '{print $1}' || true)
+    if [ -n "$client_pids" ]; then
+      kill -9 $client_pids 2>/dev/null || true
+    fi
+    [ "$REPO_SESSION" = "$REPO_NAME" ] && break
+  done
   # Wait for processes to exit and finish any final serialization
   sleep 1
   # Remove the resurrection cache so the session won't come back on next attach.

@@ -983,7 +983,7 @@ git init -q -b main "$SNB_REPO" && git -C "$SNB_REPO" -c user.email=t@t -c user.
 # the pathological no-budget fallback and the test fails for the wrong
 # reason. len(base)=63 → len(sock_dir)=82 → budget 20 (macOS) / 24 (Linux).
 SNB_SOCK_ROOT=$(mktemp -d /tmp/zsnb-XXXXXX)   # fixed 16-byte length, unique
-SNB_SOCK_BASE="$SNB_SOCK_ROOT/$(printf 'x%.0s' $(seq 1 $(( 62 - ${#SNB_SOCK_ROOT} ))))"
+SNB_SOCK_BASE="$SNB_SOCK_ROOT/$(perl -e "print 'x' x (62 - length('$SNB_SOCK_ROOT'))")"
 mkdir -p "$SNB_SOCK_BASE"
 SNB_SOCK_DIR="$SNB_SOCK_BASE/contract_version_1"
 SNB_BUDGET=$(( SNB_LIMIT - ${#SNB_SOCK_DIR} - 2 ))
@@ -1020,7 +1020,7 @@ check "distinct long repo names get distinct sessions" "false" \
 
 # Budget boundaries: a name of EXACTLY budget length is kept verbatim; one
 # byte over is shortened (guards the strict-less-than off-by-one)
-SNB_NAME_AT=$(printf 'b%.0s' $(seq 1 "$SNB_BUDGET"))
+SNB_NAME_AT=$(perl -e "print 'b' x $SNB_BUDGET")
 SNB_REPO_AT="$SNB_REPO_PARENT/$SNB_NAME_AT"
 git init -q -b main "$SNB_REPO_AT" && git -C "$SNB_REPO_AT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 out_at=$( (cd "$SNB_REPO_AT" && HOME="$SNB_HOME" ZELLIJ="" ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" \
@@ -1037,15 +1037,22 @@ contains "one byte over budget: shortened" "Note: using session name" "$out_over
 
 # Multibyte repo name: the budget is BYTES (sun_path), not characters — a
 # 24-char UTF-8 name can be 48 bytes. The derived session's socket path must
-# fit in bytes (wc -c), which only holds with LC_ALL=C length semantics.
-SNB_NAME_UTF8=$(printf 'é%.0s' $(seq 1 24))
+# fit in bytes (wc -c), which only holds with LC_ALL=C length semantics —
+# and the derived name must be pure ASCII: truncating raw bytes could split
+# a multibyte character and hand zellij invalid UTF-8. Force a UTF-8 locale
+# on the invocation so the test bites even when the suite runs under LC_ALL=C
+# (if the locale is unavailable bash falls back to C, which is byte-exact
+# anyway — the assertions hold either way).
+SNB_NAME_UTF8=$(perl -e "binmode(STDOUT); print \"\xc3\xa9\" x 24")
 SNB_REPO_UTF8="$SNB_REPO_PARENT/$SNB_NAME_UTF8"
 git init -q -b main "$SNB_REPO_UTF8" && git -C "$SNB_REPO_UTF8" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-out_utf8=$( (cd "$SNB_REPO_UTF8" && HOME="$SNB_HOME" ZELLIJ="" ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" \
+out_utf8=$( (cd "$SNB_REPO_UTF8" && HOME="$SNB_HOME" ZELLIJ="" LC_ALL=en_US.UTF-8 ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" \
   ZELLIGENT_PLUGIN_SRC="$MOCK_SNB/zellij" PATH="$MOCK_SNB:$PATH" "$SCRIPT" 2>&1) )
 SNB_SESSION_UTF8=$(printf '%s\n' "$out_utf8" | grep -o -- "--session [^ ]*" | awk '{print $2}' | head -1)
 check "multibyte repo name: socket path fits the BYTE budget" "true" \
   "$([ "$(printf '%s' "$SNB_SOCK_DIR/$SNB_SESSION_UTF8" | wc -c)" -lt "$SNB_LIMIT" ] && echo true || echo false)"
+check "multibyte repo name: derived session name is pure ASCII" "0" \
+  "$(printf '%s' "$SNB_SESSION_UTF8" | LC_ALL=C grep -c '[^A-Za-z0-9._-]' || true)"
 
 # Short repo names are untouched — no note, session name == repo name
 SNB_REPO_SHORT="$SNB_REPO_PARENT/tiny"
@@ -1067,6 +1074,10 @@ if command -v zellij &>/dev/null; then
   snb_real_accepted=$(ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" zellij \
     --session "$SNB_SESSION" action dump-layout 2>&1 || true)
   not_contains "real zellij accepts the derived name" "session name must be less than" "$snb_real_accepted"
+  snb_real_utf8=$(ZELLIJ_SOCKET_DIR="$SNB_SOCK_BASE" zellij \
+    --session "$SNB_SESSION_UTF8" action dump-layout 2>&1 || true)
+  not_contains "real zellij accepts the multibyte-derived name" "session name must be less than" "$snb_real_utf8"
+  not_contains "real zellij sees valid unicode in the derived name" "invalid" "$snb_real_utf8"
 else
   echo "  ⚠️  Zellij not found, skipping real-binary session-name validation"
 fi
