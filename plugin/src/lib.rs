@@ -62,6 +62,16 @@ pub const CMD_STATUS_REPLAY_BROADCAST: &str = "status_replay_broadcast";
 /// spawn/remove completion. See #140/#138.
 pub const PIPE_INVALIDATE: &str = "zelligent-invalidate";
 
+/// The optional `--args` key `PIPE_INVALIDATE` carries when it was fired by
+/// a completed removal (#194). Its value is the removed branch name; every
+/// instance that receives the broadcast surfaces the same `Removed
+/// '<branch>'` completion cue via `handle_pipe`, closing the two silent
+/// gaps a lone `handle_remove_result` status can't reach: the instance that
+/// dies with its own tab, and CLI-side `zelligent remove` run outside
+/// Zellij's plugin path entirely. Absent for spawn broadcasts, where the
+/// new tab you land in already makes success self-evident.
+pub const PIPE_INVALIDATE_REMOVED_ARG: &str = "removed";
+
 /// Context key carrying the invalidation generation a `list-worktrees`
 /// refresh was launched under. Stamped by `fire_list_worktrees`, echoed
 /// back in `Event::RunCommandResult`, and compared against
@@ -717,19 +727,31 @@ impl State {
     /// (it's how the zelligent-status hooks already reach every instance).
     /// Best-effort: the result is ignored (see CMD_INVALIDATE_BROADCAST in
     /// `update`), and without a session name we skip silently.
-    fn fire_invalidate_broadcast(&self) {
+    ///
+    /// `removed_branch`, when set, rides along as `removed=<branch>` (#194):
+    /// every instance that receives the broadcast — including the one this
+    /// tab lands on after closing its own tab, which never sees this
+    /// instance's own `Removed '<branch>'` status — shows the same
+    /// completion cue via `handle_pipe`'s `PIPE_INVALIDATE` arm. Spawn never
+    /// passes one: spawning lands you in the new tab, so the cue is
+    /// self-evident there.
+    fn fire_invalidate_broadcast(&self, removed_branch: Option<&str>) {
         if let Some(session) = &self.session_name {
-            run_command(
-                &[
-                    "zellij",
-                    "--session",
-                    session,
-                    "pipe",
-                    "--name",
-                    PIPE_INVALIDATE,
-                ],
-                Self::ctx(CMD_INVALIDATE_BROADCAST),
-            );
+            let mut args = vec![
+                "zellij",
+                "--session",
+                session,
+                "pipe",
+                "--name",
+                PIPE_INVALIDATE,
+            ];
+            let removed_arg;
+            if let Some(branch) = removed_branch {
+                removed_arg = format!("{PIPE_INVALIDATE_REMOVED_ARG}={branch}");
+                args.push("--args");
+                args.push(&removed_arg);
+            }
+            run_command(&args, Self::ctx(CMD_INVALIDATE_BROADCAST));
         }
     }
 
@@ -1700,6 +1722,19 @@ impl State {
         if msg.name == PIPE_INVALIDATE {
             self.cache_dirty = true;
             self.invalidate_generation += 1;
+            // #194: a removal broadcasts the branch it removed alongside
+            // the invalidation. Surface the same completion cue this
+            // instance would show if it had initiated the removal itself —
+            // covers the tab that died with its own removal and any
+            // instance reached only via a CLI-side `zelligent remove`.
+            // Split like every other `--args` value (see `parse_statuses`,
+            // the live `zelligent-status` arm): no parser to build, the
+            // host has already split `--args` into `msg.args`.
+            if let Some(branch) = msg.args.get(PIPE_INVALIDATE_REMOVED_ARG) {
+                if !branch.is_empty() {
+                    self.set_status(format!("Removed '{branch}'"), false);
+                }
+            }
             return Action::Refresh;
         }
         // "Focus the sidebar" (Alt+z keybind — see PIPE_FOCUS). The pipe
@@ -2129,15 +2164,22 @@ impl ZellijPlugin for State {
                         // Side effect in the shell, not the pure handler:
                         // tell sibling instances (hidden ones included —
                         // only a pipe reaches them) their caches are stale.
-                        // See #140/#138 and `fire_invalidate_broadcast`.
+                        // See #140/#138 and `fire_invalidate_broadcast`. No
+                        // removed-branch arg for spawn — see that method's
+                        // doc comment.
                         if exit_code == Some(0) {
-                            self.fire_invalidate_broadcast();
+                            self.fire_invalidate_broadcast(None);
                         }
                         self.handle_spawn_result(exit_code, &stderr, &context)
                     }
                     Some(CMD_REMOVE) => {
                         if exit_code == Some(0) {
-                            self.fire_invalidate_broadcast();
+                            // Carry the removed branch (#194) so every
+                            // sibling instance — including the one this tab
+                            // lands on after its own tab closes — surfaces
+                            // the same completion cue.
+                            let branch = context.get("branch").map(|s| s.as_str());
+                            self.fire_invalidate_broadcast(branch);
                         }
                         self.handle_remove_result(exit_code, &stderr, &context)
                     }
@@ -3853,6 +3895,55 @@ mod tests {
              the Refresh result, so the bit must survive for the TabUpdate \
              retry"
         );
+        assert_eq!(
+            s.status_message, "",
+            "no removed= arg means no status change, same as before #194"
+        );
+    }
+
+    // --- #194: removal completion cue riding the invalidate broadcast ---
+
+    #[test]
+    fn invalidate_pipe_with_removed_arg_sets_info_status_and_still_refreshes() {
+        // Every instance that receives the broadcast — not just the one
+        // that initiated the removal — must show the same completion cue,
+        // stamped info-tier (TTL, not persistent) exactly like a
+        // self-initiated `handle_remove_result` success.
+        let mut s = State::default();
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[("removed", "feat-a")]));
+        assert_eq!(action, Action::Refresh, "refresh behavior is unchanged");
+        assert_eq!(s.status_message, "Removed 'feat-a'");
+        assert!(!s.status_is_error, "success cue is info tier, not an error");
+        assert!(
+            s.status_message_set_at.is_some(),
+            "info tier stamps a TTL, unlike the persistent error tier"
+        );
+        assert!(s.status_timer_needs_arming);
+        assert!(s.cache_dirty);
+    }
+
+    #[test]
+    fn invalidate_pipe_without_removed_arg_leaves_status_untouched() {
+        // A spawn-triggered invalidate (no removed= arg) must not touch the
+        // status message at all — covered again explicitly here since it's
+        // the load-bearing "unchanged" half of #194.
+        let mut s = State::default();
+        s.set_status("Spawned 'feat-b'", false);
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert_eq!(action, Action::Refresh);
+        assert_eq!(s.status_message, "Spawned 'feat-b'");
+    }
+
+    #[test]
+    fn invalidate_pipe_with_empty_removed_arg_is_ignored() {
+        // A malformed/empty payload must not surface a blank "Removed ''"
+        // cue — the refresh still fires (invalidation itself is unaffected
+        // by a bad arg), but no status change happens.
+        let mut s = State::default();
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[("removed", "")]));
+        assert_eq!(action, Action::Refresh);
+        assert_eq!(s.status_message, "");
+        assert!(s.cache_dirty);
     }
 
     #[test]
