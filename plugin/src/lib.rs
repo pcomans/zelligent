@@ -180,6 +180,16 @@ pub struct State {
     pub branches: Vec<String>,
     pub filtered_branches: Vec<String>,
     pub selected_index: usize,
+    /// Cursor within `filtered_branches` while `mode` is `SelectBranch`.
+    /// Deliberately separate from `selected_index`: the picker is a
+    /// transient overlay on top of browse, and entering/navigating/leaving
+    /// it must never disturb the browse cursor the user left behind. Esc
+    /// simply drops back to browse with `selected_index` untouched; Enter
+    /// hands off to `spawn_or_switch`, and the #151 active-tab re-sync moves
+    /// `selected_index` once the switch/spawn actually lands (see
+    /// `last_active_tab`) — a failed spawn correctly leaves it where it was.
+    /// See #184.
+    pub branch_picker_index: usize,
     pub input_buffer: String,
     pub agent_cmd: String,
     pub status_message: String,
@@ -1450,7 +1460,7 @@ impl State {
                 BareKey::Char('n') => {
                     self.filtered_branches = self.branches.clone();
                     self.mode = Mode::SelectBranch;
-                    self.selected_index = 0;
+                    self.branch_picker_index = 0;
                 }
                 BareKey::Char('i') => {
                     self.mode = Mode::InputBranch;
@@ -1480,22 +1490,23 @@ impl State {
         if key.has_no_modifiers() {
             match key.bare_key {
                 BareKey::Char('j') | BareKey::Down => {
-                    self.selected_index =
-                        wrap_navigate(self.selected_index, self.filtered_branches.len(), 1);
+                    self.branch_picker_index =
+                        wrap_navigate(self.branch_picker_index, self.filtered_branches.len(), 1);
                 }
                 BareKey::Char('k') | BareKey::Up => {
-                    self.selected_index =
-                        wrap_navigate(self.selected_index, self.filtered_branches.len(), -1);
+                    self.branch_picker_index =
+                        wrap_navigate(self.branch_picker_index, self.filtered_branches.len(), -1);
                 }
                 BareKey::Enter => {
-                    if let Some(branch) = self.filtered_branches.get(self.selected_index).cloned() {
+                    if let Some(branch) =
+                        self.filtered_branches.get(self.branch_picker_index).cloned()
+                    {
                         self.mode = Mode::BrowseWorktrees;
                         return self.spawn_or_switch(branch);
                     }
                 }
                 BareKey::Esc => {
                     self.mode = Mode::BrowseWorktrees;
-                    self.selected_index = 0;
                 }
                 _ => {}
             }
@@ -1520,7 +1531,6 @@ impl State {
             }
             BareKey::Esc if no_mod => {
                 self.mode = Mode::BrowseWorktrees;
-                self.selected_index = 0;
                 self.input_buffer.clear();
             }
             BareKey::Backspace if no_mod => {
@@ -1872,7 +1882,7 @@ impl State {
             }
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_branch_list(w, &self.filtered_branches, self.selected_index, rows);
+                ui::render_branch_list(w, &self.filtered_branches, self.branch_picker_index, rows);
                 let list_height = if self.filtered_branches.is_empty() {
                     2
                 } else {
@@ -2413,11 +2423,14 @@ mod tests {
 
     #[test]
     fn browse_n_switches_to_select_branch() {
+        // Entering the picker must not disturb the browse cursor (#184):
+        // `selected_index` stays put, only `branch_picker_index` resets.
         let mut s = state_with_sidebar();
         s.selected_index = 2;
         s.handle_key_browse(&key(BareKey::Char('n')));
         assert_eq!(s.mode, Mode::SelectBranch);
-        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.selected_index, 2);
+        assert_eq!(s.branch_picker_index, 0);
         assert_eq!(s.filtered_branches, s.branches);
     }
 
@@ -2720,12 +2733,27 @@ mod tests {
         let mut s = state_with_worktrees();
         s.mode = Mode::SelectBranch;
         s.filtered_branches = s.branches.clone();
-        s.selected_index = 0;
+        s.branch_picker_index = 0;
 
         s.handle_key_select_branch(&key(BareKey::Char('j')));
-        assert_eq!(s.selected_index, 1);
+        assert_eq!(s.branch_picker_index, 1);
         s.handle_key_select_branch(&key(BareKey::Char('k')));
-        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.branch_picker_index, 0);
+    }
+
+    #[test]
+    fn select_branch_jk_does_not_touch_browse_cursor() {
+        // Picker navigation must not leak into the browse `selected_index`
+        // (#184) — only `branch_picker_index` moves.
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+        s.selected_index = 2;
+        s.branch_picker_index = 0;
+
+        s.handle_key_select_branch(&key(BareKey::Char('j')));
+        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        assert_eq!(s.selected_index, 2);
     }
 
     #[test]
@@ -2733,13 +2761,13 @@ mod tests {
         let mut s = state_with_worktrees();
         s.mode = Mode::SelectBranch;
         s.filtered_branches = vec!["a".into(), "b".into()];
-        s.selected_index = 1;
+        s.branch_picker_index = 1;
 
         s.handle_key_select_branch(&key(BareKey::Char('j')));
-        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.branch_picker_index, 0);
 
         s.handle_key_select_branch(&key(BareKey::Char('k')));
-        assert_eq!(s.selected_index, 1);
+        assert_eq!(s.branch_picker_index, 1);
     }
 
     #[test]
@@ -2747,7 +2775,7 @@ mod tests {
         let mut s = state_with_worktrees();
         s.mode = Mode::SelectBranch;
         s.filtered_branches = vec!["dev".into(), "main".into()];
-        s.selected_index = 0;
+        s.branch_picker_index = 0;
 
         let action = s.handle_key_select_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::Spawn("dev".into()));
@@ -2760,7 +2788,7 @@ mod tests {
         s.mode = Mode::SelectBranch;
         s.filtered_branches = vec!["feat/cool".into(), "main".into()];
         s.tabs = vec![make_tab("feat-cool", false)];
-        s.selected_index = 0;
+        s.branch_picker_index = 0;
 
         let action = s.handle_key_select_branch(&key(BareKey::Enter));
         assert_eq!(action, Action::SwitchToTab("feat-cool".into()));
@@ -2768,13 +2796,31 @@ mod tests {
     }
 
     #[test]
+    fn select_branch_enter_leaves_browse_cursor_unchanged() {
+        // Enter hands off to spawn_or_switch and returns to browse; the
+        // #151 active-tab re-sync (not this handler) is what eventually
+        // moves `selected_index` once the switch/spawn lands (#184).
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = vec!["dev".into(), "main".into()];
+        s.selected_index = 2;
+        s.branch_picker_index = 1;
+
+        s.handle_key_select_branch(&key(BareKey::Enter));
+        assert_eq!(s.selected_index, 2);
+    }
+
+    #[test]
     fn select_branch_esc_goes_back() {
+        // Esc must restore the browse cursor exactly where the user left
+        // it, not reset it to 0 (#184).
         let mut s = state_with_worktrees();
         s.mode = Mode::SelectBranch;
         s.selected_index = 2;
+        s.branch_picker_index = 1;
         s.handle_key_select_branch(&key(BareKey::Esc));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
-        assert_eq!(s.selected_index, 0);
+        assert_eq!(s.selected_index, 2);
     }
 
     // --- InputBranch key handler tests ---
@@ -2853,13 +2899,17 @@ mod tests {
 
     #[test]
     fn input_branch_esc_goes_back() {
+        // 'i' never touches `selected_index`, so its Esc must not either
+        // (#184) — it used to reset to 0 for no reason.
         let mut s = State {
             mode: Mode::InputBranch,
             input_buffer: "wip".into(),
+            selected_index: 2,
             ..Default::default()
         };
         s.handle_key_input_branch(&key(BareKey::Esc));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(s.selected_index, 2);
     }
 
     // --- Confirming key handler tests ---
