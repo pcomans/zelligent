@@ -67,12 +67,12 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 - Expected: `scratch` row (`user tab`) shows NO glyph even though a tab named scratch exists — from code, status only renders for rows with a matched branch. Record what actually happens; a glyph on the user row = FAIL.
 
 ## Test 10: `n` enters SelectBranch mode; clicks are dead there
-- Action: focus the sidebar by clicking a no-op line (footer or header — an item-row click would activate that row), press `n`; capture. Then left-click on one of the listed branch rows; capture. Wheel-down; capture.
-- Expected: after `n`: a branch-selection list renders with footer `↑/k up  ↓/j down  Enter create  Esc back` (or the narrow variant); the click does NOT change the highlighted branch and does NOT activate anything; the wheel does NOT move the selection (mouse is a no-op in this mode). Any mouse effect = FAIL (mode leak).
+- Action: focus the sidebar by clicking a no-op line (footer or header — an item-row click would activate that row); move ▌ to the `feature-b` row with `j`/`k` (keyboard selection does not activate); press `n`; capture. Then left-click on one of the listed branch rows; capture. Wheel-down; capture.
+- Expected: after `n`: a branch-selection list renders with footer `↑/k up  ↓/j down  Enter create  Esc back` (or the narrow variant), with the picker cursor on the FIRST branch row — the picker has its own cursor and always opens at the top, regardless of the browse selection (#184); the click does NOT change the highlighted branch and does NOT activate anything; the wheel does NOT move the selection (mouse is a no-op in this mode). Any mouse effect = FAIL (mode leak).
 
-## Test 11: Esc returns to browse with cursor reset
+## Test 11: Esc returns to browse with the cursor where it was
 - Action: press Esc; capture.
-- Expected: browse list back; ▌ on the FIRST row (`local`); all rows intact.
+- Expected: browse list back; ▌ still on `feature-b` — exactly where Test 10 left it before entering the picker; leaving the picker never moves the browse selection (#184); all rows intact.
 
 ## Test 12: `i` enters InputBranch; typing renders; clicks are dead
 - Action: press `i`; type `my-new-branch`; capture. Left-click a row line; capture. Press Backspace twice; capture.
