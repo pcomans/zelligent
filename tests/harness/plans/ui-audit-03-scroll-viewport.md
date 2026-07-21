@@ -21,7 +21,7 @@ Same as ui-audit-01, with `ARCHIVE=/tmp/zelligent-ui-run/03-scroll`. Plain+ANSI 
 
 Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, wheel `\033[<64/65;COL;ROWM`, COL=10, via `tmux send-keys -l "$(printf ...)"`.
 
-Expected item list (11 items, in order): `local`, `wt-01`…`wt-08`, `agent-mouse-test`, `feature-very-long-branch-name-for-truncation-check`.
+Expected item list (11 items, in order): `local`, `agent-mouse-test`, `feature-very-long-branch-name-for-truncation-check`, `wt-01`…`wt-08`. Ordering rule (from code): `git worktree list --porcelain` lists linked worktrees sorted alphabetically by path — here, by dirname — and the CLI (`list-worktrees`) and plugin (`recompute_sidebar_items`) preserve that order verbatim, with `local` prepended. The LAST item is `wt-08`.
 
 Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane's height; the selected item is ALWAYS within the visible window; `start = selected - max_items + 1` once selected ≥ max_items.
 
@@ -29,7 +29,7 @@ Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Verify "a tab named X is active" via the MAIN pane's frame title and the sidebar's bold-cyan row; corroborate via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only only).
-3. MAPPING CONTRACT (the run-01 subtitle-offset and missing-header bugs are FIXED — #135/#136; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a title line AND its subtitle line both map to the SAME item; blank-separator, header, and footer clicks are no-ops; the in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render when the pane is tall enough (#156, confirmed current — see the render snapshots and #195). Also: a single click on an item row selects AND activates it (#137) — every mapping probe below that hits an item row will spawn or switch a tab; wait ~8s and expect the activation. Tests 7/8/9 verify the mapping is CORRECT in the SCROLLED state (expected delta = 0); still record the exact clicked-row → selected-row mapping at each probe so any regression (fixed one-line offset, or one that compounds with viewport start) is caught. After each click-driven spawn/switch you land in a NEW tab whose sidebar is unfocused — its first click is the focus claim (#189, eaten with zero state change); count from the first click the plugin receives.
+3. MAPPING CONTRACT (the run-01 subtitle-offset and missing-header bugs are FIXED — #135/#136; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a title line AND its subtitle line both map to the SAME item; blank-separator, header, and footer clicks are no-ops; the in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render when the pane is tall enough (#156, confirmed current — see the render snapshots and #195). Also: a single click on an item row selects AND activates it (#137) — every mapping probe below that hits an item row will spawn or switch a tab; wait ~8s and expect the activation. Tests 7/8/9 verify the mapping is CORRECT in the SCROLLED state (expected delta = 0); still record the exact clicked-row → selected-row mapping at each probe so any regression (fixed one-line offset, or one that compounds with viewport start) is caught. After each click-driven spawn/switch you land in a NEW tab whose sidebar is unfocused — its first click is the focus claim (#189, eaten with zero state change); count from the first click the plugin receives. This ALSO applies to the first-ever click a sidebar pane receives: wheel events do NOT establish click-focus, so even after the wheel-driven navigation of Tests 2–6 the first click is still the focus claim.
 4. The ▌ gutter renders on BOTH lines of the selected item — correct behavior, not a finding.
 
 ## Test 1: Startup — partial list, no corruption
@@ -49,12 +49,12 @@ Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane
 - Expected: at every step the ▌ row is on-screen; once selection exceeds the visible count the top rows scroll away and the list window slides; items always appear as complete 2-line pairs (never a title without its subtitle at the window edges); header and footer never scroll away.
 
 ## Test 5: Wrap-around at bottom jumps viewport to top
-- Action: with ▌ on the LAST item, wheel-down once.
+- Action: with ▌ on the LAST item (`wt-08`), wheel-down once.
 - Expected: ▌ on `local`, viewport back at the top of the list.
 
 ## Test 6: Wrap-around at top jumps viewport to bottom
 - Action: wheel-up once from `local`.
-- Expected: ▌ on the long-name item (last), viewport shows the tail of the list.
+- Expected: ▌ on `wt-08` (the last item), viewport shows the tail of the list.
 
 ## Test 7: CLICK MAPPING WITH SCROLLED VIEWPORT — the critical check (title line)
 - Action: viewport is now scrolled (start > 0 from Test 6). Capture; pick a visible row in the MIDDLE of the window that is NOT selected, e.g. `wt-06` (use whatever is visible); left-click its TITLE line; wait 8s (the click also activates — spawn, since detached).

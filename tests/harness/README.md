@@ -133,7 +133,9 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   trust coordinates written in a plan.
 - **The focus-claim click**: a sidebar pane that is not click-focused eats
   exactly one click (Zellij's click-to-focus), with zero state change. This
-  recurs after EVERY cross-tab landing, not just at startup. Count clicks from
+  applies to the FIRST-EVER click a pane receives — wheel events do NOT
+  establish click-focus, so wheeling first doesn't save you — and it recurs
+  after EVERY cross-tab landing, not just at startup. Count clicks from
   the first one the plugin receives.
 - **Keyboard focus follows the new tab's main pane** after a click-driven
   spawn/switch. Re-click the sidebar once before sending it keys, or the keys
