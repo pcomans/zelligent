@@ -14,15 +14,15 @@ to send wheel and left-click events into the `view` window.
 
 ## Test 1: Startup shows the seeded sidebar rows
 - Action: Wait for the `launch: zelligent` command to finish rendering
-- Expected: The sidebar shows the startup row `zelligent-test-repo` plus rows for `feature-a`, `feature-b`, and `feature-c`
+- Expected: The sidebar shows the startup row titled `local` (subtitle `current repo`) plus rows for `feature-a`, `feature-b`, and `feature-c`. (The startup row's label may change again when #195 lands — this plan asserts what renders today.)
 
 ## Test 2: Wheel-down moves selection to the next row
 - Action: Send a wheel-down mouse event to the sidebar pane. Scroll events are pane-wide, so any in-sidebar coordinate is fine; for example, column 10, row 5
-- Expected: The selected row moves from the startup row `zelligent-test-repo` to `feature-a`
+- Expected: The selected row moves from the startup row `local` to `feature-a`
 
 ## Test 3: Wheel-up moves selection back
 - Action: Send a wheel-up mouse event inside the sidebar content area
-- Expected: The selected row returns to the startup row `zelligent-test-repo`
+- Expected: The selected row returns to the startup row `local`
 
 ## Test 4: A received click selects AND activates a worktree row (#137)
 - Action: Left-click on the `feature-b` title line in the sidebar. In a standard 220x60 harness capture this is around column 10, row 8 (row 9 is its `branch: feature-b` subtitle); always confirm against the current capture before clicking. (If the sidebar pane is not focused, Zellij eats one extra click as the focus claim — count clicks from the first one the plugin receives.)

@@ -133,7 +133,9 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   trust coordinates written in a plan.
 - **The focus-claim click**: a sidebar pane that is not click-focused eats
   exactly one click (Zellij's click-to-focus), with zero state change. This
-  recurs after EVERY cross-tab landing, not just at startup. Count clicks from
+  applies to the FIRST-EVER click a pane receives — wheel events do NOT
+  establish click-focus, so wheeling first doesn't save you — and it recurs
+  after EVERY cross-tab landing, not just at startup. Count clicks from
   the first one the plugin receives.
 - **Keyboard focus follows the new tab's main pane** after a click-driven
   spawn/switch. Re-click the sidebar once before sending it keys, or the keys
@@ -164,11 +166,17 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   `zellij kill-session` / `zellij delete-session --force`. A hard
   `kill -9 <server pid>` is legitimate ONLY when a plan prescribes simulating
   a crash (leaves EXITED serialized state for resurrection tests).
-- **Never run `zelligent spawn` from the ctrl window.** Outside Zellij it ends
-  in `exec zellij attach`, turning ctrl into a second mirrored client whose
+- **Never run a bare `zelligent spawn` from the ctrl window.** Outside Zellij
+  it ends in `zellij attach`, turning ctrl into a second mirrored client whose
   keystrokes leak into the live session's focused pane. Spawn via the sidebar
   UI (`i` flow or clicks). Pipes (`zellij pipe`) and `zelligent remove` are
-  non-attaching and safe from ctrl.
+  non-attaching and safe from ctrl. The ONE sanctioned exception, for plans
+  whose test subject IS an out-of-band spawn: prefix the command with
+  `ZELLIJ=1 ZELLIJ_SESSION_NAME=<session>` to force the CLI's non-attaching
+  `inside-zellij` mode (`zellij action new-tab` plus a backgrounded pipe — no
+  attach ever runs). If a spawn does attach ctrl by accident, kill the ctrl
+  pane immediately and open a fresh ctrl shell before any further ctrl
+  command.
 - **Never run `bash test.sh` concurrently with a harness driver** (or two
   drivers in parallel). Both create real Zellij sessions and fixtures; the
   collisions produce hangs and phantom failures (two incidents).

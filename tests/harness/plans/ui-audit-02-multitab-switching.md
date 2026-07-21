@@ -18,38 +18,38 @@ Same as ui-audit-01 (read that section there if needed), with `ARCHIVE=/tmp/zell
 
 Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, wheel up/down `\033[<64/65;COL;ROWM` via `tmux send-keys -l "$(printf ...)"`. COL=10 for sidebar rows. For TAB BAR clicks use the row of the tab bar line (usually line 1) and a COL inside the target tab's name as found in the capture.
 
-Rendering contract: see ui-audit-01 — ▌ cursor axis, BOLD CYAN active-tab axis, subtitles `branch: X` / `current repo` / `user tab`, two-click activation.
+Rendering contract: see ui-audit-01 and `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract" — ▌ cursor axis, BOLD CYAN active-tab axis, subtitles `branch: X` / `current repo` / `user tab`, single-click select+activate.
 
 ## Harness corrections from run 01 (READ FIRST — these override the steps below)
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls (`\033[<0;C;RM` then `\033[<0;C;Rm`). Wheel events need no setup.
 2. THERE IS NO TAB BAR (layout has only a bottom status-bar). Wherever a step says "tab bar click X" or "click X in the tab bar": instead switch natively with REAL KEYSTROKES — press `C-t` (tab mode) then the digit of the target tab's 1-based position (then Esc if a mode indicator lingers in the status bar). Wherever a step says "active tab in the tab bar": verify via (a) the MAIN pane's frame title (e.g. `┌ feature-a` or the repo tab's pane titles) and (b) the sidebar's bold-cyan row; optional corroboration via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only, never as the tested action). Track tab positions yourself as tabs are created (order of creation = order in query-tab-names).
-3. KNOWN BUG (confirmed in run 01, do NOT re-report, do NOT trip over it): clicking a row's SUBTITLE line selects the NEXT item (one-line mapping offset), and clicking the blank separator under the header selects item 0. Therefore: ALWAYS click TITLE lines when selecting rows. If selection lands one row off after a title-line click, THAT is new information — report it.
-4. KNOWN RENDER DEVIATION (confirmed, do not re-report): the in-pane header line is missing (content starts with a blank line); the ▌ gutter appears on BOTH lines of the selected item (this is correct behavior).
+3. MAPPING CONTRACT (the run-01 subtitle-offset bug is FIXED — #135; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a subtitle line maps to the SAME item as its title, and a single click on EITHER line selects AND activates that item (#137). Blank-separator, header, and footer clicks are no-ops — they no longer select item 0 or anything else. If a click lands one row off, THAT is a regression — report it.
+4. The in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render in a tall pane (#156; fixed since run 01 — don't report its presence as a deviation); the ▌ gutter appears on BOTH lines of the selected item (correct behavior).
 5. Sidebar plugin state is PER-TAB (each tab's sidebar pane is its own plugin instance with its own ▌ cursor). Fixed in #151: the cursor now RE-SYNCS to the active tab's row whenever the active tab changes (sidebar click, Enter, or a native switch) — so a revealed sidebar's ▌ should already sit on the active row, matching the bold-cyan marker. Still record cursor position after every switch as corroboration; a mismatch is now a FAIL, not an open question.
 
 ## Test 1: Startup sanity
 - Action: launch, wait ~8s, capture.
 - Expected: rows `local` (▌, bold cyan), `feature-a`, `feature-b`, `feature-c`; exactly 4 items.
 
-## Test 2: Spawn feature-a via two clicks
-- Action: click `feature-a` title line; capture; click it again; wait 8s.
+## Test 2: Spawn feature-a via a single click
+- Action: click `feature-a` title line; wait 8s.
 - Expected: `Spawning 'feature-a'...` then tab `feature-a` active; sidebar present in the new tab; `feature-a` bold cyan; 4 rows, no duplicates.
 
 ## Test 3: Spawn feature-b from within the feature-a tab
-- Action: in the current (feature-a) tab's sidebar: click `feature-b`, capture, click again; wait 8s.
+- Action: in the current (feature-a) tab's sidebar: click `feature-b`; wait 8s.
 - Expected: tab `feature-b` opens and becomes active; sidebar in it shows `feature-b` bold cyan, `feature-a` plain; still 4 rows.
 
 ## Test 4: Spawn feature-c likewise
-- Action: two clicks on `feature-c`; wait 8s.
+- Action: single click on `feature-c`; wait 8s.
 - Expected: 4 tabs total in tab bar: `zelligent-test-repo`, `feature-a`, `feature-b`, `feature-c`; active = feature-c; sidebar: exactly 4 rows, each worktree row now an open tab (all subtitles `branch: X`), no stray rows.
 
 ## Test 5: Round-robin activation lands on EXACTLY the named tab
-- Action: perform this sequence, capturing after each activation: two-click `local` → two-click `feature-b` → two-click `feature-a` → two-click `feature-c`.
-- Expected: after each pair, the ACTIVE tab in the tab bar is exactly the row clicked, and the bold-cyan row matches it. Any single mismatch = FAIL with the full capture quoted (this is the primary wrong-tab hunt).
+- Action: perform this sequence, capturing after each activation: click `local` → click `feature-b` → click `feature-a` → click `feature-c` (one click each — single click selects and activates).
+- Expected: after each click, the ACTIVE tab in the tab bar is exactly the row clicked, and the bold-cyan row matches it. Any single mismatch = FAIL with the full capture quoted (this is the primary wrong-tab hunt).
 
 ## Test 6: Rapid successive switches stay consistent
-- Action: two-click `feature-a` then IMMEDIATELY two-click `feature-c` (minimal sleep between the two pairs, ~300ms), then wait 2s and capture.
+- Action: click `feature-a` then IMMEDIATELY click `feature-c` (minimal sleep between the two clicks, ~300ms), then wait 2s and capture.
 - Expected: final active tab = `feature-c`; bold cyan on `feature-c` only; ▌ on `feature-c`; no intermediate corruption (single bold-cyan row).
 
 ## Test 7: Native switch via TAB BAR click is reflected in the sidebar
@@ -64,8 +64,8 @@ Rendering contract: see ui-audit-01 — ▌ cursor axis, BOLD CYAN active-tab ax
 - Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; capture view.
 - Expected: a 5th row `scratch` / subtitle `user tab` appended after the worktree rows; no status glyph on it; the new tab is active (bold cyan on `scratch` if the sidebar is present in it — if the manual tab has NO sidebar pane, record that as a finding with capture).
 
-## Test 10: Two-click on the user-tab row switches to it
-- Action: first click a DIFFERENT tab in the tab bar (e.g. `feature-a`) to move away; then in the sidebar two-click the `scratch` row.
+## Test 10: Single click on the user-tab row switches to it
+- Action: first click a DIFFERENT tab in the tab bar (e.g. `feature-a`) to move away; then in the sidebar click the `scratch` row once.
 - Expected: active tab = `scratch`; bold cyan on `scratch` row.
 
 ## Test 11: Renaming a user tab updates its row with no stale leftover
@@ -77,12 +77,12 @@ Rendering contract: see ui-audit-01 — ▌ cursor axis, BOLD CYAN active-tab ax
 - Expected (from code): worktree `feature-a` no longer has a matching tab → its row reverts to detached (`branch: feature-a`, plain title), AND a NEW user-tab row `feature-a-renamed` appears (bold cyan, it's active). Record the exact row list. Stale or duplicated `feature-a` rows in any other form = FAIL.
 
 ## Test 13: Activating the now-detached feature-a row — exploratory
-- Action: two-click the `feature-a` worktree row.
+- Action: click the `feature-a` worktree row once.
 - Expected (from code): a spawn is attempted for `feature-a` (worktree already exists). Record EXACTLY what happens: new tab named `feature-a`? error status? duplicate rows? A crash, duplicate row, or error message = document with captures either way. This is an exploratory step: report observed behavior in detail; FAIL only on visible corruption (dup rows, garbled UI, wrong tab).
 
 ## Test 14: Duplicate tab names — name-based ops ambiguity
 - Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name feature-b` (collides with the existing worktree tab name); wait 3s; capture.
-- Expected: record how the sidebar renders — from code, tab matching is name-based, so watch for: duplicate `feature-b` rows, the manual tab absorbed into the worktree row, or a `user tab` row. Then two-click the `feature-b` row and record WHICH tab activates (there are two with that name — tab bar position tells them apart). Ambiguous activation is expected-ish; sidebar corruption (dup/stale rows) = FAIL.
+- Expected: record how the sidebar renders — from code, tab matching is name-based, so watch for: duplicate `feature-b` rows, the manual tab absorbed into the worktree row, or a `user tab` row. Then click the `feature-b` row once and record WHICH tab activates (there are two with that name — tab bar position tells them apart). Ambiguous activation is expected-ish; sidebar corruption (dup/stale rows) = FAIL.
 
 ## Test 15: Closing tabs cleans rows with no stales
 - Action: with the duplicate `feature-b` tab active, via ctrl window: `zellij --session zelligent-test-repo action close-tab`; wait 3s; capture.

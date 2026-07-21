@@ -22,16 +22,17 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Wherever a step says "tab bar click X": switch natively with real keystrokes — `C-t` then the digit of the target tab's 1-based position. Verify the active tab via the MAIN pane's frame title and the sidebar's bold-cyan row; corroborate via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only only). "Tab disappears from the tab bar" ⇒ verify via query-tab-names + main pane.
-3. KNOWN BUG (confirmed, do NOT trip over it): clicking a SUBTITLE line selects the NEXT item. ALWAYS click TITLE lines to select. The blank line under the (missing) header selects item 0 — avoid it.
-4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line is missing — known, don't re-report.
-5. Keyboard keys (`d`, `y`, `n`, `r`) go to the SIDEBAR pane — ensure it has focus first (a title-line click on the already-selected row would ACTIVATE; instead focus by clicking a title line of a row you intend to select anyway, per the step).
+3. MAPPING CONTRACT (the run-01 subtitle-offset bug is FIXED — #135; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a subtitle line maps to the SAME item as its title, and a single click on EITHER line selects AND activates that item (#137). Blank-separator, header, and footer clicks are no-ops — they no longer select item 0 or anything else.
+4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render in a tall pane (#156; fixed since run 01 — don't report its presence as a deviation).
+5. Keyboard keys (`d`, `y`, `n`, `r`) go to the SIDEBAR pane — ensure it has focus first. Under the single-click select+activate contract (#137), a click on ANY item row — selected or not — now activates it; to focus the sidebar pane without disturbing selection or triggering activation, click a no-op line instead (header, blank separator, or footer).
+6. OOB-SPAWN SAFETY (ctrl window): a bare `./zelligent.sh spawn` outside Zellij ends in `zellij attach`, turning ctrl into a second mirrored client whose keystrokes leak into the live session. The ctrl-window spawn steps below therefore force the CLI's non-attaching `inside-zellij` mode with the env prefix `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo` — the CLI then runs `zellij action new-tab` plus a backgrounded pipe, both non-attaching and safe from ctrl. Never run a ctrl-window spawn without this prefix; if one attaches by accident, kill the ctrl pane immediately and open a fresh ctrl shell before ANY further ctrl command.
 
 ## Test 1: Startup sanity
 - Action: launch, wait ~8s, capture.
 - Expected: `local` (▌, bold cyan) + `feature-a/b/c` detached rows; 4 items.
 
 ## Test 2: Out-of-band spawn self-heals within one refresh (#127)
-- Action: via ctrl window: `cd /tmp/zelligent-test-repo && ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn oob-test`; wait 3s; capture view; wait 3s more; capture again.
+- Action: via ctrl window (note 6 — the `ZELLIJ=1 ZELLIJ_SESSION_NAME=...` prefix forces the non-attaching spawn path; NEVER omit it from ctrl): `cd /tmp/zelligent-test-repo && ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn oob-test`; wait 3s; capture view; wait 3s more; capture again.
 - Expected: a new tab `oob-test` appears and the sidebar gains ONE row `oob-test` with subtitle `branch: oob-test` — NOT `user tab`. If the FIRST capture shows `user tab` but the second shows `branch: oob-test`, that is the designed one-shot self-heal: record timings, PASS with note. A `user tab` label that persists in the second capture = FAIL (#127 regression). Duplicate oob-test rows = FAIL.
 
 ## Test 3: Row ordering after out-of-band spawn
@@ -42,12 +43,12 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 - Action: first note the ACTIVE tab in the tab bar (should be `oob-test`'s tab or whichever is active — record it). Via tab bar click, switch to the `zelligent-test-repo` tab so a NON-target tab is focused. Then via ctrl window: `cd /tmp/zelligent-test-repo && ./zelligent.sh remove oob-test`; wait 5s; capture.
 - Expected: the `oob-test` tab disappears from the tab bar; the FOCUSED tab is still `zelligent-test-repo` (origin tab NOT closed — the #122 race); sidebar drops the `oob-test` row completely (no stale row); back to 4 items.
 
-## Test 5: Spawn feature-a via real sidebar clicks
-- Action: two-click `feature-a` in the sidebar; wait 8s.
+## Test 5: Spawn feature-a via a real sidebar click
+- Action: click `feature-a` in the sidebar; wait 8s.
 - Expected: tab `feature-a` active; row bold cyan; 4 items.
 
 ## Test 6: `d` on a worktree row shows the confirm dialog
-- Action: sidebar focused; ensure ▌ on `feature-a` (click it once if needed); press `d`; capture.
+- Action: sidebar focused (no-op-line click if needed); ▌ should already sit on `feature-a` (#151 re-syncs the cursor to the active tab's row) — if not, move it there with `j`/`k`, not a click (an item click activates); press `d`; capture.
 - Expected: the sidebar switches to a confirmation UI mentioning removal of `feature-a` (record the EXACT text rendered); footer/keybind area changes accordingly.
 
 ## Test 7: `n` cancels the confirm dialog
@@ -59,11 +60,11 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 - Expected: status shows `Removing 'feature-a'...` (green) during the operation; the `feature-a` tab closes; NO other tab closes (tab bar: `zelligent-test-repo` remains, count drops by exactly 1); the `feature-a` row either disappears (worktree deleted) — record which; no stale bold-cyan row pointing at the closed tab; focus lands on a surviving tab with a working sidebar.
 
 ## Test 9: `d` on the local row errors correctly
-- Action: click `local` once (select); press `d`; capture ANSI.
+- Action: click `local` once — this selects AND activates, switching to the repo tab; wait 2s, then re-focus that tab's sidebar via a no-op-line click (the switch moved keyboard focus to the main pane); confirm ▌ on `local`; press `d`; capture ANSI.
 - Expected: red status message `Only worktree tabs can be removed`; NO confirm dialog; rows unchanged.
 
 ## Test 10: `d` on a user-tab row errors correctly
-- Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; in the sidebar click the `scratch` row once; press `d`; capture ANSI.
+- Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; in the sidebar click the `scratch` row (first click is the focus claim, #189 — the next click on the already-active `scratch` row re-activates idempotently and leaves ▌ on it); press `d`; capture ANSI.
 - Expected: same red error; `scratch` row intact.
 
 ## Test 11: `r` refresh is visible and harmless
@@ -71,7 +72,7 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 - Expected: green status `Refreshed`; row list identical before/after.
 
 ## Test 12: Rapid churn — spawn, remove, respawn the same branch
-- Action: two-click `feature-b` (spawn, wait 8s) → press `d`, `y` (remove, wait 8s) → if the row is gone, recreate via ctrl window `git -C /tmp/zelligent-test-repo worktree add "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b" feature-b 2>/dev/null || git -C /tmp/zelligent-test-repo worktree add "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b" -b feature-b`; press `r`; then two-click `feature-b` again (spawn, wait 8s). Capture at every stage.
+- Action: click `feature-b` (spawn, wait 8s) → press `d`, `y` (remove, wait 8s) → if the row is gone, recreate via ctrl window `git -C /tmp/zelligent-test-repo worktree add "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b" feature-b 2>/dev/null || git -C /tmp/zelligent-test-repo worktree add "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b" -b feature-b`; press `r`; then click `feature-b` again (spawn, wait 8s). Capture at every stage.
 - Expected: at NO stage do duplicate `feature-b` rows exist; no stale row for the removed tab between remove and respawn; final state has exactly one `feature-b` row, open+active; tab bar consistent throughout.
 
 ## Test 13: Stale-row sweep across all captures

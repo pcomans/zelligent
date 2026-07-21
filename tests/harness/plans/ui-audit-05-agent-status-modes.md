@@ -25,12 +25,13 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Test 6's "tab-bar click zelligent-test-repo" becomes: press `C-t` then digit `1` (real keystrokes, repo tab is position 1). Verify active tab via the MAIN pane's frame title and the sidebar's bold-cyan row.
-3. KNOWN BUG (confirmed, do NOT trip over it): clicking a SUBTITLE line selects the NEXT item. ALWAYS click TITLE lines to select/focus. Blank line under the missing header selects item 0 — avoid unless a step says otherwise.
-4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line is missing — known, don't re-report.
-5. Keyboard keys (`n`, `i`, `d`, Esc, typed characters) go to the SIDEBAR pane — it must have focus. Focus it with a single title-line click on a NOT-selected row (never the selected one — that activates).
+3. MAPPING CONTRACT (the run-01 subtitle-offset bug is FIXED — #135; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a subtitle line maps to the SAME item as its title, and a single click on EITHER line selects AND activates that item (#137) — spawn or tab switch. For select/focus-only purposes, use wheel or keyboard instead of clicking an item row, or accept the activation. Blank-separator, header, and footer clicks are no-ops.
+4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render in a tall pane (#156; fixed since run 01 — don't report its presence as a deviation).
+5. Keyboard keys (`n`, `i`, `d`, Esc, typed characters) go to the SIDEBAR pane — it must have focus. Focus it by clicking a no-op line (header, blank separator, or footer) — any item-row click would activate that row and a resulting tab switch moves keyboard focus to the new tab's main pane.
+6. OOB-SPAWN SAFETY (ctrl window): a bare `./zelligent.sh spawn` outside Zellij ends in `zellij attach`, turning ctrl into a second mirrored client whose keystrokes leak into the live session. The ctrl-window spawn step below therefore forces the CLI's non-attaching `inside-zellij` mode with the env prefix `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo` — the CLI then runs `zellij action new-tab` plus a backgrounded pipe, both non-attaching and safe from ctrl. Never run a ctrl-window spawn without this prefix; if one attaches by accident, kill the ctrl pane immediately and open a fresh ctrl shell before ANY further ctrl command.
 
 ## Test 1: Spawn a tab with a fake long-running agent
-- Action: via ctrl window: `cd /tmp/zelligent-test-repo && ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn fake-agent 'bash -c "echo agent running; sleep 600"'`; wait 8s; capture.
+- Action: via ctrl window (note 6 — the `ZELLIJ=1 ZELLIJ_SESSION_NAME=...` prefix forces the non-attaching spawn path; NEVER omit it from ctrl): `cd /tmp/zelligent-test-repo && ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn fake-agent 'bash -c "echo agent running; sleep 600"'`; wait 8s; capture.
 - Expected: tab `fake-agent` opens; its main pane shows `agent running`; sidebar row `fake-agent` / `branch: fake-agent` (not `user tab` after self-heal); no glyph yet (no status events sent).
 
 ## Test 2: Start event renders a green working dot
@@ -38,7 +39,7 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 - Expected: `fake-agent` title line ends with green `●`; NO glyph on any other row; row still 2 lines.
 
 ## Test 3: Glyph coexists with cursor and active highlight
-- Action: click the `fake-agent` row once (if not selected, this selects it), capture ANSI.
+- Action: click the `fake-agent` row once (`fake-agent` is already the active tab, so this selects and re-activates idempotently — no new tab; if the sidebar was unfocused the first click is the focus claim, #189), capture ANSI.
 - Expected: the row shows ▌ (cyan) + bold-cyan title (it's the active tab) + green ● simultaneously — three independent axes on one row, none clobbering another.
 
 ## Test 4: PermissionRequest turns the dot yellow
@@ -66,7 +67,7 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 - Expected: `scratch` row (`user tab`) shows NO glyph even though a tab named scratch exists — from code, status only renders for rows with a matched branch. Record what actually happens; a glyph on the user row = FAIL.
 
 ## Test 10: `n` enters SelectBranch mode; clicks are dead there
-- Action: click once anywhere in the sidebar list (focus sidebar), press `n`; capture. Then left-click on one of the listed branch rows; capture. Wheel-down; capture.
+- Action: focus the sidebar by clicking a no-op line (footer or header — an item-row click would activate that row), press `n`; capture. Then left-click on one of the listed branch rows; capture. Wheel-down; capture.
 - Expected: after `n`: a branch-selection list renders with footer `↑/k up  ↓/j down  Enter create  Esc back` (or the narrow variant); the click does NOT change the highlighted branch and does NOT activate anything; the wheel does NOT move the selection (mouse is a no-op in this mode). Any mouse effect = FAIL (mode leak).
 
 ## Test 11: Esc returns to browse with cursor reset
@@ -86,7 +87,7 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 - Expected: `Spawning 'typed-branch'...` then a `typed-branch` tab, active, with a correctly labeled row (`branch: typed-branch`); row count +1; no duplicates.
 
 ## Test 15: Confirming mode ignores mouse
-- Action: click the `fake-agent` row once to select; press `d`; capture. Left-click the `local` row line; capture. Press `n` to cancel.
+- Action: focus the sidebar via a no-op line click (an item-row click would activate and switch tabs, moving keyboard focus away); move ▌ to `fake-agent` with `j`/`k` (keyboard selection does not activate); press `d`; capture. Left-click the `local` row line; capture. Press `n` to cancel.
 - Expected: confirm dialog stays up across the click; the click neither cancels, confirms, nor moves anything; after `n` the browse list is unchanged with `fake-agent` still present.
 
 ## Test 16: Anomaly sweep
