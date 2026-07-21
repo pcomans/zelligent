@@ -13,7 +13,7 @@ fn state_with_branches() -> State {
         "feat-b".into(),
         "dev".into(),
     ];
-    s.selected_index = 0;
+    s.branch_picker_index = 0;
     s
 }
 
