@@ -61,11 +61,11 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 
 ## Test 9: `d` on the local row errors correctly
 - Action: click `local` once — this selects AND activates, switching to the repo tab; wait 2s, then re-focus that tab's sidebar via a no-op-line click (the switch moved keyboard focus to the main pane); confirm ▌ on `local`; press `d`; capture ANSI.
-- Expected: red status message `Only worktree tabs can be removed`; NO confirm dialog; rows unchanged.
+- Expected: red status message `Only worktree tabs can be removed`; NO confirm dialog; rows unchanged. This is a persistent error (#186) — it will NOT self-clear on its own; it stays displayed in THIS tab's sidebar instance until an interaction reaches this instance (banner state is per instance).
 
 ## Test 10: `d` on a user-tab row errors correctly
 - Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; in the sidebar click the `scratch` row (first click is the focus claim, #189 — the next click on the already-active `scratch` row re-activates idempotently and leaves ▌ on it); press `d`; capture ANSI.
-- Expected: same red error; `scratch` row intact.
+- Expected: same red error; `scratch` row intact. Per-instance note (#186): `action new-tab` switched you to the `scratch` tab, whose brand-new sidebar instance never showed Test 9's banner (banner state is per plugin instance and is not replayed to new instances — the #140/Z-6 replay covers agent-status glyphs only). This tab starts banner-free; the `d` press sets a fresh error in THIS instance. Test 9's banner meanwhile still persists in the repo tab's own sidebar instance until an interaction reaches it there.
 
 ## Test 11: `r` refresh is visible and harmless
 - Action: press `r`; capture.
