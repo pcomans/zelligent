@@ -1691,6 +1691,10 @@ contains "remove inside zellij: switches to target"   "action go-to-tab-name $TE
 contains "remove inside zellij: closes the tab"       "action close-tab"                              "$ACTIONS"
 contains "remove inside zellij: returns to origin"    "action go-to-tab-name origin-tab"             "$ACTIONS"
 excludes "remove inside zellij: no manual-close hint" "Close the '$TEST_WT_INSIDE_SESSION' tab manually" "$out"
+# #194: the invalidate pipe carries the removed branch so every sidebar
+# instance — not just the one that ran the removal — can show a completion cue.
+contains "remove inside zellij: invalidate pipe carries removed branch" \
+  "pipe --name zelligent-invalidate --args removed=$TEST_WT_INSIDE_BRANCH" "$ACTIONS"
 git -C "$REPO_ROOT" branch -D "$TEST_WT_INSIDE_BRANCH" &>/dev/null || true
 rm -rf "$MOCK_BIN_REMOVE" "$REMOVE_LOG"
 

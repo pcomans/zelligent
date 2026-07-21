@@ -1150,12 +1150,25 @@ WORKTREES_DIR="$WORKTREES_BASE/$REPO_NAME"
 # it in the background under a hard timeout; delivery still happens
 # milliseconds later, and the no-consumer case is bounded instead of
 # wedging the CLI.
+#
+# When a removal called this with the removed branch name, that name rides
+# along as `--args removed=<branch>` (#194) — the plugin's PIPE_INVALIDATE
+# handler surfaces a `Removed '<branch>'` completion cue in every sidebar
+# instance, including ones a lone `handle_remove_result` status can't reach:
+# the instance whose own tab just closed, and any instance at all when the
+# removal came from a bare CLI `zelligent remove` (no plugin instance ever
+# ran the command). Spawn calls this with no argument — landing in the new
+# tab already makes success self-evident.
 pipe_invalidate() {
   command -v zellij &>/dev/null || return 0
+  local extra_args=()
+  if [ -n "${1:-}" ]; then
+    extra_args=(--args "removed=$1")
+  fi
   if [ -n "$ZELLIJ" ]; then
-    run_with_timeout 5 zellij pipe --name zelligent-invalidate >/dev/null 2>&1 &
+    run_with_timeout 5 zellij pipe --name zelligent-invalidate "${extra_args[@]}" >/dev/null 2>&1 &
   else
-    run_with_timeout 5 zellij --session "$REPO_SESSION" pipe --name zelligent-invalidate >/dev/null 2>&1 &
+    run_with_timeout 5 zellij --session "$REPO_SESSION" pipe --name zelligent-invalidate "${extra_args[@]}" >/dev/null 2>&1 &
   fi
 }
 
@@ -1431,8 +1444,9 @@ if [ "$1" = "remove" ]; then
   fi
   echo "✅ Removed worktree for '$BRANCH_NAME'"
   # Invalidate every sidebar instance's worktree cache — including hidden
-  # ones, which only a pipe can reach. See issues #138/#140.
-  pipe_invalidate
+  # ones, which only a pipe can reach. See issues #138/#140. Carries the
+  # removed branch so every instance also shows the completion cue (#194).
+  pipe_invalidate "$BRANCH_NAME"
   # When running inside Zellij, also close the worktree's tab so the sidebar
   # plugin doesn't show an orphaned tab labeled "user tab" (the worktree is
   # gone but Zellij still holds the tab). Return the user to the tab they

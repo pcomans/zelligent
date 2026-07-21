@@ -41,7 +41,7 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 
 ## Test 4: External removal does NOT close the wrong tab (#122)
 - Action: first note the ACTIVE tab in the tab bar (should be `oob-test`'s tab or whichever is active — record it). Via tab bar click, switch to the `zelligent-test-repo` tab so a NON-target tab is focused. Then via ctrl window (note 6 — the `ZELLIJ=1 ZELLIJ_SESSION_NAME=...` prefix is required for remove too: auto-close is gated on `$ZELLIJ`, and without it the tab stays open as a `user tab` orphan): `cd /tmp/zelligent-test-repo && ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo ./zelligent.sh remove oob-test`; wait 5s; capture.
-- Expected: the `oob-test` tab disappears from the tab bar; the FOCUSED tab is still `zelligent-test-repo` (origin tab NOT closed — the #122 race); sidebar drops the `oob-test` row completely (no stale row); back to 4 items.
+- Expected: the `oob-test` tab disappears from the tab bar; the FOCUSED tab is still `zelligent-test-repo` (origin tab NOT closed — the #122 race); sidebar drops the `oob-test` row completely (no stale row); back to 4 items. The focused tab's sidebar ALSO shows `Removed 'oob-test'` (green/info tier, ~8s) — #194: a bare CLI-side `zelligent remove` carries the removed branch on the same invalidate broadcast that heals this tab's row cache, so external removals are no longer silent.
 
 ## Test 5: Spawn feature-a via a real sidebar click
 - Action: click `feature-a` in the sidebar; wait 8s.
@@ -57,7 +57,7 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 
 ## Test 8: `d` then `y` removes: status, tab close, row update, focus safety
 - Action: press `d` again; capture; press `y`; wait 8s; capture.
-- Expected: status shows `Removing 'feature-a'...` (green) during the operation; the `feature-a` tab closes; NO other tab closes (tab bar: `zelligent-test-repo` remains, count drops by exactly 1); the `feature-a` row either disappears (worktree deleted) — record which; no stale bold-cyan row pointing at the closed tab; focus lands on a surviving tab with a working sidebar.
+- Expected: status shows `Removing 'feature-a'...` (green) during the operation; the `feature-a` tab closes; NO other tab closes (tab bar: `zelligent-test-repo` remains, count drops by exactly 1); the `feature-a` row either disappears (worktree deleted) — record which; no stale bold-cyan row pointing at the closed tab; focus lands on a surviving tab with a working sidebar, which shows `Removed 'feature-a'` (green/info tier, ~8s) — #194: the initiating sidebar instance died along with the closed `feature-a` tab, so the LANDING tab's own instance must show this via the invalidate broadcast, not via its own `handle_remove_result`.
 
 ## Test 9: `d` on the local row errors correctly
 - Action: click `local` once — this selects AND activates, switching to the repo tab; wait 2s, then re-focus that tab's sidebar via a no-op-line click (the switch moved keyboard focus to the main pane); confirm ▌ on `local`; press `d`; capture ANSI.
