@@ -31,6 +31,8 @@ Ground truth: `plugin/src/lib.rs` unit tests for `handle_mouse_browse` / `handle
 
 Not part of this contract but a real driving hazard: Zellij's click-to-focus eats exactly one click when the sidebar pane isn't already focused (the "focus-claim click"), recurring after every cross-tab landing. Tracked as #189.
 
+The footer status message is tiered (#186): info self-clears after ~8s, but an error persists until a newer status replaces it or the next Key/Mouse interaction with the sidebar clears it — every interaction described above counts, whatever mode it's in.
+
 ## Conventions
 
 ### Session name format

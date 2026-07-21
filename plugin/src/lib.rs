@@ -300,20 +300,23 @@ pub struct State {
     /// instance receives no Events at all, so nothing can wrongly flip
     /// this to true while hidden.
     pub is_visible: bool,
-    /// When the currently displayed `status_message` was set (`None` when
-    /// no message is showing). THE source of truth for expiry (#152):
+    /// When the currently displayed `status_message` was set — `None` means
+    /// either no message is showing, OR an error message is showing with no
+    /// TTL (#186, see `set_status`). THE source of truth for expiry (#152):
     /// `handle_timer` and `handle_visible` clear the message iff it is at
-    /// least `STATUS_MESSAGE_TTL_SECS` old. `Event::Timer` is only a
-    /// wake-up, never an authority — zellij's `set_timeout` spawns an
-    /// independent one-shot timer per call (see zellij-server), timers can
-    /// be lost entirely while the instance's pane is hidden (hidden
-    /// instances receive no Events), and any bookkeeping that must pair
-    /// arms with fires therefore wedges after a single loss. An age check
-    /// is immune: a stale timer firing early finds the newer message too
-    /// young and leaves it; a lost timer is covered by the next wake-up
-    /// (a later message's timer, or the reveal re-arm in
-    /// `handle_visible`). Uses the WASI monotonic clock, available to the
-    /// plugin sandbox.
+    /// least `STATUS_MESSAGE_TTL_SECS` old, and treat a `None` stamp on a
+    /// non-empty message as "nothing to expire, nothing to re-arm" —
+    /// persistent errors have no wake-up to lose or re-chain in the first
+    /// place. `Event::Timer` is only a wake-up, never an authority —
+    /// zellij's `set_timeout` spawns an independent one-shot timer per call
+    /// (see zellij-server), timers can be lost entirely while the
+    /// instance's pane is hidden (hidden instances receive no Events), and
+    /// any bookkeeping that must pair arms with fires therefore wedges
+    /// after a single loss. An age check is immune: a stale timer firing
+    /// early finds the newer message too young and leaves it; a lost timer
+    /// is covered by the next wake-up (a later message's timer, or the
+    /// reveal re-arm in `handle_visible`). Uses the WASI monotonic clock,
+    /// available to the plugin sandbox.
     pub status_message_set_at: Option<Instant>,
     /// Set by `set_status` when it arms a new timer; consumed by the
     /// `ZellijPlugin::update`/`pipe` shell, which performs the actual
@@ -330,6 +333,14 @@ pub struct State {
     /// and an early-firing timer must re-chain for what's left rather than
     /// leave the message stranded until an unrelated event.
     pub status_timer_arm_secs: f64,
+    /// Bumped by every `set_status` call, including clears (#186). Lets the
+    /// `update` shell tell "the Key/Mouse handler it just ran left the
+    /// status alone" apart from "the handler happened to set the exact same
+    /// text" — message-equality alone can't distinguish those (e.g. pressing
+    /// `d` on two different non-worktree rows sets the identical error text
+    /// twice), and only the former should trigger the interaction's clear.
+    /// See `clear_displayed_error_after_dispatch`.
+    pub status_set_generation: u64,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -413,24 +424,40 @@ pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
 }
 
 impl State {
-    /// Set the footer status message and arm its `STATUS_MESSAGE_TTL_SECS`
-    /// auto-clear (issue #152). This is the ONLY place that should assign
+    /// Set the footer status message (issue #186 tiers this by `is_error`).
+    /// This is the ONLY place that should assign
     /// `self.status_message`/`self.status_is_error` for a non-empty message
     /// — every call site that used to assign the fields directly now goes
-    /// through here, so a future call site can't forget the timer.
+    /// through here, so a future call site can't forget the tier's rules.
     ///
-    /// A non-empty `msg` stamps `status_message_set_at` and sets
-    /// `status_timer_needs_arming` so the imperative shell (`update`/
-    /// `pipe`) arms a wake-up timer right after this event finishes
-    /// processing. Re-setting within the TTL simply re-stamps — the age
-    /// check in `handle_timer` gives the newer message its own full TTL
-    /// no matter how many older timers are still in flight.
+    /// - Info (`is_error == false`): unchanged from #152 — stamps
+    ///   `status_message_set_at` and sets `status_timer_needs_arming` so the
+    ///   imperative shell (`update`/`pipe`) arms a `STATUS_MESSAGE_TTL_SECS`
+    ///   wake-up right after this event finishes processing. Re-setting
+    ///   within the TTL simply re-stamps — the age check in `handle_timer`
+    ///   gives the newer message its own full TTL no matter how many older
+    ///   timers are still in flight.
+    /// - Error (`is_error == true`): persists indefinitely — no stamp, no
+    ///   timer armed. Zellij has no toast primitive to fall back on, so a
+    ///   flow-ending error stays on screen until something more useful than
+    ///   a clock replaces it: a newer `set_status` call (this function
+    ///   always overwrites, tier or no), or the user's next Key/Mouse
+    ///   interaction (`update`'s deferred clear, see
+    ///   `clear_displayed_error_after_dispatch`).
     ///
     /// An empty `msg` (clearing the status) resets the stamp AND any
-    /// not-yet-performed arm request: there is nothing left to expire,
-    /// and arming for an already-cleared message would be pure noise.
+    /// not-yet-performed arm request regardless of tier: there is nothing
+    /// left to expire, and arming for an already-cleared message would be
+    /// pure noise.
+    ///
+    /// Every call — including the empty-`msg` clear — bumps
+    /// `status_set_generation`, regardless of tier. That's what lets
+    /// `clear_displayed_error_after_dispatch` tell "this event's handler
+    /// left the status alone" apart from "the handler set this exact same
+    /// text" after the fact.
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         let msg = msg.into();
+        self.status_set_generation += 1;
         self.status_is_error = is_error;
         if msg.is_empty() {
             self.status_message = msg;
@@ -439,6 +466,12 @@ impl State {
             return;
         }
         self.status_message = msg;
+        if is_error {
+            // Persistent tier: no TTL stamp, no wake-up to arm.
+            self.status_message_set_at = None;
+            self.status_timer_needs_arming = false;
+            return;
+        }
         self.status_message_set_at = Some(Instant::now());
         self.status_timer_needs_arming = true;
         self.status_timer_arm_secs = STATUS_MESSAGE_TTL_SECS;
@@ -479,6 +512,15 @@ impl State {
         if self.status_message.is_empty() {
             return false;
         }
+        if self.status_message_set_at.is_none() {
+            // Persistent error (#186): no TTL was ever armed for it, so a
+            // timer landing here is stale from a since-replaced info
+            // message. Nothing to expire and nothing to re-arm — re-arming
+            // here would loop forever (`status_message_remaining_secs`
+            // falls back to a full TTL on `None`, arming yet another timer
+            // that lands right back in this branch).
+            return false;
+        }
         if self.status_message_expired() {
             self.status_message.clear();
             self.status_is_error = false;
@@ -493,6 +535,54 @@ impl State {
             self.status_timer_needs_arming = true;
             self.status_timer_arm_secs = self.status_message_remaining_secs();
             false
+        }
+    }
+
+    /// Snapshot to pass to `clear_displayed_error_after_dispatch`: whether a
+    /// persistent error is on screen right now, and the generation to diff
+    /// against afterward. Call this at the top of `update`'s `Event::Key`/
+    /// `Event::Mouse` handling, before dispatching to the mode handler.
+    fn displayed_error_snapshot(&self) -> (bool, u64) {
+        (
+            self.status_is_error && !self.status_message.is_empty(),
+            self.status_set_generation,
+        )
+    }
+
+    /// Clear a displayed persistent error as the user's "next interaction"
+    /// (#186) — paired with `displayed_error_snapshot`, taken before
+    /// dispatching an `Event::Key`/`Event::Mouse` to its mode handler; every
+    /// Key or Mouse event counts as an interaction, no matter the mode.
+    /// `Event::Timer` must NOT use this pair: a timer wake-up is not user
+    /// interaction, and the whole point of the persistent tier is that it
+    /// survives those.
+    ///
+    /// Deliberately runs the CLEAR after dispatch, gated on whether
+    /// `set_status` ran during it (the generation counter), rather than
+    /// clearing up front before the handler runs:
+    /// `sidebar_index_at_line`'s mouse-click row-to-item mapping reads the
+    /// LIVE `self.status_message` to reconstruct the exact layout that was
+    /// on screen when the user clicked (status height shifts the leading
+    /// header/separator lines). Clearing eagerly would shrink that layout
+    /// out from under the very click that's using it, corrupting the
+    /// mapping for whichever click happens to land on a persistent error.
+    /// Deferring keeps `status_message` stable for the handler's entire
+    /// call, matching the invariant `sidebar_index_at_line` already
+    /// documents ("`status_message` doesn't change between a render and the
+    /// click that follows it").
+    ///
+    /// Gating on the generation rather than message equality also covers
+    /// the case where the handler sets a NEW status with the same text as
+    /// the old error (e.g. `d` on two different non-worktree rows both
+    /// produce "Only worktree tabs can be removed") — equality alone would
+    /// see "unchanged" and wrongly clear the fresh one; the generation
+    /// bumped regardless of what text `set_status` was called with.
+    fn clear_displayed_error_after_dispatch(&mut self, was_displayed: bool, gen_before: u64) {
+        if was_displayed && self.status_set_generation == gen_before {
+            self.status_message.clear();
+            self.status_is_error = false;
+            self.status_message_set_at = None;
+            self.status_timer_needs_arming = false;
         }
     }
 
@@ -550,7 +640,10 @@ impl State {
         self.select_active_sidebar_item();
         self.resync_on_reveal = true;
         let mut status_changed = false;
-        if !self.status_message.is_empty() {
+        if !self.status_message.is_empty() && self.status_message_set_at.is_some() {
+            // A `None` stamp here is a persistent error (#186) — it has no
+            // TTL to have expired and no timer to re-arm; it stays exactly
+            // as it is until replaced or the next interaction.
             if self.status_message_expired() {
                 self.status_message.clear();
                 self.status_is_error = false;
@@ -2066,18 +2159,37 @@ impl ZellijPlugin for State {
                 }
             }
             Event::TabUpdate(tab_info) => self.handle_tab_update(tab_info),
-            Event::Key(key) => match self.mode {
-                Mode::Loading => Action::None,
-                Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
-                Mode::BrowseWorktrees => self.handle_key_browse(&key),
-                Mode::SelectBranch => self.handle_key_select_branch(&key),
-                Mode::InputBranch => self.handle_key_input_branch(&key),
-                Mode::Confirming => self.handle_key_confirming(&key),
-            },
-            Event::Mouse(mouse) => match self.mode {
-                Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
-                _ => Action::None,
-            },
+            Event::Key(key) => {
+                // #186: any Key event is an interaction — a displayed
+                // persistent error clears once this event is fully handled,
+                // unless the mode handler set its own status (see
+                // `clear_displayed_error_after_dispatch`).
+                let (had_error, gen_before) = self.displayed_error_snapshot();
+                let action = match self.mode {
+                    Mode::Loading => Action::None,
+                    Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
+                    Mode::BrowseWorktrees => self.handle_key_browse(&key),
+                    Mode::SelectBranch => self.handle_key_select_branch(&key),
+                    Mode::InputBranch => self.handle_key_input_branch(&key),
+                    Mode::Confirming => self.handle_key_confirming(&key),
+                };
+                self.clear_displayed_error_after_dispatch(had_error, gen_before);
+                action
+            }
+            Event::Mouse(mouse) => {
+                // #186: same rule as Event::Key above. Deferring past
+                // dispatch (rather than clearing up front) matters here in
+                // particular — see `clear_displayed_error_after_dispatch`
+                // for why clearing before `handle_mouse_browse` runs would
+                // corrupt its row-to-item click mapping.
+                let (had_error, gen_before) = self.displayed_error_snapshot();
+                let action = match self.mode {
+                    Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
+                    _ => Action::None,
+                };
+                self.clear_displayed_error_after_dispatch(had_error, gen_before);
+                action
+            }
             _ => return false,
         };
         self.execute(&action);
@@ -5254,7 +5366,7 @@ mod tests {
         assert!(!notifiable(&AgentStatus::Working));
     }
 
-    // --- Status message TTL (#152) ---
+    // --- Status message TTL (#152) and persistence tiers (#186) ---
     //
     // set_status/handle_timer/handle_visible are pure (no host calls), so —
     // like every other handler in this module — they're exercised directly.
@@ -5263,6 +5375,21 @@ mod tests {
     // unit tests, same as `execute`/`fire_*`); `status_timer_needs_arming`
     // is the indirection these tests observe. Expiry is age-based: tests
     // backdate `status_message_set_at` instead of sleeping.
+    //
+    // #186 splits the tier by `is_error`: info messages keep the TTL
+    // behavior above; error messages get no stamp and no timer (see
+    // `set_status`), so they persist until a newer `set_status` call or the
+    // next Key/Mouse interaction clears them (`displayed_error_snapshot` +
+    // `clear_displayed_error_after_dispatch`, exercised further down).
+    // `update`/`execute` themselves can't be called from unit tests —
+    // `execute`'s `fire_*` helpers reach `zellij_tile::shim` functions that
+    // import a host symbol (`host_run_plugin_command`) only provided by the
+    // real WASM sandbox; linking a native test binary that calls them fails
+    // (verified: `error: undefined symbol: host_run_plugin_command`). So,
+    // same as every other handler in this module, the Key/Mouse
+    // interaction tests below call the pure pieces (snapshot, then a
+    // `handle_key_*`/`handle_mouse_*` handler, then the deferred clear)
+    // directly rather than going through `update`.
 
     fn backdate_status(s: &mut State, secs: u64) {
         s.status_message_set_at = s
@@ -5289,10 +5416,21 @@ mod tests {
     }
 
     #[test]
-    fn set_status_error_variant_sets_is_error() {
+    fn set_status_error_variant_is_persistent_no_stamp_no_arm() {
+        // #186: the error tier gets no TTL stamp and no wake-up armed — it
+        // persists until replaced or the next interaction, not a timer.
         let mut s = State::default();
         s.set_status("Unknown agent event: Bogus", true);
         assert!(s.status_is_error);
+        assert_eq!(s.status_message, "Unknown agent event: Bogus");
+        assert!(
+            s.status_message_set_at.is_none(),
+            "error tier must not stamp an age — nothing should ever expire it"
+        );
+        assert!(
+            !s.status_timer_needs_arming,
+            "error tier must not request a wake-up timer"
+        );
     }
 
     #[test]
@@ -5404,5 +5542,193 @@ mod tests {
         let mut s = State::default();
         assert!(!s.handle_timer());
         assert!(s.status_message_set_at.is_none());
+    }
+
+    // --- Error persistence (#186) ---
+
+    #[test]
+    fn handle_timer_does_not_clear_or_rearm_a_persistent_error() {
+        // The loop-guard trap: a persistent error has no stamp, so without
+        // the `status_message_set_at.is_none()` guard `handle_timer` would
+        // fall into its "early wake-up" branch and re-arm forever (an
+        // 8-second timer that always lands right back here).
+        let mut s = State::default();
+        s.set_status("could not remove worktree 'foo': directory not empty", true);
+
+        assert!(
+            !s.handle_timer(),
+            "a stray timer must not clear a persistent error"
+        );
+        assert_eq!(
+            s.status_message,
+            "could not remove worktree 'foo': directory not empty"
+        );
+        assert!(s.status_is_error);
+        assert!(
+            !s.status_timer_needs_arming,
+            "must not re-arm — this is the infinite re-arm loop guard"
+        );
+    }
+
+    #[test]
+    fn handle_visible_leaves_a_persistent_error_untouched() {
+        // Same trap as handle_timer, at the reveal re-arm site: a `None`
+        // stamp must skip both the expiry check and the re-arm, not just
+        // one of them.
+        let mut s = State::default();
+        s.set_status("could not remove worktree 'foo': directory not empty", true);
+
+        let rerender = s.handle_visible(true);
+
+        assert!(!rerender, "no tabs and a persistent error: nothing changed");
+        assert_eq!(
+            s.status_message,
+            "could not remove worktree 'foo': directory not empty"
+        );
+        assert!(s.status_is_error);
+        assert!(!s.status_timer_needs_arming);
+    }
+
+    #[test]
+    fn set_status_replaces_a_persistent_error_with_a_newer_message() {
+        // #186: "cleared when a newer status replaces it" — set_status
+        // always overwrites regardless of the previous tier.
+        let mut s = State::default();
+        s.set_status("could not remove worktree 'foo'", true);
+
+        s.set_status("Refreshed", false);
+
+        assert_eq!(s.status_message, "Refreshed");
+        assert!(!s.status_is_error);
+        assert!(s.status_message_set_at.is_some(), "the new info message gets its own TTL");
+        assert!(s.status_timer_needs_arming);
+    }
+
+    #[test]
+    fn clear_displayed_error_after_dispatch_clears_only_an_untouched_displayed_error() {
+        let mut s = State::default();
+
+        // No message: no-op.
+        let (had, gen) = s.displayed_error_snapshot();
+        s.clear_displayed_error_after_dispatch(had, gen);
+        assert!(s.status_message.is_empty());
+
+        // Info message, handler leaves it alone: untouched (info keeps its
+        // own TTL, not this path — `had` is false since it isn't an error).
+        s.set_status("Spawned 'feat-a'", false);
+        let (had, gen) = s.displayed_error_snapshot();
+        s.clear_displayed_error_after_dispatch(had, gen);
+        assert_eq!(s.status_message, "Spawned 'feat-a'");
+        assert!(!s.status_is_error);
+
+        // Persistent error, handler leaves it alone: cleared.
+        s.set_status("could not remove worktree 'foo'", true);
+        let (had, gen) = s.displayed_error_snapshot();
+        s.clear_displayed_error_after_dispatch(had, gen);
+        assert!(s.status_message.is_empty());
+        assert!(!s.status_is_error);
+        assert!(s.status_message_set_at.is_none());
+        assert!(!s.status_timer_needs_arming);
+    }
+
+    #[test]
+    fn key_interaction_clears_persistent_error_after_dispatch_and_action_still_applies() {
+        // Models the `update` shell's Event::Key handling: snapshot, THEN
+        // dispatch to the mode handler, THEN clear if untouched (`update`
+        // itself can't be called from a unit test — see the module doc
+        // comment above). 'j' is chosen because it does not itself call
+        // `set_status`, so the surviving state is purely from the clear.
+        let mut s = state_with_sidebar();
+        s.set_status("could not remove worktree 'foo'", true);
+        let before = s.selected_index;
+
+        let (had_error, gen_before) = s.displayed_error_snapshot();
+        let action = s.handle_key_browse(&key(BareKey::Char('j')));
+        s.clear_displayed_error_after_dispatch(had_error, gen_before);
+
+        assert!(
+            s.status_message.is_empty(),
+            "the error must be gone after the interaction"
+        );
+        assert_ne!(
+            s.selected_index, before,
+            "the key's own action (navigation) must still have happened"
+        );
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn key_interaction_lets_the_handlers_own_status_win_over_the_clear() {
+        // The clear is gated on the generation counter specifically so that
+        // if the handler sets its own status — even to the SAME text as the
+        // stale one — that fresh assignment is what's left standing, not
+        // wiped by the deferred clear. 'd' on a plain (non-worktree) tab
+        // takes the `set_status(.., true)` branch in `handle_key_browse`,
+        // and here it's given the exact text the stale error already had.
+        let mut s = state_with_sidebar();
+        s.tabs.push(make_tab("scratch", false));
+        s.recompute_sidebar_items();
+        let idx = s
+            .sidebar_items
+            .iter()
+            .position(|i| i.tab_name == "scratch")
+            .expect("scratch tab must be in the sidebar");
+        s.selected_index = idx;
+        s.set_status("Only worktree tabs can be removed", true);
+
+        let (had_error, gen_before) = s.displayed_error_snapshot();
+        let _ = s.handle_key_browse(&key(BareKey::Char('d')));
+        s.clear_displayed_error_after_dispatch(had_error, gen_before);
+
+        assert_eq!(
+            s.status_message, "Only worktree tabs can be removed",
+            "identical text from the handler must survive — generation, not equality, decides"
+        );
+        assert!(s.status_is_error);
+    }
+
+    #[test]
+    fn mouse_interaction_clears_persistent_error_after_dispatch_and_action_still_applies() {
+        // Same contract as the Key test above, for Event::Mouse. ScrollDown
+        // navigates without calling set_status, isolating the clear.
+        let mut s = state_with_sidebar();
+        s.set_status("could not remove worktree 'foo'", true);
+        let before = s.selected_index;
+
+        let (had_error, gen_before) = s.displayed_error_snapshot();
+        let action = s.handle_mouse_browse(&Mouse::ScrollDown(0));
+        s.clear_displayed_error_after_dispatch(had_error, gen_before);
+
+        assert!(s.status_message.is_empty());
+        assert_ne!(s.selected_index, before, "scroll must still have navigated");
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn mouse_left_click_row_mapping_is_unaffected_by_the_deferred_clear() {
+        // The regression this ordering exists to prevent: if the error were
+        // cleared BEFORE `handle_mouse_browse` ran, `sidebar_index_at_line`
+        // would compute `leading_lines` from a layout that just got shorter
+        // (no more status rows), disagreeing with the layout the user
+        // actually saw when they clicked — misrouting the click to the
+        // wrong item. Deferring the clear past dispatch keeps
+        // `status_message` — and therefore the layout — stable for the
+        // whole call, so the click must land exactly where it would with no
+        // error showing at all.
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        s.last_cols = 30;
+        s.set_status("Only worktree tabs can be removed", true); // wraps to 2 rows at cols=30
+
+        let (had_error, gen_before) = s.displayed_error_snapshot();
+        let action = s.handle_mouse_browse(&Mouse::LeftClick(2, 5));
+        s.clear_displayed_error_after_dispatch(had_error, gen_before);
+
+        assert_eq!(
+            s.selected_index, 0,
+            "click must map against the layout that was ON SCREEN, not a post-clear one"
+        );
+        assert!(!matches!(action, Action::None), "the click must still activate item 0");
+        assert!(s.status_message.is_empty(), "the error still clears once the click is handled");
     }
 }

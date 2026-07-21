@@ -60,15 +60,15 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 
 ## Test 8: Event for unknown tab is ignored
 - Action: ctrl window: pipe `event=Start,tab=no-such-tab`; wait 2s; capture.
-- Expected: NO row changes, no glyph anywhere new, no status change (silent ignore).
+- Expected: NO row changes, no glyph anywhere new. The red `Unknown agent event: Bogus` status from Test 7 is STILL showing — error statuses persist until a newer status or a real Key/Mouse interaction with the sidebar clears them (#186), and a ctrl-window pipe is neither. Do not read this as "no status change (self-cleared already)"; it is specifically "same red status, unchanged".
 
 ## Test 9: Glyphs never appear on local/user rows
 - Action: ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; pipe `event=Start,tab=scratch`; wait 2s; capture ANSI.
-- Expected: `scratch` row (`user tab`) shows NO glyph even though a tab named scratch exists — from code, status only renders for rows with a matched branch. Record what actually happens; a glyph on the user row = FAIL.
+- Expected: `scratch` row (`user tab`) shows NO glyph even though a tab named scratch exists — from code, status only renders for rows with a matched branch. Record what actually happens; a glyph on the user row = FAIL. The Test 7 red status is STILL showing (ctrl-window `action new-tab` and pipes are not sidebar interactions either) — same reasoning as Test 8.
 
 ## Test 10: `n` enters SelectBranch mode; clicks are dead there
 - Action: focus the sidebar by clicking a no-op line (footer or header — an item-row click would activate that row); move ▌ to the `feature-b` row with `j`/`k` (keyboard selection does not activate); press `n`; capture. Then left-click on one of the listed branch rows; capture. Wheel-down; capture.
-- Expected: after `n`: a branch-selection list renders with footer `↑/k up  ↓/j down  Enter create  Esc back` (or the narrow variant), with the picker cursor on the FIRST branch row — the picker has its own cursor and always opens at the top, regardless of the browse selection (#184); the click does NOT change the highlighted branch and does NOT activate anything; the wheel does NOT move the selection (mouse is a no-op in this mode). Any mouse effect = FAIL (mode leak).
+- Expected: this focusing click is the FIRST real Key/Mouse interaction with the sidebar since Test 3 — it clears the Test 7/8/9 red status immediately, before anything else in this step (#186); expect it gone from this capture on. After `n`: a branch-selection list renders with footer `↑/k up  ↓/j down  Enter create  Esc back` (or the narrow variant), with the picker cursor on the FIRST branch row — the picker has its own cursor and always opens at the top, regardless of the browse selection (#184); the click does NOT change the highlighted branch and does NOT activate anything; the wheel does NOT move the selection (mouse is a no-op in this mode). Any mouse effect = FAIL (mode leak).
 
 ## Test 11: Esc returns to browse with the cursor where it was
 - Action: press Esc; capture.
