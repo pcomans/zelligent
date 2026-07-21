@@ -22,8 +22,8 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Wherever a step says "tab bar click X": switch natively with real keystrokes — `C-t` then the digit of the target tab's 1-based position. Verify the active tab via the MAIN pane's frame title and the sidebar's bold-cyan row; corroborate via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only only). "Tab disappears from the tab bar" ⇒ verify via query-tab-names + main pane.
-3. KNOWN BUG (confirmed, do NOT trip over it): clicking a SUBTITLE line selects the NEXT item. ALWAYS click TITLE lines to select. The blank line under the (missing) header selects item 0 — avoid it.
-4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line is missing — known, don't re-report.
+3. MAPPING CONTRACT (the run-01 subtitle-offset bug is FIXED — #135; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a subtitle line maps to the SAME item as its title, and a single click on EITHER line selects AND activates that item (#137). Blank-separator, header, and footer clicks are no-ops — they no longer select item 0 or anything else.
+4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render in a tall pane (#156; fixed since run 01 — don't report its presence as a deviation).
 5. Keyboard keys (`d`, `y`, `n`, `r`) go to the SIDEBAR pane — ensure it has focus first. Under the single-click select+activate contract (#137), a click on ANY item row — selected or not — now activates it; to focus the sidebar pane without disturbing selection or triggering activation, click a no-op line instead (header, blank separator, or footer).
 
 ## Test 1: Startup sanity
@@ -47,7 +47,7 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 - Expected: tab `feature-a` active; row bold cyan; 4 items.
 
 ## Test 6: `d` on a worktree row shows the confirm dialog
-- Action: sidebar focused; ensure ▌ on `feature-a` (click it once if needed); press `d`; capture.
+- Action: sidebar focused (no-op-line click if needed); ▌ should already sit on `feature-a` (#151 re-syncs the cursor to the active tab's row) — if not, move it there with `j`/`k`, not a click (an item click activates); press `d`; capture.
 - Expected: the sidebar switches to a confirmation UI mentioning removal of `feature-a` (record the EXACT text rendered); footer/keybind area changes accordingly.
 
 ## Test 7: `n` cancels the confirm dialog
@@ -59,11 +59,11 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 - Expected: status shows `Removing 'feature-a'...` (green) during the operation; the `feature-a` tab closes; NO other tab closes (tab bar: `zelligent-test-repo` remains, count drops by exactly 1); the `feature-a` row either disappears (worktree deleted) — record which; no stale bold-cyan row pointing at the closed tab; focus lands on a surviving tab with a working sidebar.
 
 ## Test 9: `d` on the local row errors correctly
-- Action: click `local` once (select); press `d`; capture ANSI.
+- Action: click `local` once — this selects AND activates, switching to the repo tab; wait 2s, then re-focus that tab's sidebar via a no-op-line click (the switch moved keyboard focus to the main pane); confirm ▌ on `local`; press `d`; capture ANSI.
 - Expected: red status message `Only worktree tabs can be removed`; NO confirm dialog; rows unchanged.
 
 ## Test 10: `d` on a user-tab row errors correctly
-- Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; in the sidebar click the `scratch` row once; press `d`; capture ANSI.
+- Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; in the sidebar click the `scratch` row (first click is the focus claim, #189 — the next click on the already-active `scratch` row re-activates idempotently and leaves ▌ on it); press `d`; capture ANSI.
 - Expected: same red error; `scratch` row intact.
 
 ## Test 11: `r` refresh is visible and harmless

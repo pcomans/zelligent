@@ -29,7 +29,7 @@ Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Verify "a tab named X is active" via the MAIN pane's frame title and the sidebar's bold-cyan row; corroborate via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only only).
-3. KNOWN BUG (confirmed in run 01, in the UNSCROLLED state): clicking a SUBTITLE line selects the NEXT item; clicking the blank line under the header selects item 0; the in-pane header line is missing entirely (content starts with a blank line). For THIS plan: Tests 7/8/9 measure the mapping in the SCROLLED state — run them exactly as written and report the exact delta between clicked row and selected row (we need to know whether the offset is the same one line, or compounds with viewport start).
+3. MAPPING CONTRACT (the run-01 subtitle-offset and missing-header bugs are FIXED — #135/#136; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a title line AND its subtitle line both map to the SAME item; blank-separator, header, and footer clicks are no-ops; the in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render when the pane is tall enough (#156, confirmed current — see the render snapshots and #195). Also: a single click on an item row selects AND activates it (#137) — every mapping probe below that hits an item row will spawn or switch a tab; wait ~8s and expect the activation. Tests 7/8/9 verify the mapping is CORRECT in the SCROLLED state (expected delta = 0); still record the exact clicked-row → selected-row mapping at each probe so any regression (fixed one-line offset, or one that compounds with viewport start) is caught. After each click-driven spawn/switch you land in a NEW tab whose sidebar is unfocused — its first click is the focus claim (#189, eaten with zero state change); count from the first click the plugin receives.
 4. The ▌ gutter renders on BOTH lines of the selected item — correct behavior, not a finding.
 
 ## Test 1: Startup — partial list, no corruption
@@ -56,17 +56,17 @@ Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane
 - Action: wheel-up once from `local`.
 - Expected: ▌ on the long-name item (last), viewport shows the tail of the list.
 
-## Test 7: CLICK MAPPING WITH SCROLLED VIEWPORT — the critical check
-- Action: viewport is now scrolled (start > 0 from Test 6). Capture; pick a visible row in the MIDDLE of the window that is NOT selected, e.g. `wt-06` (use whatever is visible); left-click its TITLE line.
-- Expected: ▌ moves to EXACTLY the clicked row (`wt-06`), not to `wt-05`/`wt-07` or an item offset by the scroll amount. An offset here explains "click activates wrong tab" — if it happens, note the exact delta and write the repro.
+## Test 7: CLICK MAPPING WITH SCROLLED VIEWPORT — the critical check (title line)
+- Action: viewport is now scrolled (start > 0 from Test 6). Capture; pick a visible row in the MIDDLE of the window that is NOT selected, e.g. `wt-06` (use whatever is visible); left-click its TITLE line; wait 8s (the click also activates — spawn, since detached).
+- Expected: ▌ moves to EXACTLY the clicked row (`wt-06`), not to `wt-05`/`wt-07` or an item offset by the scroll amount, AND the activation names EXACTLY that branch: status `Spawning 'wt-06'...`, new tab `wt-06` active, row bold cyan. Record the clicked-row → selected-row mapping (expected delta = 0). A wrong row or wrong branch spawned = critical FAIL — note the exact delta and write the repro.
 
 ## Test 8: Click mapping on a SUBTITLE line in scrolled state
-- Action: click the `branch: wt-05` subtitle line (or whichever is visible).
-- Expected: ▌ moves to that same item (title/subtitle pair maps to one index).
+- Action: in the landed tab's sidebar (re-locate rows from a fresh capture; remember the focus-claim click, #189), click the `branch: wt-05` subtitle line (or whichever is visible); wait 8s.
+- Expected: ▌ moves to that SAME item (title/subtitle pair maps to one index — not the item above or below) and it activates: `Spawning 'wt-05'...`, tab `wt-05` active, row bold cyan. Record the mapping (expected delta = 0). A different item selected or a different branch spawned = critical FAIL.
 
-## Test 9: Activation from a scrolled viewport spawns the RIGHT branch
-- Action: with a row selected in the scrolled window (e.g. `wt-05`), click it a second time; wait 8s.
-- Expected: status shows `Spawning 'wt-05'...` naming EXACTLY the selected branch; the new tab in the tab bar is named `wt-05`; the `wt-05` row becomes bold cyan. A different branch spawning = critical FAIL.
+## Test 9: Re-click on the already-selected/active row in a scrolled viewport is idempotent
+- Action: click the `wt-05` title line again (it is now selected AND the active tab); wait 2s. (This tab's sidebar is unfocused after the Test 8 landing, so the first click is the focus claim (#189) — send a second click and judge idempotence from the one the plugin receives.)
+- Expected: no new `Spawning` message, no duplicate tab (tab count unchanged); ▌ and bold cyan stay on `wt-05`.
 
 ## Test 10: Post-spawn sidebar in short window remains sane
 - Action: capture after Test 9 settles.
