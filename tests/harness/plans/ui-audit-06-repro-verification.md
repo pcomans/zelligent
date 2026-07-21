@@ -48,7 +48,8 @@ Conventions: as ui-audit-01 (tmux mouse on; press/release separate send-keys; AR
 - REPRODUCED if the sidebar you land on still shows a `feature-b` row (worktree is deleted on disk — corroborate via ctrl window `ls ~/.zelligent/worktrees/zelligent-test-repo/`).
 - Then press `r`; capture. Expect the row disappears → confirms staleness (not a live worktree).
 
-## R7 — FINDING-9: agent-status glyphs are per-instance (new tabs miss earlier events)
+## R7 — FINDING-9: do new tabs miss earlier agent-status events? (expected: no — glyph state is shared)
+- PREMISE CORRECTION (two consecutive live runs): glyph state is globally shared/broadcast across sidebar instances — a NEW tab's sidebar immediately shows glyphs from earlier events. NOT-REPRODUCED is the norm here; REPRODUCED would be a regression.
 - Via ctrl window: pipe `event=Start,tab=feature-a` (`zellij --session zelligent-test-repo pipe --name zelligent-status --args "event=Start,tab=feature-a"`); wait 2s; capture current tab's sidebar → expect green ● on feature-a row.
 - Via ctrl window: `zellij --session zelligent-test-repo action new-tab --name glyphprobe`; wait 3s; capture the new tab's sidebar.
 - REPRODUCED if the new tab's sidebar shows NO ● on feature-a.
@@ -56,8 +57,8 @@ Conventions: as ui-audit-01 (tmux mouse on; press/release separate send-keys; AR
 
 ## R8 — BUG-10: auto-Start pipe from spawn is dropped (no working glyph on fresh spawn)
 - PREMISE CORRECTION (2026-07-05 verification run): there is NO automatic `event=Start` pipe during spawn — neither `zelligent.sh` nor the plugin pipes anything; the only auto-pipe source is the Claude Code plugin's `UserPromptSubmit`/session hooks, which fire only when a real `claude` agent runs (this fixture's default agent-cmd is `$SHELL`, so nothing pipes). The original audit's "auto-Start dropped" observation was partly a fixture artifact.
-- The race this step now tests deterministically: via ctrl window, pipe `event=Start,tab=feature-a` while NO feature-a tab exists yet; capture (no glyph, no error — silently held). Then spawn `feature-a` via a single real title-line click (selects and activates); after the tab opens, natively switch back to the repo tab and capture ANSI.
-- With the #141 buffer fix: the feature-a row in the repo tab's sidebar shows the green ● (`\x1b[32m●`) — the pre-existing instance buffered the early event and drained it on the registering TabUpdate. Pre-fix behavior (REPRODUCED): the early event is dropped and no ● ever appears without a second manual pipe.
+- The race this step now tests deterministically: via ctrl window, pipe `event=Start,tab=feature-b` while NO feature-b tab exists (the target must be a branch with no live tab at this point in a sequential run — R1 already spawned feature-a; after R6's removal feature-b qualifies). Capture (no glyph, no error — silently held). Then respawn `feature-b` via the `n` branch picker (its worktree was deleted in R6 so it has no sidebar row to click: press `n` in the focused sidebar, move the picker cursor to `feature-b` with `j`/`k`, press Enter — this also exercises the #184 own-cursor behavior: the picker opens on row 0 and leaves the browse ▌ untouched); after the tab opens, natively switch back to the repo tab and capture ANSI.
+- With the #141 buffer fix: the feature-b row in the repo tab's sidebar shows the green ● (`\x1b[32m●`) — the pre-existing instance buffered the early event and drained it on the registering TabUpdate. Pre-fix behavior (REPRODUCED): the early event is dropped and no ● ever appears without a second manual pipe.
 - Negative control: pipe `event=Start,tab=nonexistent` → no glyph anywhere, no error text.
 
 ## R9 — BUG-6: duplicate-named manual tab invisible in sidebar
