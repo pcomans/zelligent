@@ -25,13 +25,14 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 3. MAPPING CONTRACT (the run-01 subtitle-offset bug is FIXED — #135; contract: `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract"): a subtitle line maps to the SAME item as its title, and a single click on EITHER line selects AND activates that item (#137). Blank-separator, header, and footer clicks are no-ops — they no longer select item 0 or anything else.
 4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line (` <repo> ` + `─` fill, bold cyan) DOES render in a tall pane (#156; fixed since run 01 — don't report its presence as a deviation).
 5. Keyboard keys (`d`, `y`, `n`, `r`) go to the SIDEBAR pane — ensure it has focus first. Under the single-click select+activate contract (#137), a click on ANY item row — selected or not — now activates it; to focus the sidebar pane without disturbing selection or triggering activation, click a no-op line instead (header, blank separator, or footer).
+6. OOB-SPAWN SAFETY (ctrl window): a bare `./zelligent.sh spawn` outside Zellij ends in `zellij attach`, turning ctrl into a second mirrored client whose keystrokes leak into the live session. The ctrl-window spawn steps below therefore force the CLI's non-attaching `inside-zellij` mode with the env prefix `ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo` — the CLI then runs `zellij action new-tab` plus a backgrounded pipe, both non-attaching and safe from ctrl. Never run a ctrl-window spawn without this prefix; if one attaches by accident, kill the ctrl pane immediately and open a fresh ctrl shell before ANY further ctrl command.
 
 ## Test 1: Startup sanity
 - Action: launch, wait ~8s, capture.
 - Expected: `local` (▌, bold cyan) + `feature-a/b/c` detached rows; 4 items.
 
 ## Test 2: Out-of-band spawn self-heals within one refresh (#127)
-- Action: via ctrl window: `cd /tmp/zelligent-test-repo && ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn oob-test`; wait 3s; capture view; wait 3s more; capture again.
+- Action: via ctrl window (note 6 — the `ZELLIJ=1 ZELLIJ_SESSION_NAME=...` prefix forces the non-attaching spawn path; NEVER omit it from ctrl): `cd /tmp/zelligent-test-repo && ZELLIJ=1 ZELLIJ_SESSION_NAME=zelligent-test-repo ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn oob-test`; wait 3s; capture view; wait 3s more; capture again.
 - Expected: a new tab `oob-test` appears and the sidebar gains ONE row `oob-test` with subtitle `branch: oob-test` — NOT `user tab`. If the FIRST capture shows `user tab` but the second shows `branch: oob-test`, that is the designed one-shot self-heal: record timings, PASS with note. A `user tab` label that persists in the second capture = FAIL (#127 regression). Duplicate oob-test rows = FAIL.
 
 ## Test 3: Row ordering after out-of-band spawn
