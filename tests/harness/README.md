@@ -158,7 +158,11 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   messages (red) persist indefinitely — cleared only by a newer status or the
   next Key/Mouse interaction with the sidebar, never by a timer (#186). Don't
   assume a red status has cleared just because time passed; check that a real
-  interaction happened first. Timing-sensitive checks on info messages must
+  interaction happened first. The banner is **per plugin instance**: a sidebar
+  instance created after the error was set never shows it (the #140/Z-6 status
+  replay covers agent glyphs only, not the banner), and persistence/clearing
+  applies independently in each tab's own sidebar — judge each instance by the
+  events IT received. Timing-sensitive checks on info messages must
   timestamp captures (`date +%s.%N`) and batch the whole sequence in one shell
   call; tool-call overhead alone can exceed the TTL.
 - For structural claims (pane trees, duplicate panes), capture
