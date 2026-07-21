@@ -25,5 +25,5 @@ Verifies PR 83 startup behavior in a git repo with no managed worktrees.
 - Expected: A semantic version string (e.g., "0.1.14") appears somewhere in the plugin UI
 
 ## Test 5: Manual tabs inherit the sidebar frame
-- Action: Press `Ctrl-t`, then `n`, type `scratch`, and press Enter
+- Action: Press `Ctrl-t`, then `n` (creates an unnamed tab immediately — Zellij has no inline rename prompt here; do NOT type a name, it would land in the new tab's shell). To name it, use `zellij action rename-tab scratch` from the control window
 - Expected: The new manual tab still shows the persistent left sidebar pane
