@@ -1428,14 +1428,19 @@ impl State {
             }
         } else {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
-            let code_str = match exit_code {
-                Some(c) => format!("exit {c}"),
-                None => "no exit code".to_string(),
-            };
             if err.is_empty() {
+                let code_str = match exit_code {
+                    Some(c) => format!("exit {c}"),
+                    None => "no exit code".to_string(),
+                };
                 self.set_status(format!("Remove '{branch}' failed ({code_str})"), true);
             } else {
-                self.set_status(format!("Remove '{branch}' failed: {err}"), true);
+                // The CLI's own message (#188) is already a definitive,
+                // actionable sentence naming the branch and the path — show
+                // it verbatim rather than wrapping it in another "failed:"
+                // prefix, which would just double up ("failed: ... not
+                // removed").
+                self.set_status(err, true);
             }
         }
         Action::Refresh
@@ -2039,13 +2044,19 @@ impl State {
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
-                let confirm_height = if self.selected_sidebar_branch().is_some() {
-                    4
+                let branch = self.selected_sidebar_branch();
+                let closes_tab = branch.is_some_and(|b| self.has_tab_for_branch(b));
+                let agent_running = branch.is_some_and(|b| {
+                    let tab_name = Self::tab_name_for_branch(b);
+                    self.agent_statuses.get(&tab_name) == Some(&AgentStatus::Working)
+                });
+                let confirm_height = if branch.is_some() {
+                    ui::confirm_dialog_lines(closes_tab, agent_running, cols)
                 } else {
                     0
                 };
-                if let Some(branch) = self.selected_sidebar_branch() {
-                    ui::render_confirm(w, branch, cols);
+                if let Some(branch) = branch {
+                    ui::render_confirm(w, branch, cols, closes_tab, agent_running);
                 }
                 let used_lines = 1 + confirm_height + 2;
                 let padding = rows.saturating_sub(used_lines);
@@ -3340,6 +3351,25 @@ mod tests {
         assert!(s.status_is_error);
         assert!(s.status_message.contains("uncommitted changes"));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
+        assert_eq!(action, Action::Refresh);
+    }
+
+    #[test]
+    fn remove_result_error_shows_cli_message_verbatim_no_doubled_prefix() {
+        // The CLI (#188) now sends a definitive, already-actionable sentence
+        // on a dirty-worktree refusal. The plugin must show it as-is, not
+        // wrap it in another "Remove 'x' failed:" prefix — the old
+        // "Remove 'feat-a' failed: Error: could not remove worktree..."
+        // double-error wording must never come back.
+        let mut s = state_with_worktrees();
+        s.mode = Mode::Confirming;
+        let mut ctx = BTreeMap::new();
+        ctx.insert("branch".into(), "feat-a".into());
+        let cli_message =
+            "Worktree for 'feat-a' has uncommitted changes — not removed. Inspect it at /path.";
+        let action = s.handle_remove_result(Some(1), cli_message.as_bytes(), &ctx);
+        assert_eq!(s.status_message, cli_message);
+        assert!(s.status_is_error);
         assert_eq!(action, Action::Refresh);
     }
 

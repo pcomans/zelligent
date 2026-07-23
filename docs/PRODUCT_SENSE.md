@@ -33,6 +33,8 @@ Not part of this contract but a real driving hazard: Zellij's click-to-focus eat
 
 The footer status message is tiered (#186): info self-clears after ~8s, but an error persists until a newer status replaces it or the next Key/Mouse interaction with the sidebar clears it — every interaction described above counts, whatever mode it's in. A remove's completion cue reaches every sidebar instance in the session, not just the one that initiated it (#194), since it rides the same cross-instance invalidate broadcast that heals stale rows — covering both the tab you land on after removing your own worktree's tab, and CLI-side removals run outside the plugin entirely.
 
+Removal never loses data (#188): a dirty worktree is refused with a definitive message rather than destroyed, the branch is never deleted, and `git worktree remove --force` is never used.
+
 ## Conventions
 
 ### Session name format

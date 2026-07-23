@@ -49,7 +49,7 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 
 ## Test 6: `d` on a worktree row shows the confirm dialog
 - Action: sidebar focused (no-op-line click if needed); ▌ should already sit on `feature-a` (#151 re-syncs the cursor to the active tab's row) — if not, move it there with `j`/`k`, not a click (an item click activates); press `d`; capture.
-- Expected: the sidebar switches to a confirmation UI mentioning removal of `feature-a` (record the EXACT text rendered); footer/keybind area changes accordingly.
+- Expected: the sidebar switches to a confirmation UI mentioning removal of `feature-a` (record the EXACT text rendered). Since `feature-a`'s tab is open (spawned in Test 5), the dialog now also discloses `closes its tab` on its own line right below the prompt (#188) — append ` (agent running)` if an agent status glyph was showing for this row; footer/keybind area changes accordingly.
 
 ## Test 7: `n` cancels the confirm dialog
 - Action: press `n`; capture.
@@ -59,26 +59,30 @@ Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, COL=10, via `tmux
 - Action: press `d` again; capture; press `y`; wait 8s; capture.
 - Expected: status shows `Removing 'feature-a'...` (green) during the operation; the `feature-a` tab closes; NO other tab closes (tab bar: `zelligent-test-repo` remains, count drops by exactly 1); the `feature-a` row either disappears (worktree deleted) — record which; no stale bold-cyan row pointing at the closed tab; focus lands on a surviving tab with a working sidebar, which shows `Removed 'feature-a'` (green/info tier, ~8s) — #194: the initiating sidebar instance died along with the closed `feature-a` tab, so the LANDING tab's own instance must show this via the invalidate broadcast, not via its own `handle_remove_result`.
 
-## Test 9: `d` on the local row errors correctly
+## Test 9: `d` then `y` on a dirty worktree refuses definitively, never deletes (#188)
+- Action: click `feature-b` (spawn, wait 8s). Via ctrl window: `echo dirty > "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b/UNCOMMITTED.txt"`. Back in the sidebar (no-op-line click if focus moved), ▌ on `feature-b`; press `d`; capture; press `y`; wait 5s; capture ANSI.
+- Expected: the confirm dialog (before `y`) shows `closes its tab` under the prompt, same as Test 6. After `y`, the removal is refused — the `feature-b` tab stays open, the row stays put — and the sidebar shows a RED status naming the branch and the worktree path, e.g. `Worktree for 'feature-b' has uncommitted changes — not removed. Inspect it at <path>.` (record the EXACT text). This is an error tier (#186): it persists until the next interaction with THIS sidebar instance, not just ~8s. Confirm via ctrl window that the worktree and `UNCOMMITTED.txt` both still exist on disk (`ls "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b/UNCOMMITTED.txt"`) — removal must never destroy uncommitted data. Clean up: `rm "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b/UNCOMMITTED.txt"` via ctrl window before continuing.
+
+## Test 10: `d` on the local row errors correctly
 - Action: click `local` once — this selects AND activates, switching to the repo tab; wait 2s, then re-focus that tab's sidebar via a no-op-line click (the switch moved keyboard focus to the main pane); confirm ▌ on `local`; press `d`; capture ANSI.
 - Expected: red status message `Only worktree tabs can be removed`; NO confirm dialog; rows unchanged. This is a persistent error (#186) — it will NOT self-clear on its own; it stays displayed in THIS tab's sidebar instance until an interaction reaches this instance (banner state is per instance).
 
-## Test 10: `d` on a user-tab row errors correctly
+## Test 11: `d` on a user-tab row errors correctly
 - Action: via ctrl window: `zellij --session zelligent-test-repo action new-tab --name scratch`; wait 3s; in the sidebar click the `scratch` row (first click is the focus claim, #189 — the next click on the already-active `scratch` row re-activates idempotently and leaves ▌ on it); press `d`; capture ANSI.
-- Expected: same red error; `scratch` row intact. Per-instance note (#186): `action new-tab` switched you to the `scratch` tab, whose brand-new sidebar instance never showed Test 9's banner (banner state is per plugin instance and is not replayed to new instances — the #140/Z-6 replay covers agent-status glyphs only). This tab starts banner-free; the `d` press sets a fresh error in THIS instance. Test 9's banner meanwhile still persists in the repo tab's own sidebar instance until an interaction reaches it there.
+- Expected: same red error; `scratch` row intact. Per-instance note (#186): `action new-tab` switched you to the `scratch` tab, whose brand-new sidebar instance never showed Test 10's banner (banner state is per plugin instance and is not replayed to new instances — the #140/Z-6 replay covers agent-status glyphs only). This tab starts banner-free; the `d` press sets a fresh error in THIS instance. Test 10's banner meanwhile still persists in the repo tab's own sidebar instance until an interaction reaches it there.
 
-## Test 11: `r` refresh is visible and harmless
+## Test 12: `r` refresh is visible and harmless
 - Action: press `r`; capture.
 - Expected: green status `Refreshed`; row list identical before/after.
 
-## Test 12: Rapid churn — spawn, remove, respawn the same branch
+## Test 13: Rapid churn — spawn, remove, respawn the same branch
 - Action: click `feature-b` (spawn, wait 8s) → press `d`, `y` (remove, wait 8s) → if the row is gone, recreate via ctrl window `git -C /tmp/zelligent-test-repo worktree add "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b" feature-b 2>/dev/null || git -C /tmp/zelligent-test-repo worktree add "$HOME/.zelligent/worktrees/zelligent-test-repo/feature-b" -b feature-b`; press `r`; then click `feature-b` again (spawn, wait 8s). Capture at every stage.
 - Expected: at NO stage do duplicate `feature-b` rows exist; no stale row for the removed tab between remove and respawn; final state has exactly one `feature-b` row, open+active; tab bar consistent throughout.
 
-## Test 13: Stale-row sweep across all captures
+## Test 14: Stale-row sweep across all captures
 - Action: `grep -c` sanity over archived captures for each known row name; final capture.
 - Expected: final sidebar rows exactly: `local`, remaining worktrees, `scratch` user tab. Report any capture where a row appeared twice or a removed row lingered ≥ 2 captures after its removal.
 
-## Test 14: Anomaly sweep
+## Test 15: Anomaly sweep
 - Action: final plain+ANSI capture.
 - Expected: single ▌, one bold-cyan title, no artifacts. List anomalies.

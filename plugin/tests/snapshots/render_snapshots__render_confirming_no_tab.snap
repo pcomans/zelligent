@@ -4,10 +4,10 @@ expression: "render_to_string(&s, 20, 80)"
 ---
 [?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
-  [33m[1mRemove worktree for 'feat-b'?[0m
-[2m  closes its tab[0m
+  [33m[1mRemove worktree for 'feat-c'?[0m
 
   [2my[0m confirm   [2mn/Esc[0m cancel
+
 
 
 

@@ -90,7 +90,7 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 
 ## Test 15: Confirming mode ignores mouse
 - Action: focus the sidebar via a no-op line click (an item-row click would activate and switch tabs, moving keyboard focus away); move ▌ to `fake-agent` with `j`/`k` (keyboard selection does not activate); press `d`; capture. Left-click the `local` row line; capture. Press `n` to cancel.
-- Expected: confirm dialog stays up across the click; the click neither cancels, confirms, nor moves anything; after `n` the browse list is unchanged with `fake-agent` still present.
+- Expected: `fake-agent` has an open tab, so the confirm dialog shows `closes its tab` under the prompt (#188) — WITHOUT the `(agent running)` qualifier, since its status is the green `✓` (Done) left by Test 5's Stop event, not the working state. Confirm dialog stays up across the click; the click neither cancels, confirms, nor moves anything; after `n` the browse list is unchanged with `fake-agent` still present.
 
 ## Test 16: Anomaly sweep
 - Action: final plain+ANSI capture of both windows.

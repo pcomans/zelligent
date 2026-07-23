@@ -1438,8 +1438,22 @@ if [ "$1" = "remove" ]; then
       exit 1
     fi
   fi
-  if ! git worktree remove "$WORKTREE_PATH" 2>/dev/null; then
-    echo "Error: could not remove worktree. It may have uncommitted changes." >&2
+  # Capture git's stderr (discarding its stdout, which `worktree remove`
+  # doesn't use on failure) so a non-dirty failure can still report git's
+  # actual reason instead of a generic message. The assignment must live in
+  # the `if` condition itself, not a separate statement followed by `[ $? ]`
+  # — under `set -e`, a failing command substitution assigned on its own
+  # line aborts the script before the check ever runs.
+  if ! REMOVE_ERR=$(git worktree remove "$WORKTREE_PATH" 2>&1 >/dev/null); then
+    # The dirty/clean state is knowable — check it instead of hedging with
+    # "may have uncommitted changes" (#188). No `--force` is ever passed
+    # here, so a dirty worktree is refused, never destroyed (#186 error
+    # tier: this persists until the user interacts with it).
+    if [ -n "$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null)" ]; then
+      echo "Worktree for '$BRANCH_NAME' has uncommitted changes — not removed. Inspect it at $WORKTREE_PATH." >&2
+    else
+      echo "Could not remove worktree for '$BRANCH_NAME': $REMOVE_ERR" >&2
+    fi
     exit 1
   fi
   echo "✅ Removed worktree for '$BRANCH_NAME'"
@@ -1464,10 +1478,14 @@ if [ "$1" = "remove" ]; then
       # truncate at the second separator. Use `sed` to strip only the leading
       # `name: ` and keep everything else verbatim.
       ORIGIN_TAB=$(zellij action current-tab-info 2>/dev/null | sed -n '1{s/^name: //p;}')
-      if zellij action go-to-tab-name "$SESSION_NAME" 2>/dev/null; then
-        zellij action close-tab 2>/dev/null || true
+      # `go-to-tab-name` and `close-tab` both print the tab position they
+      # land on to stdout — harmless to zellij's own CLI callers, but a
+      # stray digit dropped into the sidebar's caller shell between the ✅
+      # and ℹ️ lines otherwise. Silence stdout too, matching `2>/dev/null`.
+      if zellij action go-to-tab-name "$SESSION_NAME" >/dev/null 2>&1; then
+        zellij action close-tab >/dev/null 2>&1 || true
         if [ -n "$ORIGIN_TAB" ] && [ "$ORIGIN_TAB" != "$SESSION_NAME" ]; then
-          zellij action go-to-tab-name "$ORIGIN_TAB" 2>/dev/null || true
+          zellij action go-to-tab-name "$ORIGIN_TAB" >/dev/null 2>&1 || true
         fi
       fi
     fi

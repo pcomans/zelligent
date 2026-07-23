@@ -1795,6 +1795,40 @@ check "remove unmanaged worktree: dir still exists" "true" \
 git -C "$REPO_ROOT" worktree remove --force "$TEST_WT_UNMANAGED_DIR" &>/dev/null || true
 git -C "$REPO_ROOT" branch -D "$TEST_WT_UNMANAGED_BRANCH" &>/dev/null || true
 
+# remove refuses a dirty worktree with a definitive, actionable message —
+# never a hedged "may have uncommitted changes" (#188). The worktree and its
+# uncommitted file must both survive: removal must never lose data.
+TEST_WT_DIRTY_BRANCH="test-dirty-$$"
+TEST_WT_DIRTY_DIR="$HOME/.zelligent/worktrees/$REPO_NAME/$TEST_WT_DIRTY_BRANCH"
+register_cleanup_worktree "$TEST_WT_DIRTY_DIR" "$TEST_WT_DIRTY_BRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_DIRTY_BRANCH" "$TEST_WT_DIRTY_DIR" HEAD &>/dev/null
+echo "dirty" > "$TEST_WT_DIRTY_DIR/UNCOMMITTED.txt"
+out=$("$SCRIPT" remove "$TEST_WT_DIRTY_BRANCH" 2>&1); code=$?
+check "remove dirty worktree exits non-zero" "1" "$code"
+contains "remove dirty worktree: definitive refusal, not hedged" \
+  "has uncommitted changes — not removed" "$out"
+contains "remove dirty worktree: names the path" "$TEST_WT_DIRTY_DIR" "$out"
+excludes "remove dirty worktree: no hedged old wording" "may have uncommitted changes" "$out"
+excludes "remove dirty worktree: no doubled Error: prefix" "Error: could not remove" "$out"
+check "remove dirty worktree: worktree dir survives" "true" \
+  "$([ -d "$TEST_WT_DIRTY_DIR" ] && echo true || echo false)"
+check "remove dirty worktree: uncommitted file survives" "true" \
+  "$([ -f "$TEST_WT_DIRTY_DIR/UNCOMMITTED.txt" ] && echo true || echo false)"
+rm -f "$TEST_WT_DIRTY_DIR/UNCOMMITTED.txt"
+git -C "$REPO_ROOT" worktree remove --force "$TEST_WT_DIRTY_DIR" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D "$TEST_WT_DIRTY_BRANCH" &>/dev/null || true
+
+# Contract pin (#188): the remove path must never be able to destroy data —
+# no `git worktree remove --force` (which would blow away uncommitted work)
+# and no branch deletion anywhere in zelligent.sh. Whole-file grep is safe
+# here since neither string legitimately belongs anywhere else in the file.
+SCRIPT_CONTENT=$(cat "$SCRIPT")
+excludes "remove never force-removes a worktree" "worktree remove --force" "$SCRIPT_CONTENT"
+excludes "remove never deletes a branch (git branch -D)" "branch -D" "$SCRIPT_CONTENT"
+excludes "remove never deletes a branch (git branch --delete)" "branch --delete" "$SCRIPT_CONTENT"
+contains "remove always reassures the branch was kept" \
+  "was not deleted" "$SCRIPT_CONTENT"
+
 # list-branches
 out=$("$SCRIPT" list-branches 2>&1); code=$?
 check "list-branches exits 0" "0" "$code"
