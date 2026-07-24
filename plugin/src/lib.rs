@@ -1994,7 +1994,7 @@ impl State {
                 for _ in 0..rows.saturating_sub(5) {
                     writeln!(w).unwrap();
                 }
-                ui::render_footer(w, &self.mode, VERSION, cols);
+                ui::render_footer(w, &self.mode, VERSION, cols, false, false);
             }
             Mode::NotGitRepo => {
                 // Same fallback rationale as the Loading arm: the red error text in
@@ -2009,7 +2009,7 @@ impl State {
                     writeln!(w).unwrap();
                 }
                 ui::render_status(w, &self.status_message, self.status_is_error, cols);
-                ui::render_footer(w, &self.mode, VERSION, cols);
+                ui::render_footer(w, &self.mode, VERSION, cols, false, false);
             }
             Mode::BrowseWorktrees => {
                 if self.should_render_empty_state() {
@@ -2017,14 +2017,18 @@ impl State {
                     ui::render_empty_state(w);
                     let list_height = 6;
                     let status_height = ui::status_height(&self.status_message, cols);
-                    let footer_height = if cols >= 55 { 3 } else { 4 };
+                    // #192: the empty-state footer is always blank + one
+                    // `r refresh` hint + version (3 lines) — the body above
+                    // already explains `i`/`n`, so there's no width-gated
+                    // variant to account for here.
+                    let footer_height = 3;
                     let used_lines = 1 + list_height + status_height + footer_height;
                     let padding = rows.saturating_sub(used_lines);
                     for _ in 0..padding {
                         writeln!(w).unwrap();
                     }
                     ui::render_status(w, &self.status_message, self.status_is_error, cols);
-                    ui::render_footer(w, &self.mode, VERSION, cols);
+                    ui::render_footer(w, &self.mode, VERSION, cols, true, false);
                 } else {
                     // `layout` is computed once here and is the ONLY thing
                     // that decides header/separator visibility and the item
@@ -2067,7 +2071,8 @@ impl State {
                         writeln!(w).unwrap();
                     }
                     ui::render_status(w, &self.status_message, self.status_is_error, cols);
-                    ui::render_footer(w, &self.mode, VERSION, cols);
+                    let can_remove = self.selected_sidebar_branch().is_some();
+                    ui::render_footer(w, &self.mode, VERSION, cols, false, can_remove);
                 }
             }
             Mode::SelectBranch => {
@@ -2098,7 +2103,7 @@ impl State {
                 for _ in 0..padding {
                     writeln!(w).unwrap();
                 }
-                ui::render_footer(w, &self.mode, VERSION, cols);
+                ui::render_footer(w, &self.mode, VERSION, cols, false, false);
             }
             Mode::InputBranch => {
                 ui::render_header(w, &self.repo_name, cols);
@@ -2110,7 +2115,7 @@ impl State {
                     writeln!(w).unwrap();
                 }
                 ui::render_status(w, &self.status_message, self.status_is_error, cols);
-                ui::render_footer(w, &self.mode, VERSION, cols);
+                ui::render_footer(w, &self.mode, VERSION, cols, false, false);
             }
             Mode::Confirming => {
                 ui::render_header(w, &self.repo_name, cols);
@@ -2133,7 +2138,7 @@ impl State {
                 for _ in 0..padding {
                     writeln!(w).unwrap();
                 }
-                ui::render_footer(w, &self.mode, VERSION, cols);
+                ui::render_footer(w, &self.mode, VERSION, cols, false, false);
             }
         }
     }
@@ -2740,9 +2745,10 @@ mod tests {
 
     // Pane-relative mouse-mapping tests (#135/#136). `state_with_sidebar()`
     // has 3 items (feat-a/b/c) with feat-a active, so `selected_index`
-    // starts at 0. At rows=20, cols=80, empty status: footer_lines=3
-    // (cols>=55), status_lines=0, content_budget=17 -> header+separator
-    // both show (leading=2). Rendered line map for this fixture:
+    // starts at 0. At rows=20, cols=80, empty status: footer_lines=4
+    // (#192: constant, no longer cols-gated), status_lines=0,
+    // content_budget=16 -> header+separator both show (leading=2). Rendered
+    // line map for this fixture:
     //   line 0        = header            -> no-op
     //   line 1        = blank separator   -> no-op
     //   line 2/3      = item0 title/subtitle (feat-a)
@@ -2894,7 +2900,7 @@ mod tests {
     /// At cols=18 "Only worktree tabs can be removed" word-wraps to 3
     /// physical rows ("Only worktree" / "tabs can be" / "removed"), each
     /// carrying the 2-space hanging indent: status_lines = 1 blank + 3 = 4,
-    /// footer_lines = 4 (cols < 55), content_budget = 20 - 8 = 12 >= 4, so
+    /// footer_lines = 4 (#192: constant), content_budget = 20 - 8 = 12 >= 4, so
     /// leading (header + separator) is still 2 — independent of item count.
     /// For every sidebar item, the row `render_to` actually drew its title
     /// on must be the same row `sidebar_index_at_line` resolves back to
@@ -2963,8 +2969,9 @@ mod tests {
     /// Locks the pre-existing (and still correct) scrolled-viewport
     /// behavior: `viewport.start` composes with the leading-line offset
     /// without compounding. 20 items, selected 15, rows=10 cols=80 ->
-    /// footer_lines=3, content_budget=7 -> leading=2, item_rows_budget=5 ->
-    /// max_items=2 -> start=14 (selected - max_items + 1), visible=2.
+    /// footer_lines=4 (#192: constant), content_budget=6 -> leading=2,
+    /// item_rows_budget=4 -> max_items=2 -> start=14 (selected - max_items
+    /// + 1), visible=2.
     #[test]
     fn browse_mouse_click_maps_correctly_in_scrolled_viewport() {
         let mut s = State {
@@ -2994,27 +3001,29 @@ mod tests {
     }
 
     /// Short-pane degradation: blank separator drops first, then the
-    /// header — an item row is never sacrificed. cols=80 (footer_lines=3),
+    /// header — an item row is never sacrificed. cols=80 (footer_lines=4,
+    /// #192: constant, one row taller than the old cols>=55 case — every
+    /// threshold below is shifted up by 1 row from before this change),
     /// no status.
     #[test]
     fn browse_mouse_short_pane_drops_separator_before_header() {
         let mut s = state_with_sidebar();
         s.last_cols = 80;
 
-        // content_budget = rows - 3. rows=7 -> budget=4 -> header+separator.
-        s.last_rows = 7;
+        // content_budget = rows - 4. rows=8 -> budget=4 -> header+separator.
+        s.last_rows = 8;
         assert_eq!(s.sidebar_index_at_line(0), None, "header");
         assert_eq!(s.sidebar_index_at_line(1), None, "separator");
         assert_eq!(s.sidebar_index_at_line(2), Some(0));
 
-        // rows=6 -> budget=3 -> header only, no separator.
-        s.last_rows = 6;
+        // rows=7 -> budget=3 -> header only, no separator.
+        s.last_rows = 7;
         assert_eq!(s.sidebar_index_at_line(0), None, "header");
         assert_eq!(s.sidebar_index_at_line(1), Some(0), "item row right after header");
 
-        // rows=5 -> budget=2 -> neither header nor separator; item row 0
+        // rows=6 -> budget=2 -> neither header nor separator; item row 0
         // is still shown (never sacrificed).
-        s.last_rows = 5;
+        s.last_rows = 6;
         assert_eq!(s.sidebar_index_at_line(0), Some(0), "item title at pane top");
         assert_eq!(s.sidebar_index_at_line(1), Some(0), "item subtitle");
     }

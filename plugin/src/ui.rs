@@ -177,7 +177,13 @@ pub fn sidebar_layout(
     selected: usize,
     status_message: &str,
 ) -> SidebarLayout {
-    let footer_lines = if cols >= 55 { 3 } else { 4 };
+    // #192: the populated-list footer is always two hint lines (nav+open on
+    // one, create+remove on the other) — blank + line 1 + line 2 + version
+    // — regardless of pane width, now that both lines fit comfortably down
+    // to the narrowest tested sidebar width (30 cols). This used to vary
+    // with `cols` (3 lines when a single combined line fit at cols>=55,
+    // else 4); that split is gone along with the single-line variant.
+    let footer_lines = 4;
     let status_lines = status_height(status_message, cols);
 
     let content_budget = rows.saturating_sub(status_lines + footer_lines);
@@ -563,30 +569,54 @@ pub fn render_confirm(w: &mut impl Write, branch: &str, cols: usize, closes_tab:
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
 }
 
-pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize) {
+/// `browse_empty` and `browse_can_remove` are consulted only when `mode` is
+/// `Mode::BrowseWorktrees`; every other mode ignores them (pass `false,
+/// false`). `browse_empty` mirrors `State::should_render_empty_state()` —
+/// the empty state's body already explains `i`/`n`, so the footer drops
+/// down to just `r refresh` (#192: previously the full nav/create/remove
+/// footer was shown even with nothing to navigate, open, or delete).
+/// `browse_can_remove` mirrors `selected_sidebar_branch().is_some()`, the
+/// same condition `handle_key_browse`'s `d` arm checks — the `d remove`
+/// hint would otherwise promise an action that errors on the selected row
+/// (e.g. a plain user tab with no matched branch).
+pub fn render_footer(
+    w: &mut impl Write,
+    mode: &Mode,
+    version: &str,
+    cols: usize,
+    browse_empty: bool,
+    browse_can_remove: bool,
+) {
     writeln!(w).unwrap();
     match mode {
         Mode::Loading => {}
         Mode::BrowseWorktrees => {
-            if cols >= 55 {
-                writeln!(
-                    w,
-                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open  \
-                     {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} remove  \
-                     {DIM}r{RESET} refresh"
-                )
-                .unwrap();
+            if browse_empty {
+                writeln!(w, "  {DIM}r{RESET} refresh").unwrap();
             } else {
+                // #192: j/k still work (handle_key_browse never dropped
+                // them) but the footer spends no characters on them —
+                // arrows are the discoverable hint, same rationale #196
+                // applied to the branch picker's j/k-as-filter-chars change
+                // below. Two lines, both comfortably under the narrowest
+                // tested sidebar width (30 cols: see
+                // render_browse_with_wrapped_status_message), so unlike
+                // SelectBranch's footer this one doesn't need a cols-gated
+                // full/narrow wording split.
                 writeln!(
                     w,
-                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} open"
+                    "  {DIM}↑/↓{RESET}  {DIM}Enter{RESET} open  {DIM}r{RESET} refresh"
                 )
                 .unwrap();
-                writeln!(
-                    w,
-                    "  {DIM}n{RESET} branch  {DIM}i{RESET} new  {DIM}d{RESET} del  {DIM}r{RESET} ↻"
-                )
-                .unwrap();
+                if browse_can_remove {
+                    writeln!(
+                        w,
+                        "  {DIM}n{RESET} pick  {DIM}i{RESET} new  {DIM}d{RESET} remove"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(w, "  {DIM}n{RESET} pick  {DIM}i{RESET} new").unwrap();
+                }
             }
         }
         Mode::SelectBranch => {
@@ -971,5 +1001,94 @@ mod tests {
         let s = branch_list_string(&branches, &[BranchAnnotation::Open], 0, 20, 10);
         assert!(!s.contains("open"));
         assert!(s.contains('…'));
+    }
+
+    // --- render_footer (#192: state-aware browse footer) ---
+
+    fn footer_string(mode: &Mode, cols: usize, browse_empty: bool, browse_can_remove: bool) -> String {
+        let mut buf = Vec::new();
+        render_footer(&mut buf, mode, "0.0.0-test", cols, browse_empty, browse_can_remove);
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// Strip ANSI SGR sequences (color/reset codes) so `visible_width` sees
+    /// only the glyphs a terminal would actually lay out — otherwise the
+    /// escape bytes themselves (e.g. the printable `2`/`m` in `\x1b[2m`)
+    /// inflate the width `UnicodeWidthStr` reports.
+    fn strip_ansi(line: &str) -> String {
+        let mut out = String::new();
+        let mut in_escape = false;
+        for ch in line.chars() {
+            if ch == '\x1b' {
+                in_escape = true;
+            } else if in_escape {
+                if ch.is_ascii_alphabetic() {
+                    in_escape = false;
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Every visible line of every browse-footer variant, at the narrowest
+    /// sidebar width this file already exercises elsewhere for real renders
+    /// (30 cols — see `render_browse_with_wrapped_status_message` in
+    /// render_snapshots.rs), must fit without soft-wrapping. A line that
+    /// overflows would silently desync the frame's row budget from what
+    /// `sidebar_layout`/the empty-state arm actually reserve for it — the
+    /// same class of bug #135/#136/#187 already fixed for other lines.
+    #[test]
+    fn browse_footer_variants_fit_narrow_sidebar_width() {
+        const NARROW: usize = 30;
+        for (empty, can_remove) in [(true, false), (false, false), (false, true)] {
+            let s = footer_string(&Mode::BrowseWorktrees, NARROW, empty, can_remove);
+            for line in s.lines().filter(|l| !l.is_empty()) {
+                let width = visible_width(&strip_ansi(line));
+                assert!(
+                    width <= NARROW,
+                    "line {line:?} (width {width}) overflows {NARROW} cols \
+                     (empty={empty}, can_remove={can_remove})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn browse_footer_empty_state_shows_only_refresh_hint() {
+        // #192a: nothing to navigate/open/delete in the empty state — the
+        // body already explains `i`/`n`, so the footer drops down to just
+        // the refresh hint, no nav/Enter/create/delete hints.
+        let s = footer_string(&Mode::BrowseWorktrees, 80, true, false);
+        assert!(s.contains('r') && s.contains("refresh"));
+        assert!(!s.contains("Enter"), "empty state has nothing to open");
+        assert!(!s.contains('n'), "empty state's own body already covers branch picking");
+        assert!(!s.contains('d'), "empty state has nothing to remove");
+    }
+
+    #[test]
+    fn browse_footer_with_items_shows_nav_and_creation_hints() {
+        let s = footer_string(&Mode::BrowseWorktrees, 80, false, false);
+        assert!(s.contains("Enter"), "populated list must hint how to open an item");
+        assert!(s.contains('r') && s.contains("refresh"));
+        assert!(s.contains('n'), "must hint how to pick an existing branch");
+        assert!(s.contains('i'), "must hint how to create a new branch");
+    }
+
+    #[test]
+    fn browse_footer_shows_remove_hint_only_when_selection_is_removable() {
+        // Mirrors the exact condition `handle_key_browse`'s 'd' arm checks
+        // (`selected_sidebar_branch().is_some()`) — the hint must never
+        // promise an action that would error ("Only worktree tabs can be
+        // removed") on the currently selected row.
+        let removable = footer_string(&Mode::BrowseWorktrees, 80, false, true);
+        assert!(removable.contains("remove"), "removable selection: d remove must be hinted");
+
+        let not_removable = footer_string(&Mode::BrowseWorktrees, 80, false, false);
+        assert!(
+            !not_removable.contains("remove"),
+            "non-removable selection (e.g. a plain user tab): d remove must be hidden"
+        );
     }
 }

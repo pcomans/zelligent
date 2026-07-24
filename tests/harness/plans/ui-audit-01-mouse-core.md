@@ -35,7 +35,7 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 - Sidebar pane = 36 cols. Header: ` zelligent-test-repo ` + `─` fill, bold cyan (repo name only, #156).
 - Each item = 2 lines. Title line: `▌ name` (cyan bar + space) when the cursor is on it, else two spaces + name. Subtitle line (dim): `branch: X` for worktrees, `current repo` for local, `user tab` for manual tabs.
 - The Zellij-active tab's row title is BOLD CYAN — independent axis from the ▌ cursor.
-- Footer (36 cols = narrow variant): `↑/k up  ↓/j down  Enter open` / `n branch  i new  d del  r ↻` / version line.
+- Footer (#192, state-aware — this fixture always has items, so the minimal empty-state footer doesn't apply): two lines — `↑/↓  Enter open  r refresh` / `n pick  i new` — plus `d remove` appended to the second line (`n pick  i new  d remove`) ONLY when the selected row is a removable worktree tab (`selected_sidebar_branch().is_some()`); the `local` row is never removable, so it's hidden whenever ▌ sits on `local` — / version line.
 - Interaction contract: see `docs/PRODUCT_SENSE.md` § "Sidebar interaction contract" — one normative source, do not restate it elsewhere. Plan-specific driving note: a single left click on a row's title OR subtitle line selects AND activates it in the same click (switch if a tab exists, spawn if detached); clicking the already-selected/active row re-activates idempotently (no duplicate spawn). Blank/header/footer/past-end clicks: no-op. Wheel: ▌ moves one row, wraps at both ends, never activates. Right-click: no-op.
 
 ## Test 1: Startup render is exactly as specified
@@ -83,7 +83,7 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 - Expected: no change.
 
 ## Test 12: Click on footer keybind line is a no-op
-- Action: click the `n branch  i new  d del  r ↻` line.
+- Action: click the `n pick  i new  d remove` line (▌ is on `feature-a`, a removable worktree row, so `d remove` is showing — see the rendering contract's #192 note).
 - Expected: no change.
 
 ## Test 13: Right-click is a no-op
