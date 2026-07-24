@@ -1986,7 +1986,7 @@ impl State {
                 // "loading..." header read as if the repo were named that).
                 ui::render_header(w, "", cols);
                 if self.status_is_error {
-                    ui::render_status(w, &self.status_message, self.status_is_error);
+                    ui::render_status(w, &self.status_message, self.status_is_error, cols);
                 } else {
                     writeln!(w).unwrap();
                     writeln!(w, "  Waiting for permissions...").unwrap();
@@ -2008,7 +2008,7 @@ impl State {
                 for _ in 0..padding {
                     writeln!(w).unwrap();
                 }
-                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_status(w, &self.status_message, self.status_is_error, cols);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::BrowseWorktrees => {
@@ -2023,7 +2023,7 @@ impl State {
                     for _ in 0..padding {
                         writeln!(w).unwrap();
                     }
-                    ui::render_status(w, &self.status_message, self.status_is_error);
+                    ui::render_status(w, &self.status_message, self.status_is_error, cols);
                     ui::render_footer(w, &self.mode, VERSION, cols);
                 } else {
                     // `layout` is computed once here and is the ONLY thing
@@ -2066,7 +2066,7 @@ impl State {
                     for _ in 0..padding {
                         writeln!(w).unwrap();
                     }
-                    ui::render_status(w, &self.status_message, self.status_is_error);
+                    ui::render_status(w, &self.status_message, self.status_is_error, cols);
                     ui::render_footer(w, &self.mode, VERSION, cols);
                 }
             }
@@ -2109,7 +2109,7 @@ impl State {
                 for _ in 0..padding {
                     writeln!(w).unwrap();
                 }
-                ui::render_status(w, &self.status_message, self.status_is_error);
+                ui::render_status(w, &self.status_message, self.status_is_error, cols);
                 ui::render_footer(w, &self.mode, VERSION, cols);
             }
             Mode::Confirming => {
@@ -2885,6 +2885,79 @@ mod tests {
         assert_eq!(s.sidebar_index_at_line(1), None, "separator still there");
         assert_eq!(s.sidebar_index_at_line(2), Some(0));
         assert_eq!(s.sidebar_index_at_line(4), Some(1));
+    }
+
+    /// #187: word-wrap must not desync `render_to` from
+    /// `sidebar_index_at_line` — the exact hazard #135/#136 already guard
+    /// against for header/separator visibility, now re-verified against an
+    /// actually-rendered frame instead of just the shared layout struct.
+    /// At cols=18 "Only worktree tabs can be removed" word-wraps to 3
+    /// physical rows ("Only worktree" / "tabs can be" / "removed"), each
+    /// carrying the 2-space hanging indent: status_lines = 1 blank + 3 = 4,
+    /// footer_lines = 4 (cols < 55), content_budget = 20 - 8 = 12 >= 4, so
+    /// leading (header + separator) is still 2 — independent of item count.
+    /// For every sidebar item, the row `render_to` actually drew its title
+    /// on must be the same row `sidebar_index_at_line` resolves back to
+    /// that item.
+    #[test]
+    fn browse_mouse_mapping_agrees_with_render_for_multiline_wrapped_status() {
+        let mut s = state_with_sidebar();
+        s.last_rows = 20;
+        s.last_cols = 18;
+        s.status_message = "Only worktree tabs can be removed".into();
+        s.status_is_error = true;
+
+        let wrapped = ui::wrap_status(&s.status_message, s.last_cols);
+        assert_eq!(
+            wrapped,
+            vec!["  Only worktree", "  tabs can be", "  removed"],
+            "sanity: this test's row math assumes exactly this 3-line wrap"
+        );
+
+        let mut buf = Vec::new();
+        s.render_to(&mut buf, s.last_rows, s.last_cols);
+        let output = String::from_utf8(buf).unwrap();
+        // Strip ANSI SGR sequences (color/reset codes) so row text can be
+        // matched against plain item names.
+        let strip_ansi = |line: &str| -> String {
+            let mut out = String::new();
+            let mut in_escape = false;
+            for ch in line.chars() {
+                if ch == '\x1b' {
+                    in_escape = true;
+                } else if in_escape {
+                    if ch.is_ascii_alphabetic() {
+                        in_escape = false;
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        };
+        let lines: Vec<String> = output.lines().map(strip_ansi).collect();
+
+        let leading = 2;
+        for (item_idx, item) in s.sidebar_items.iter().enumerate() {
+            let title_row = leading + item_idx * 2;
+            let subtitle_row = title_row + 1;
+            assert!(
+                lines[title_row].contains(item.tab_name.as_str()),
+                "row {title_row} should render item {item_idx} ('{}'), got {:?}",
+                item.tab_name,
+                lines.get(title_row)
+            );
+            assert_eq!(
+                s.sidebar_index_at_line(title_row),
+                Some(item_idx),
+                "click on title row {title_row} must map to the item render drew there"
+            );
+            assert_eq!(
+                s.sidebar_index_at_line(subtitle_row),
+                Some(item_idx),
+                "click on subtitle row {subtitle_row} must map to the same item"
+            );
+        }
     }
 
     /// Locks the pre-existing (and still correct) scrolled-viewport

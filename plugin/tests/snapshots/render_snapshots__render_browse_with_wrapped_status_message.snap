@@ -1,6 +1,6 @@
 ---
 source: tests/render_snapshots.rs
-expression: "render_to_string(&s, 20, 30)"
+expression: output
 ---
 [?1049h[H[2J[1m[36m zelligent ───────────────────[0m
 
@@ -16,7 +16,8 @@ expression: "render_to_string(&s, 20, 30)"
 
 
 
-  [31mOnly worktree tabs can be removed[0m
+[31m  Only worktree tabs can be[0m
+[31m  removed[0m
 
   [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m open
   [2mn[0m branch  [2mi[0m new  [2md[0m del  [2mr[0m ↻
