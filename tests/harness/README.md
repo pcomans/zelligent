@@ -136,7 +136,9 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   applies to the FIRST-EVER click a pane receives — wheel events do NOT
   establish click-focus, so wheeling first doesn't save you — and it recurs
   after EVERY cross-tab landing, not just at startup. Count clicks from
-  the first one the plugin receives.
+  the first one the plugin receives. Tell: the pane border color changes
+  (orange on hover, green on focus) even though plugin content doesn't —
+  use that to confirm the claim landed without spending a capture on it.
 - **Keyboard focus follows the new tab's main pane** after a click-driven
   spawn/switch. Re-click the sidebar once before sending it keys, or the keys
   land in the shell (a literal `dy` in a worktree prompt was the incident).
