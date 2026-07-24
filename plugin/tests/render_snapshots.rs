@@ -209,7 +209,8 @@ fn render_sidebar_list_short_pane_still_shows_one_item() {
 }
 
 /// Middle degradation tier: enough room for the header but not the blank
-/// separator. rows=6, cols=80 -> footer_lines=3, content_budget=3 ==
+/// separator. rows=7, cols=80 -> footer_lines=4 (#192: constant, one row
+/// taller than the old cols>=55 case), content_budget=3 ==
 /// MIN_ROWS_HEADER_ONLY -> header shows, separator does not.
 #[test]
 fn render_sidebar_list_medium_pane_drops_separator_keeps_header() {
@@ -225,7 +226,7 @@ fn render_sidebar_list_medium_pane_drops_separator_keeps_header() {
         ..Default::default()
     };
     s.recompute_sidebar_items();
-    insta::assert_snapshot!(render_to_string(&s, 6, 80));
+    insta::assert_snapshot!(render_to_string(&s, 7, 80));
 }
 
 /// A status message that's wider than the pane wraps to multiple physical
