@@ -68,16 +68,88 @@ impl SidebarLayout {
 const MIN_ROWS_HEADER_AND_SEPARATOR: usize = 4;
 const MIN_ROWS_HEADER_ONLY: usize = 3;
 
-/// How many physical rows a status message will occupy (its content line
-/// only, not the leading blank line before it), accounting for wrap at the
-/// real pane width. `render_status` prints `"  {message}"`, so the wrap
-/// width is the message's visible width plus the 2-space prefix.
-fn status_wrap_rows(message: &str, cols: usize) -> usize {
-    if cols == 0 {
-        return 1;
+/// The two-space hanging indent every status line — first line and
+/// continuations alike — is rendered with. See `wrap_status`.
+const STATUS_INDENT: &str = "  ";
+
+/// Word-wrap `message` into display lines ready to print as-is: each line
+/// already carries the `STATUS_INDENT` hanging indent, so a multi-line
+/// status reads as one message instead of a first line that's indented and
+/// continuations flush against the pane edge (#187). Wrapping breaks at
+/// word boundaries; a single word wider than the available width still
+/// hard-breaks character-by-character so this can never overflow the pane
+/// or loop forever. This is the ONLY place that performs this wrap — both
+/// `status_wrap_rows` (line-count math feeding `sidebar_layout`, and from
+/// there `State::sidebar_index_at_line`'s click mapping) and `render_status`
+/// (actual bytes on screen) route through it, so the row a click maps to
+/// can never disagree with the row the render actually drew. See
+/// #135/#136 for the original render/mapper-drift bug this pattern guards
+/// against; #187 is a second instance of the same hazard.
+pub fn wrap_status(message: &str, cols: usize) -> Vec<String> {
+    if message.is_empty() {
+        return Vec::new();
     }
-    let width = 2 + visible_width(message);
-    width.div_ceil(cols).max(1)
+    let indent_width = visible_width(STATUS_INDENT);
+    let avail = cols.saturating_sub(indent_width).max(1);
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for word in message.split_whitespace() {
+        let word_width = visible_width(word);
+        if word_width > avail {
+            // Word alone doesn't fit even on an empty line: hard-break it
+            // character-by-character rather than overflow or loop forever.
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            for ch in word.chars() {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_width + ch_width > avail && !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+                current.push(ch);
+                current_width += ch_width;
+            }
+            continue;
+        }
+
+        if current.is_empty() {
+            current = word.to_string();
+            current_width = word_width;
+        } else if current_width + 1 + word_width <= avail {
+            current.push(' ');
+            current.push_str(word);
+            current_width += 1 + word_width;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+            current_width = word_width;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        // `message` was non-empty but all-whitespace.
+        lines.push(String::new());
+    }
+
+    lines
+        .into_iter()
+        .map(|line| format!("{STATUS_INDENT}{line}"))
+        .collect()
+}
+
+/// How many physical rows a status message will occupy (its content lines
+/// only, not the leading blank line before it), accounting for word-wrap at
+/// the real pane width. Delegates to `wrap_status` — see its doc comment
+/// for why this must be the only place that computes this.
+fn status_wrap_rows(message: &str, cols: usize) -> usize {
+    wrap_status(message, cols).len().max(1)
 }
 
 /// Physical rows `render_status` will occupy this frame: 0 when there is no
@@ -553,13 +625,15 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
     write!(w, "  {DIM}{version_line}{RESET}").unwrap();
 }
 
-pub fn render_status(w: &mut impl Write, message: &str, is_error: bool) {
+pub fn render_status(w: &mut impl Write, message: &str, is_error: bool, cols: usize) {
     if message.is_empty() {
         return;
     }
     let color = if is_error { RED } else { GREEN };
     writeln!(w).unwrap();
-    writeln!(w, "  {color}{message}{RESET}").unwrap();
+    for line in wrap_status(message, cols) {
+        writeln!(w, "{color}{line}{RESET}").unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +667,121 @@ mod tests {
         // future edit can't quietly reintroduce it (it would be invisible in
         // snapshots that use other repo names).
         assert!(header_string("zelligent", 40).contains(" zelligent "));
+    }
+
+    // --- wrap_status (#187: word-boundary wrap + hanging indent) ---
+
+    // The two #187 issue examples were captured at a pane 34 characters of
+    // content wide (the harness plan describes this as "36 cols" counting
+    // the tmux capture's two border characters; the verbatim captured rows
+    // — "  Only worktree tabs can be remove" / "d" and "here first, or
+    // spawn a different b" / "ranch." — are each exactly 34 characters).
+
+    #[test]
+    fn wrap_status_breaks_on_word_boundaries_issue_example_one() {
+        // Verbatim issue example: char-level wrap used to split
+        // "removed" into "remove" / "d". Word-boundary wrap must keep
+        // "removed" whole and give every line the same 2-space indent.
+        let lines = wrap_status("Only worktree tabs can be removed", 34);
+        assert_eq!(lines, vec!["  Only worktree tabs can be", "  removed"]);
+        for line in &lines {
+            assert!(line.starts_with("  "), "every line keeps the hanging indent");
+        }
+        assert!(
+            lines.iter().all(|l| !l.trim().is_empty()),
+            "no blank continuation line"
+        );
+    }
+
+    #[test]
+    fn wrap_status_breaks_on_word_boundaries_issue_example_two() {
+        // Verbatim issue example: char-level wrap used to split "branch."
+        // into "b" / "ranch." across the wrap point. This is the real
+        // runtime message (zelligent.sh's "already checked out" refusal);
+        // word-boundary wrap must never split "branch." either.
+        let lines = wrap_status(
+            "zelligent only opens isolated worktrees — check out another \
+             branch there first, or spawn a different branch.",
+            34,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "  zelligent only opens isolated",
+                "  worktrees — check out another",
+                "  branch there first, or spawn a",
+                "  different branch.",
+            ]
+        );
+        for line in &lines {
+            assert!(line.starts_with("  "), "every line keeps the hanging indent");
+        }
+        assert!(
+            !lines.iter().any(|l| l.trim() == "ranch."),
+            "'branch.' must never be split mid-word (#187)"
+        );
+    }
+
+    #[test]
+    fn wrap_status_hard_breaks_a_word_wider_than_the_available_width() {
+        // A single word longer than the wrap width must still terminate
+        // (no infinite loop) and never overflow a line past `cols`.
+        let word = "supercalifragilisticexpialidocious";
+        let lines = wrap_status(word, 10);
+        assert!(!lines.is_empty());
+        for line in &lines {
+            assert!(
+                visible_width(line) <= 10,
+                "line {line:?} overflows the 10-col width"
+            );
+        }
+        // Hard-broken pieces reassemble into the original word losslessly.
+        let rejoined: String = lines.iter().map(|l| l.trim_start()).collect();
+        assert_eq!(rejoined, word);
+    }
+
+    #[test]
+    fn wrap_status_never_loops_or_panics_on_degenerate_widths() {
+        // cols smaller than the 2-space indent must not panic or hang.
+        for cols in [0, 1, 2] {
+            let lines = wrap_status("hello world", cols);
+            assert!(!lines.is_empty());
+        }
+    }
+
+    #[test]
+    fn wrap_status_respects_unicode_display_width() {
+        // Wide (double-column) CJK characters must be counted by display
+        // width, not `char` count, consistent with `visible_width`
+        // elsewhere in this module (e.g. `clip_to_width`).
+        let message = "文字幅テスト文字幅テスト"; // 12 chars, each width 2 = 24 cols
+        let lines = wrap_status(message, 10);
+        // avail = 10 - 2 = 8 display columns => 4 wide chars per line.
+        for line in &lines {
+            assert!(
+                visible_width(line) <= 10,
+                "line {line:?} (width {}) overflows 10 cols",
+                visible_width(line)
+            );
+        }
+        assert!(lines.len() > 1, "message is wider than one line at cols=10");
+    }
+
+    #[test]
+    fn wrap_status_empty_message_yields_no_lines() {
+        assert_eq!(wrap_status("", 40), Vec::<String>::new());
+    }
+
+    #[test]
+    fn status_wrap_rows_agrees_with_wrap_status_line_count() {
+        // `status_wrap_rows` (feeding `status_height`, and from there
+        // `sidebar_layout`) must always report the same row count
+        // `wrap_status` actually produces — this is the #187 twin of the
+        // #135/#136 render/mapper-agreement invariant.
+        let message = "Only worktree tabs can be removed";
+        for cols in [10, 18, 30, 34, 36, 80] {
+            assert_eq!(status_wrap_rows(message, cols), wrap_status(message, cols).len());
+        }
     }
 
     fn confirm_string(branch: &str, cols: usize, closes_tab: bool, agent_running: bool) -> String {
