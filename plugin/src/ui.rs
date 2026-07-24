@@ -352,18 +352,30 @@ pub fn render_branch_list(
     selected: usize,
     rows: usize,
     cols: usize,
+    query: &str,
 ) {
     if branches.is_empty() {
         writeln!(w).unwrap();
-        writeln!(
-            w,
-            "  {DIM}No other branches — use i to create one.{RESET}"
-        )
-        .unwrap();
+        if query.is_empty() {
+            writeln!(
+                w,
+                "  {DIM}No other branches — use i to create one.{RESET}"
+            )
+            .unwrap();
+        } else {
+            writeln!(w, "  {DIM}No branches match '{query}'.{RESET}").unwrap();
+        }
         return;
     }
 
-    let title = format!("  {BOLD}Select a branch:{RESET}");
+    // #196: the query rides on the title line, styled like InputBranch's
+    // buffer display (`render_input`) — plain text plus an inverse-video
+    // cursor block. Empty query renders exactly as before filtering existed.
+    let title = if query.is_empty() {
+        format!("  {BOLD}Select a branch:{RESET}")
+    } else {
+        format!("  {BOLD}Select a branch:{RESET} {query}{INVERSE} {RESET}")
+    };
     writeln!(w).unwrap();
     writeln!(w, "{title}").unwrap();
     writeln!(w).unwrap();
@@ -506,20 +518,19 @@ pub fn render_footer(w: &mut impl Write, mode: &Mode, version: &str, cols: usize
             }
         }
         Mode::SelectBranch => {
-            if cols >= 44 {
+            // #196: j/k are now filter characters, not navigation, so the
+            // footer drops the vi-key hints in favor of arrows plus a
+            // typing hint.
+            if cols >= 50 {
                 writeln!(
                     w,
-                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  \
+                    "  {DIM}↑/↓{RESET} move  type to filter  \
                      {DIM}Enter{RESET} create  {DIM}Esc{RESET} back"
                 )
                 .unwrap();
             } else {
-                writeln!(
-                    w,
-                    "  {DIM}↑/k{RESET} up  {DIM}↓/j{RESET} down  {DIM}Enter{RESET} create"
-                )
-                .unwrap();
-                writeln!(w, "  {DIM}Esc{RESET} back").unwrap();
+                writeln!(w, "  {DIM}↑/↓{RESET} move  type to filter").unwrap();
+                writeln!(w, "  {DIM}Enter{RESET} create  {DIM}Esc{RESET} back").unwrap();
             }
         }
         Mode::InputBranch => {
@@ -653,8 +664,19 @@ mod tests {
         rows: usize,
         cols: usize,
     ) -> String {
+        branch_list_string_with_query(branches, annotations, selected, rows, cols, "")
+    }
+
+    fn branch_list_string_with_query(
+        branches: &[String],
+        annotations: &[BranchAnnotation],
+        selected: usize,
+        rows: usize,
+        cols: usize,
+        query: &str,
+    ) -> String {
         let mut buf = Vec::new();
-        render_branch_list(&mut buf, branches, annotations, selected, rows, cols);
+        render_branch_list(&mut buf, branches, annotations, selected, rows, cols, query);
         String::from_utf8(buf).unwrap()
     }
 
@@ -705,6 +727,41 @@ mod tests {
         let s = branch_list_string(&branches, &[], 0, 20, 80);
         assert!(s.contains("feat-a"));
         assert!(!s.contains('('));
+    }
+
+    // --- #196: filter query rendering ---
+
+    #[test]
+    fn branch_list_query_appears_on_title_line() {
+        let branches = vec!["feat-a".to_string(), "feat-b".to_string()];
+        let s = branch_list_string_with_query(
+            &branches,
+            &[BranchAnnotation::Plain, BranchAnnotation::Plain],
+            0,
+            20,
+            80,
+            "fe",
+        );
+        assert!(s.contains("Select a branch:"));
+        assert!(s.contains("fe"));
+    }
+
+    #[test]
+    fn branch_list_zero_matches_with_query_shows_no_branches_match() {
+        // Distinct from the "no other branches at all" empty state (#185) —
+        // this is a live query that narrowed the list to nothing.
+        let s = branch_list_string_with_query(&[], &[], 0, 20, 80, "zzz");
+        assert!(s.contains("No branches match 'zzz'"));
+        assert!(!s.contains("No other branches"));
+    }
+
+    #[test]
+    fn branch_list_empty_query_keeps_no_other_branches_hint() {
+        // The truly-empty-repo state must still read "No other branches —
+        // use i to create one." even though it now flows through the same
+        // query-aware branch of `render_branch_list`.
+        let s = branch_list_string_with_query(&[], &[], 0, 20, 80, "");
+        assert!(s.contains("No other branches"));
     }
 
     #[test]
