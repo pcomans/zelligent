@@ -1,14 +1,14 @@
 ---
 source: tests/render_snapshots.rs
-expression: "render_to_string(&s, 20, 80)"
+expression: picker_filtered
 ---
 [?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
 
-  [1mSelect a branch:[0m
+  [1mSelect a branch:[0m d[7m [0m
 
-[36m▌[0m feat-a[2m (open)[0m
-  feat-b[2m (worktree)[0m
-  feat-c
+[36m▌[0m dev
+
+
 
 
 

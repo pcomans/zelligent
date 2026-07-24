@@ -200,6 +200,11 @@ pub struct State {
     /// `last_active_tab`) — a failed spawn correctly leaves it where it was.
     /// See #184.
     pub branch_picker_index: usize,
+    /// Filter-as-you-type query for the branch picker (#196). Typing any
+    /// printable char while `mode` is `SelectBranch` appends to this and
+    /// recomputes `filtered_branches` from `branches`; Backspace shortens
+    /// it. Reset to empty each time `n` (re)opens the picker from browse.
+    pub branch_filter_query: String,
     pub input_buffer: String,
     pub agent_cmd: String,
     pub status_message: String,
@@ -422,6 +427,22 @@ pub fn parse_branches(output: &str) -> Vec<String> {
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Case-insensitive substring filter over branch names for the #196 picker
+/// filter-as-you-type. Matches against the branch name only — annotations
+/// like ` (open)`/` (worktree)` (#185) are computed separately at render
+/// time and never enter `branches`, so they can't accidentally match.
+pub fn filter_branches(branches: &[String], query: &str) -> Vec<String> {
+    if query.is_empty() {
+        return branches.to_vec();
+    }
+    let query = query.to_lowercase();
+    branches
+        .iter()
+        .filter(|b| b.to_lowercase().contains(&query))
+        .cloned()
         .collect()
 }
 
@@ -1598,6 +1619,7 @@ impl State {
                     return self.action_for_sidebar_item(self.selected_index);
                 }
                 BareKey::Char('n') => {
+                    self.branch_filter_query.clear();
                     self.filtered_branches = self.branches.clone();
                     self.mode = Mode::SelectBranch;
                     self.branch_picker_index = 0;
@@ -1626,30 +1648,45 @@ impl State {
         Action::None
     }
 
+    /// #196: `j`/`k` are valid branch-name letters, so picker navigation is
+    /// arrow-only — every printable char (including j/k) feeds the filter
+    /// query instead. Reuses the InputBranch shift-only/no-mod pattern below
+    /// so shifted characters (e.g. `_`) still filter.
     pub fn handle_key_select_branch(&mut self, key: &KeyWithModifier) -> Action {
-        if key.has_no_modifiers() {
-            match key.bare_key {
-                BareKey::Char('j') | BareKey::Down => {
-                    self.branch_picker_index =
-                        wrap_navigate(self.branch_picker_index, self.filtered_branches.len(), 1);
-                }
-                BareKey::Char('k') | BareKey::Up => {
-                    self.branch_picker_index =
-                        wrap_navigate(self.branch_picker_index, self.filtered_branches.len(), -1);
-                }
-                BareKey::Enter => {
-                    if let Some(branch) =
-                        self.filtered_branches.get(self.branch_picker_index).cloned()
-                    {
-                        self.mode = Mode::BrowseWorktrees;
-                        return self.spawn_or_switch(branch);
-                    }
-                }
-                BareKey::Esc => {
-                    self.mode = Mode::BrowseWorktrees;
-                }
-                _ => {}
+        let no_mod = key.has_no_modifiers();
+        let shift_only =
+            key.key_modifiers.len() == 1 && key.key_modifiers.contains(&KeyModifier::Shift);
+
+        match key.bare_key {
+            BareKey::Down if no_mod => {
+                self.branch_picker_index =
+                    wrap_navigate(self.branch_picker_index, self.filtered_branches.len(), 1);
             }
+            BareKey::Up if no_mod => {
+                self.branch_picker_index =
+                    wrap_navigate(self.branch_picker_index, self.filtered_branches.len(), -1);
+            }
+            BareKey::Enter if no_mod => {
+                if let Some(branch) = self.filtered_branches.get(self.branch_picker_index).cloned()
+                {
+                    self.mode = Mode::BrowseWorktrees;
+                    return self.spawn_or_switch(branch);
+                }
+            }
+            BareKey::Esc if no_mod => {
+                self.mode = Mode::BrowseWorktrees;
+            }
+            BareKey::Backspace if no_mod => {
+                self.branch_filter_query.pop();
+                self.filtered_branches = filter_branches(&self.branches, &self.branch_filter_query);
+                self.branch_picker_index = 0;
+            }
+            BareKey::Char(c) if no_mod || shift_only => {
+                self.branch_filter_query.push(c);
+                self.filtered_branches = filter_branches(&self.branches, &self.branch_filter_query);
+                self.branch_picker_index = 0;
+            }
+            _ => {}
         }
         Action::None
     }
@@ -2047,6 +2084,7 @@ impl State {
                     self.branch_picker_index,
                     rows,
                     cols,
+                    &self.branch_filter_query,
                 );
                 let list_height = if self.filtered_branches.is_empty() {
                     2
@@ -2629,6 +2667,7 @@ mod tests {
         assert_eq!(s.selected_index, 2);
         assert_eq!(s.branch_picker_index, 0);
         assert_eq!(s.filtered_branches, s.branches);
+        assert_eq!(s.branch_filter_query, "");
     }
 
     #[test]
@@ -2926,20 +2965,21 @@ mod tests {
     // --- SelectBranch key handler tests ---
 
     #[test]
-    fn select_branch_jk_navigates() {
+    fn select_branch_arrows_navigate() {
+        // #196: navigation is arrow-only now that j/k are filter chars.
         let mut s = state_with_worktrees();
         s.mode = Mode::SelectBranch;
         s.filtered_branches = s.branches.clone();
         s.branch_picker_index = 0;
 
-        s.handle_key_select_branch(&key(BareKey::Char('j')));
+        s.handle_key_select_branch(&key(BareKey::Down));
         assert_eq!(s.branch_picker_index, 1);
-        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        s.handle_key_select_branch(&key(BareKey::Up));
         assert_eq!(s.branch_picker_index, 0);
     }
 
     #[test]
-    fn select_branch_jk_does_not_touch_browse_cursor() {
+    fn select_branch_arrows_do_not_touch_browse_cursor() {
         // Picker navigation must not leak into the browse `selected_index`
         // (#184) — only `branch_picker_index` moves.
         let mut s = state_with_worktrees();
@@ -2948,8 +2988,8 @@ mod tests {
         s.selected_index = 2;
         s.branch_picker_index = 0;
 
-        s.handle_key_select_branch(&key(BareKey::Char('j')));
-        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        s.handle_key_select_branch(&key(BareKey::Down));
+        s.handle_key_select_branch(&key(BareKey::Up));
         assert_eq!(s.selected_index, 2);
     }
 
@@ -2960,11 +3000,145 @@ mod tests {
         s.filtered_branches = vec!["a".into(), "b".into()];
         s.branch_picker_index = 1;
 
-        s.handle_key_select_branch(&key(BareKey::Char('j')));
+        s.handle_key_select_branch(&key(BareKey::Down));
         assert_eq!(s.branch_picker_index, 0);
 
-        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        s.handle_key_select_branch(&key(BareKey::Up));
         assert_eq!(s.branch_picker_index, 1);
+    }
+
+    #[test]
+    fn select_branch_jk_filters_instead_of_navigating() {
+        // #196 pins the keymap change: j/k are ordinary branch-name letters,
+        // so they must feed the filter query, not move the cursor the way
+        // pre-#196 j/k did.
+        let mut s = state_with_worktrees(); // branches: main, feat-a, feat-b, dev
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+        s.branch_picker_index = 0;
+
+        s.handle_key_select_branch(&key(BareKey::Char('k')));
+        assert_eq!(s.branch_filter_query, "k");
+        assert!(s.filtered_branches.is_empty(), "no branch contains 'k'");
+        assert_eq!(s.branch_picker_index, 0);
+    }
+
+    #[test]
+    fn select_branch_typing_narrows_case_insensitive() {
+        let mut s = state_with_worktrees(); // branches: main, feat-a, feat-b, dev
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+
+        s.handle_key_select_branch(&key(BareKey::Char('F')));
+        assert_eq!(s.branch_filter_query, "F");
+        assert_eq!(
+            s.filtered_branches,
+            vec!["feat-a".to_string(), "feat-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_branch_typing_shift_char_filters() {
+        // Mirrors `input_branch_shift_chars` — the shift-only path must feed
+        // the filter query same as an unmodified char.
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+
+        s.handle_key_select_branch(&key_shift(BareKey::Char('F')));
+        assert_eq!(s.branch_filter_query, "F");
+        assert_eq!(
+            s.filtered_branches,
+            vec!["feat-a".to_string(), "feat-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_branch_filter_matches_name_not_annotation() {
+        // #185 annotations (" (open)"/" (worktree)") are computed at render
+        // time from `worktrees`/`tabs` and never stored in `branches` — a
+        // query matching only the annotation text must find nothing.
+        let mut s = state_with_worktrees();
+        s.tabs = vec![make_tab("feat-a", true)];
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+
+        for c in "open".chars() {
+            s.handle_key_select_branch(&key(BareKey::Char(c)));
+        }
+        assert!(s.filtered_branches.is_empty());
+    }
+
+    #[test]
+    fn select_branch_backspace_widens_query() {
+        let mut s = state_with_worktrees(); // branches: main, feat-a, feat-b, dev
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+
+        for c in "feat-b".chars() {
+            s.handle_key_select_branch(&key(BareKey::Char(c)));
+        }
+        assert_eq!(s.filtered_branches, vec!["feat-b".to_string()]);
+
+        // Backspace off "-b" widens the query back to "feat".
+        s.handle_key_select_branch(&key(BareKey::Backspace));
+        s.handle_key_select_branch(&key(BareKey::Backspace));
+        assert_eq!(s.branch_filter_query, "feat");
+        assert_eq!(
+            s.filtered_branches,
+            vec!["feat-a".to_string(), "feat-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_branch_query_change_resets_cursor_to_zero() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+        s.branch_picker_index = 3;
+
+        s.handle_key_select_branch(&key(BareKey::Char('f')));
+        assert_eq!(s.branch_picker_index, 0);
+
+        // Also resets on backspace, not just on a growing query.
+        s.branch_picker_index = 1;
+        s.handle_key_select_branch(&key(BareKey::Backspace));
+        assert_eq!(s.branch_picker_index, 0);
+    }
+
+    #[test]
+    fn select_branch_enter_picks_highlighted_filtered_match_not_unfiltered_index() {
+        // The classic filter bug: Enter must index into `filtered_branches`
+        // at `branch_picker_index`, never into the unfiltered `branches` at
+        // that same numeric index.
+        let mut s = state_with_worktrees(); // branches: main, feat-a, feat-b, dev
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+
+        // Filter down to "feat-b" only, landing it at filtered index 0 even
+        // though it sits at index 2 in the unfiltered `branches`.
+        for c in "feat-b".chars() {
+            s.handle_key_select_branch(&key(BareKey::Char(c)));
+        }
+        assert_eq!(s.filtered_branches, vec!["feat-b".to_string()]);
+        assert_eq!(s.branch_picker_index, 0);
+
+        let action = s.handle_key_select_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::Spawn("feat-b".into()));
+    }
+
+    #[test]
+    fn select_branch_zero_matches_enter_is_a_no_op() {
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+
+        s.handle_key_select_branch(&key(BareKey::Char('z')));
+        assert!(s.filtered_branches.is_empty());
+
+        let action = s.handle_key_select_branch(&key(BareKey::Enter));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.mode, Mode::SelectBranch);
     }
 
     #[test]
@@ -3018,6 +3192,25 @@ mod tests {
         s.handle_key_select_branch(&key(BareKey::Esc));
         assert_eq!(s.mode, Mode::BrowseWorktrees);
         assert_eq!(s.selected_index, 2);
+    }
+
+    #[test]
+    fn select_branch_reopen_after_esc_starts_with_blank_query() {
+        // Esc is a single, immediate exit — no clear-filter-first step
+        // (#184 design) — so any leftover query must not survive a fresh
+        // `n` open.
+        let mut s = state_with_worktrees();
+        s.mode = Mode::SelectBranch;
+        s.filtered_branches = s.branches.clone();
+        s.handle_key_select_branch(&key(BareKey::Char('f')));
+        assert_eq!(s.branch_filter_query, "f");
+        s.handle_key_select_branch(&key(BareKey::Esc));
+        assert_eq!(s.mode, Mode::BrowseWorktrees);
+
+        s.handle_key_browse(&key(BareKey::Char('n')));
+        assert_eq!(s.mode, Mode::SelectBranch);
+        assert_eq!(s.branch_filter_query, "");
+        assert_eq!(s.filtered_branches, s.branches);
     }
 
     // --- InputBranch key handler tests ---

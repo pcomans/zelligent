@@ -97,6 +97,25 @@ fn render_select_branch_annotations() {
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
+// #196: an active filter query narrows the list and rides on the title line.
+#[test]
+fn render_select_branch_with_query() {
+    let mut s = state_with_branches();
+    s.branch_filter_query = "fe".into();
+    s.filtered_branches = vec!["feat-a".into(), "feat-b".into()];
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+// #196: a query that matches nothing renders the "no branches match" line,
+// distinct from #185's "no other branches at all" empty state.
+#[test]
+fn render_select_branch_zero_matches() {
+    let mut s = state_with_branches();
+    s.branch_filter_query = "zzz".into();
+    s.filtered_branches = vec![];
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
 #[test]
 fn render_input_branch_empty() {
     let s = State { mode: Mode::InputBranch, ..Default::default() };
@@ -472,10 +491,15 @@ fn flow_browse_to_branch_picker() {
     let picker = render_to_string(&s, 20, 80);
     insta::assert_snapshot!("flow_branch_picker", picker);
 
-    // Navigate down in picker
-    s.handle_key_select_branch(&key(BareKey::Char('j')));
+    // Navigate down in picker — arrows only (#196: j/k now filter).
+    s.handle_key_select_branch(&key(BareKey::Down));
     let picker_moved = render_to_string(&s, 20, 80);
-    insta::assert_snapshot!("flow_branch_picker_after_j", picker_moved);
+    insta::assert_snapshot!("flow_branch_picker_after_down", picker_moved);
+
+    // Typing narrows the list and resets the cursor to the top match.
+    s.handle_key_select_branch(&key(BareKey::Char('d')));
+    let picker_filtered = render_to_string(&s, 20, 80);
+    insta::assert_snapshot!("flow_branch_picker_after_filter", picker_filtered);
 
     // Escape back
     s.handle_key_select_branch(&key(BareKey::Esc));
