@@ -7,8 +7,8 @@ expression: picker
   [1mSelect a branch:[0m
 
 [36m▌[0m main
-  feat-a
-  feat-b
+  feat-a[2m (open)[0m
+  feat-b[2m (open)[0m
   dev
 
 

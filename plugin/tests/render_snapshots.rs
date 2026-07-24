@@ -78,6 +78,25 @@ fn render_select_branch_empty() {
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
+// #185: exercises all three picker row kinds in one frame — `feat-a` has an
+// open tab, `feat-b` has a worktree but no tab, `feat-c` has neither.
+#[test]
+fn render_select_branch_annotations() {
+    let mut s = State {
+        mode: Mode::SelectBranch,
+        worktrees: vec![
+            Worktree { dir: "feat-a".into(), branch: "feat-a".into() },
+            Worktree { dir: "feat-b".into(), branch: "feat-b".into() },
+        ],
+        tabs: vec![make_tab_info("feat-a", true)],
+        filtered_branches: vec!["feat-a".into(), "feat-b".into(), "feat-c".into()],
+        branch_picker_index: 0,
+        ..Default::default()
+    };
+    s.recompute_sidebar_items();
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
 #[test]
 fn render_input_branch_empty() {
     let s = State { mode: Mode::InputBranch, ..Default::default() };

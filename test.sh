@@ -1834,6 +1834,26 @@ out=$("$SCRIPT" list-branches 2>&1); code=$?
 check "list-branches exits 0" "0" "$code"
 contains "list-branches includes main or master" "main" "$out"
 
+# list-branches suppresses the branch checked out in the MAIN repo (#185):
+# spawning it always fails ("checked out in the main repository"), so the
+# picker must never offer it — a guaranteed dead end otherwise, especially
+# in a fresh repo where it's the only branch there is.
+CURRENT_BRANCH=$(git -C "$REPO_ROOT" branch --show-current)
+if [ -n "$CURRENT_BRANCH" ]; then
+  excludes "list-branches suppresses the checked-out branch" "$CURRENT_BRANCH" "$out"
+fi
+
+# ...but a branch checked out in a zelligent-managed WORKTREE (not the main
+# repo) stays listed — selecting it there just switches/spawns that tab.
+TEST_WT_LISTBRANCH="test-listbranch-$$"
+TEST_WT_LISTBRANCH_DIR=$(mktemp -d)
+register_cleanup_worktree "$TEST_WT_LISTBRANCH_DIR" "$TEST_WT_LISTBRANCH"
+git -C "$REPO_ROOT" worktree add -b "$TEST_WT_LISTBRANCH" "$TEST_WT_LISTBRANCH_DIR" HEAD &>/dev/null
+out_wt=$("$SCRIPT" list-branches 2>&1)
+contains "list-branches keeps a worktree-checked-out branch" "$TEST_WT_LISTBRANCH" "$out_wt"
+git -C "$REPO_ROOT" worktree remove --force "$TEST_WT_LISTBRANCH_DIR" &>/dev/null || true
+git -C "$REPO_ROOT" branch -D "$TEST_WT_LISTBRANCH" &>/dev/null || true
+
 # ── Launch mode selection ─────────────────────────────────────────────────────
 echo "Launch mode:"
 
