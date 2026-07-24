@@ -363,7 +363,39 @@ pub fn render_not_git_repo(w: &mut impl Write, cwd: &str) {
     writeln!(w, "  {DIM}q{RESET}  close plugin").unwrap();
 }
 
-pub fn render_confirm(w: &mut impl Write, branch: &str, cols: usize) {
+/// The confirm dialog's optional disclosure line, drawn only when the
+/// branch has an open tab (removal closes it): `  closes its tab`, with
+/// ` (agent running)` appended when that tab's agent is actively working
+/// (#188 — the plugin already knows both facts at confirm time, so this
+/// reuses existing state rather than issuing new git calls). Narrow panes
+/// drop the agent-running qualifier first, then the whole line, rather than
+/// wrapping — kept in its own function so `confirm_dialog_lines` (used for
+/// padding math) can never disagree with what `render_confirm` actually
+/// draws.
+fn confirm_tab_note(closes_tab: bool, agent_running: bool, cols: usize) -> Option<&'static str> {
+    if !closes_tab {
+        return None;
+    }
+    const FULL: &str = "  closes its tab (agent running)";
+    const SHORT: &str = "  closes its tab";
+    if agent_running && FULL.chars().count() <= cols {
+        Some(FULL)
+    } else if SHORT.chars().count() <= cols {
+        Some(SHORT)
+    } else {
+        None
+    }
+}
+
+/// Number of physical lines `render_confirm` draws when a branch is
+/// selected — 4 plus 1 more if `confirm_tab_note` has something to show.
+/// Callers computing footer padding must use this instead of a hardcoded
+/// constant, so the layout never drifts from the actual render.
+pub fn confirm_dialog_lines(closes_tab: bool, agent_running: bool, cols: usize) -> usize {
+    4 + confirm_tab_note(closes_tab, agent_running, cols).is_some() as usize
+}
+
+pub fn render_confirm(w: &mut impl Write, branch: &str, cols: usize, closes_tab: bool, agent_running: bool) {
     // The prompt is `  Remove worktree for '<branch>'?` — 25 fixed chars plus
     // the branch name. At narrow widths the closing `'?` would otherwise
     // tumble onto a second line and read like garbage. Drop the prefix on
@@ -383,6 +415,9 @@ pub fn render_confirm(w: &mut impl Write, branch: &str, cols: usize) {
         let short_avail = cols.saturating_sub(short_prefix.chars().count() + 2);
         let clipped = clip_to_width(branch, short_avail);
         writeln!(w, "  {YELLOW}{BOLD}Remove '{clipped}'?{RESET}").unwrap();
+    }
+    if let Some(note) = confirm_tab_note(closes_tab, agent_running, cols) {
+        writeln!(w, "{DIM}{note}{RESET}").unwrap();
     }
     writeln!(w).unwrap();
     writeln!(w, "  {DIM}y{RESET} confirm   {DIM}n/Esc{RESET} cancel").unwrap();
@@ -491,5 +526,65 @@ mod tests {
         // future edit can't quietly reintroduce it (it would be invisible in
         // snapshots that use other repo names).
         assert!(header_string("zelligent", 40).contains(" zelligent "));
+    }
+
+    fn confirm_string(branch: &str, cols: usize, closes_tab: bool, agent_running: bool) -> String {
+        let mut buf = Vec::new();
+        render_confirm(&mut buf, branch, cols, closes_tab, agent_running);
+        String::from_utf8(buf).unwrap()
+    }
+
+    // --- render_confirm / confirm_dialog_lines (#188) ---
+
+    #[test]
+    fn confirm_detached_worktree_has_no_tab_note() {
+        // No open tab: today's plain two-line dialog, unchanged.
+        let s = confirm_string("feat-a", 80, false, false);
+        assert!(!s.contains("closes its tab"));
+        assert_eq!(confirm_dialog_lines(false, false, 80), 4);
+    }
+
+    #[test]
+    fn confirm_open_tab_discloses_it_closes() {
+        let s = confirm_string("feat-a", 80, true, false);
+        assert!(s.contains("closes its tab"));
+        assert!(!s.contains("agent running"));
+        assert_eq!(confirm_dialog_lines(true, false, 80), 5);
+    }
+
+    #[test]
+    fn confirm_open_tab_with_working_agent_says_so() {
+        let s = confirm_string("feat-a", 80, true, true);
+        assert!(s.contains("closes its tab (agent running)"));
+        assert_eq!(confirm_dialog_lines(true, true, 80), 5);
+    }
+
+    #[test]
+    fn confirm_agent_running_ignored_without_open_tab() {
+        // agent_running is meaningless without closes_tab (can't happen in
+        // practice — no tab means no live agent — but the note must never
+        // appear on its own).
+        let s = confirm_string("feat-a", 80, false, true);
+        assert!(!s.contains("closes its tab"));
+        assert_eq!(confirm_dialog_lines(false, true, 80), 4);
+    }
+
+    #[test]
+    fn confirm_narrow_pane_drops_agent_running_qualifier_before_the_whole_line() {
+        // "  closes its tab (agent running)" is 33 chars; "  closes its
+        // tab" is 17. At a width that fits the short form but not the long
+        // one, drop the qualifier rather than wrapping or hiding the line
+        // outright.
+        let s = confirm_string("feat-a", 20, true, true);
+        assert!(s.contains("closes its tab"));
+        assert!(!s.contains("agent running"));
+        assert_eq!(confirm_dialog_lines(true, true, 20), 5);
+    }
+
+    #[test]
+    fn confirm_extremely_narrow_pane_drops_tab_note_entirely() {
+        let s = confirm_string("feat-a", 10, true, true);
+        assert!(!s.contains("closes its tab"));
+        assert_eq!(confirm_dialog_lines(true, true, 10), 4);
     }
 }

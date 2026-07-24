@@ -96,9 +96,39 @@ fn render_input_branch_with_text() {
 
 #[test]
 fn render_confirming() {
+    // feat-b has an open tab (#188): the dialog discloses that removal
+    // closes it.
     let mut s = state_with_worktrees();
     s.mode = Mode::Confirming;
     s.selected_index = 1;
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_confirming_agent_running() {
+    // Same tab-open row as `render_confirming`, but the agent is actively
+    // working (#188): the disclosure line gets the "(agent running)"
+    // qualifier.
+    let mut s = state_with_worktrees();
+    s.mode = Mode::Confirming;
+    s.selected_index = 1;
+    s.agent_statuses.insert("feat-b".into(), AgentStatus::Working);
+    insta::assert_snapshot!(render_to_string(&s, 20, 80));
+}
+
+#[test]
+fn render_confirming_no_tab() {
+    // A detached worktree (no open tab) keeps the plain two-line dialog —
+    // no "closes its tab" line (#188).
+    let mut s = state_with_worktrees();
+    s.tabs.retain(|t| t.name != "feat-c");
+    s.recompute_sidebar_items();
+    s.mode = Mode::Confirming;
+    s.selected_index = s
+        .sidebar_items
+        .iter()
+        .position(|i| i.matched_branch.as_deref() == Some("feat-c"))
+        .unwrap();
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
