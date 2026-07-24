@@ -224,8 +224,12 @@ pub fn render_empty_state(w: &mut impl Write) {
     )
     .unwrap();
     writeln!(w).unwrap();
-    writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
+    // `i` first (#185): it's the universally-valid first action in a fresh
+    // repo, whereas `n`'s picker only has something to offer once other
+    // branches exist — and the main repo's own checked-out branch is never
+    // one of them (see `BranchAnnotation` / list-branches suppression).
     writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
+    writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
 }
 
 pub fn render_sidebar_list(
@@ -317,10 +321,45 @@ pub fn render_sidebar_list(
     }
 }
 
-pub fn render_branch_list(w: &mut impl Write, branches: &[String], selected: usize, rows: usize) {
+/// What Enter will do for a branch-picker row (#185): the picker used to
+/// give no hint whether selecting a branch spawns something new or jumps to
+/// an existing tab. Classified by the caller (`State`, which already knows
+/// about tabs and worktrees) and rendered as a dim suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchAnnotation {
+    /// No tab and no worktree — Enter creates a fresh worktree and tab.
+    Plain,
+    /// A tab is already open for this branch — Enter jumps to it.
+    Open,
+    /// A worktree exists but has no tab yet — Enter reopens a tab for it.
+    Worktree,
+}
+
+impl BranchAnnotation {
+    fn suffix(self) -> &'static str {
+        match self {
+            BranchAnnotation::Plain => "",
+            BranchAnnotation::Open => " (open)",
+            BranchAnnotation::Worktree => " (worktree)",
+        }
+    }
+}
+
+pub fn render_branch_list(
+    w: &mut impl Write,
+    branches: &[String],
+    annotations: &[BranchAnnotation],
+    selected: usize,
+    rows: usize,
+    cols: usize,
+) {
     if branches.is_empty() {
         writeln!(w).unwrap();
-        writeln!(w, "  {DIM}No branches found.{RESET}").unwrap();
+        writeln!(
+            w,
+            "  {DIM}No other branches — use i to create one.{RESET}"
+        )
+        .unwrap();
         return;
     }
 
@@ -335,6 +374,8 @@ pub fn render_branch_list(w: &mut impl Write, branches: &[String], selected: usi
     } else {
         0
     };
+    // "  " cursor gutter, same width whether or not this row is selected.
+    let available = cols.saturating_sub(2);
 
     for (idx, branch) in branches.iter().enumerate().skip(start).take(max_visible) {
         let cursor_gutter = if idx == selected {
@@ -342,7 +383,22 @@ pub fn render_branch_list(w: &mut impl Write, branches: &[String], selected: usi
         } else {
             "  ".to_string()
         };
-        writeln!(w, "{cursor_gutter}{branch}").unwrap();
+        let suffix = annotations
+            .get(idx)
+            .copied()
+            .unwrap_or(BranchAnnotation::Plain)
+            .suffix();
+        // Priority: full row, then drop the annotation, then clip the name
+        // itself — never let a long annotated branch name wrap or overflow.
+        let row = if !suffix.is_empty() && visible_width(branch) + visible_width(suffix) <= available
+        {
+            format!("{branch}{DIM}{suffix}{RESET}")
+        } else if visible_width(branch) <= available {
+            branch.clone()
+        } else {
+            clip_to_width(branch, available)
+        };
+        writeln!(w, "{cursor_gutter}{row}").unwrap();
     }
 }
 
@@ -586,5 +642,88 @@ mod tests {
         let s = confirm_string("feat-a", 10, true, true);
         assert!(!s.contains("closes its tab"));
         assert_eq!(confirm_dialog_lines(true, true, 10), 4);
+    }
+
+    // --- render_branch_list / BranchAnnotation (#185) ---
+
+    fn branch_list_string(
+        branches: &[String],
+        annotations: &[BranchAnnotation],
+        selected: usize,
+        rows: usize,
+        cols: usize,
+    ) -> String {
+        let mut buf = Vec::new();
+        render_branch_list(&mut buf, branches, annotations, selected, rows, cols);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn branch_list_empty_shows_helpful_hint_not_blank() {
+        // A fresh repo's picker is empty once the checked-out branch is
+        // suppressed (#185's CLI-side change) — a blank list reads like a
+        // bug, so this must always say something actionable.
+        let s = branch_list_string(&[], &[], 0, 20, 80);
+        assert!(s.contains("No other branches"));
+        assert!(s.contains('i'));
+        assert!(!s.contains("No branches found"));
+    }
+
+    #[test]
+    fn branch_list_plain_row_has_no_suffix() {
+        let branches = vec!["feat-a".to_string()];
+        let s = branch_list_string(&branches, &[BranchAnnotation::Plain], 0, 20, 80);
+        assert!(s.contains("feat-a"));
+        assert!(!s.contains('('));
+    }
+
+    #[test]
+    fn branch_list_open_row_shows_open_suffix() {
+        // The suffix is DIM-wrapped independently of the branch name, so the
+        // ANSI code sits between them — assert each substring separately
+        // rather than the concatenated "feat-a (open)".
+        let branches = vec!["feat-a".to_string()];
+        let s = branch_list_string(&branches, &[BranchAnnotation::Open], 0, 20, 80);
+        assert!(s.contains("feat-a"));
+        assert!(s.contains(" (open)"));
+    }
+
+    #[test]
+    fn branch_list_worktree_row_shows_worktree_suffix() {
+        let branches = vec!["feat-a".to_string()];
+        let s = branch_list_string(&branches, &[BranchAnnotation::Worktree], 0, 20, 80);
+        assert!(s.contains("feat-a"));
+        assert!(s.contains(" (worktree)"));
+    }
+
+    #[test]
+    fn branch_list_missing_annotation_defaults_to_plain() {
+        // Defensive: a shorter annotations slice than branches (shouldn't
+        // happen in practice, since lib.rs always zips them 1:1) must not
+        // panic and must render as unannotated.
+        let branches = vec!["feat-a".to_string()];
+        let s = branch_list_string(&branches, &[], 0, 20, 80);
+        assert!(s.contains("feat-a"));
+        assert!(!s.contains('('));
+    }
+
+    #[test]
+    fn branch_list_narrow_pane_drops_annotation_before_clipping_name() {
+        // "feat-a (worktree)" is 18 chars; at a width that fits the bare
+        // name but not the annotated form, drop the suffix rather than
+        // truncating the name (mirrors confirm_tab_note's priority).
+        let branches = vec!["feat-a".to_string()];
+        let s = branch_list_string(&branches, &[BranchAnnotation::Worktree], 0, 20, 10);
+        assert!(s.contains("feat-a"));
+        assert!(!s.contains("worktree"));
+        assert!(!s.contains('…'));
+    }
+
+    #[test]
+    fn branch_list_extremely_narrow_pane_clips_name_with_ellipsis() {
+        let branches = vec!["feature-really-long-branch-name".to_string()];
+        let s = branch_list_string(&branches, &[BranchAnnotation::Open], 0, 20, 10);
+        assert!(!s.contains("open"));
+        assert!(s.contains('…'));
     }
 }

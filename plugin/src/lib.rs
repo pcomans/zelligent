@@ -1459,6 +1459,26 @@ impl State {
         self.tabs.iter().any(|t| t.name == tab_name)
     }
 
+    /// Check whether a managed worktree exists for the given branch,
+    /// regardless of whether it currently has an open tab. Used by the
+    /// branch picker (#185) to distinguish "reopen a tab" from "fresh spawn".
+    pub fn has_worktree_for_branch(&self, branch: &str) -> bool {
+        self.worktrees.iter().any(|wt| wt.branch == branch)
+    }
+
+    /// Classify a branch-picker row (#185): `Open` if a tab is already open
+    /// for it, `Worktree` if a worktree exists but has no tab, else `Plain`
+    /// (Enter would create a brand-new worktree and tab).
+    fn branch_annotation(&self, branch: &str) -> ui::BranchAnnotation {
+        if self.has_tab_for_branch(branch) {
+            ui::BranchAnnotation::Open
+        } else if self.has_worktree_for_branch(branch) {
+            ui::BranchAnnotation::Worktree
+        } else {
+            ui::BranchAnnotation::Plain
+        }
+    }
+
     fn selected_sidebar_branch(&self) -> Option<&str> {
         self.sidebar_items
             .get(self.selected_index)
@@ -2015,7 +2035,19 @@ impl State {
             }
             Mode::SelectBranch => {
                 ui::render_header(w, &self.repo_name, cols);
-                ui::render_branch_list(w, &self.filtered_branches, self.branch_picker_index, rows);
+                let annotations: Vec<ui::BranchAnnotation> = self
+                    .filtered_branches
+                    .iter()
+                    .map(|b| self.branch_annotation(b))
+                    .collect();
+                ui::render_branch_list(
+                    w,
+                    &self.filtered_branches,
+                    &annotations,
+                    self.branch_picker_index,
+                    rows,
+                    cols,
+                );
                 let list_height = if self.filtered_branches.is_empty() {
                     2
                 } else {
@@ -3439,6 +3471,52 @@ mod tests {
     fn has_tab_for_branch_empty_tabs() {
         let s = State::default();
         assert!(!s.has_tab_for_branch("anything"));
+    }
+
+    #[test]
+    fn has_worktree_for_branch_found() {
+        let mut s = State::default();
+        s.worktrees = vec![Worktree { dir: "feat-a".into(), branch: "feat-a".into() }];
+        assert!(s.has_worktree_for_branch("feat-a"));
+    }
+
+    #[test]
+    fn has_worktree_for_branch_not_found() {
+        let s = State::default();
+        assert!(!s.has_worktree_for_branch("feat-a"));
+    }
+
+    // --- branch_annotation (#185) ---
+
+    #[test]
+    fn branch_annotation_open_when_tab_exists() {
+        let mut s = State::default();
+        s.worktrees = vec![Worktree { dir: "feat-a".into(), branch: "feat-a".into() }];
+        s.tabs = vec![make_tab("feat-a", false)];
+        assert_eq!(s.branch_annotation("feat-a"), ui::BranchAnnotation::Open);
+    }
+
+    #[test]
+    fn branch_annotation_worktree_when_no_tab() {
+        let mut s = State::default();
+        s.worktrees = vec![Worktree { dir: "feat-a".into(), branch: "feat-a".into() }];
+        assert_eq!(s.branch_annotation("feat-a"), ui::BranchAnnotation::Worktree);
+    }
+
+    #[test]
+    fn branch_annotation_plain_when_neither() {
+        let s = State::default();
+        assert_eq!(s.branch_annotation("feat-a"), ui::BranchAnnotation::Plain);
+    }
+
+    #[test]
+    fn branch_annotation_open_takes_priority_over_worktree() {
+        // A branch with both a worktree AND an open tab is "open", not
+        // "worktree" — the tab is what matters for what Enter would do.
+        let mut s = State::default();
+        s.worktrees = vec![Worktree { dir: "feat-a".into(), branch: "feat-a".into() }];
+        s.tabs = vec![make_tab(&State::tab_name_for_branch("feat-a"), false)];
+        assert_eq!(s.branch_annotation("feat-a"), ui::BranchAnnotation::Open);
     }
 
     #[test]

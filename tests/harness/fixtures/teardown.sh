@@ -24,28 +24,35 @@ zellij web --stop 2>/dev/null || true
 zellij web --revoke-all-tokens 2>/dev/null || true
 tmux -L zt-driver-test kill-server 2>/dev/null || true
 
-zellij_version=$(zellij --version 2>/dev/null | awk '{print $2}')
-if [ -n "$zellij_version" ]; then
-  socket_base="${TMPDIR:-/tmp}"
-  socket_base="${socket_base%/}"
-  for session in "${TEST_SESSIONS[@]}"; do
-    socket_path="$socket_base/zellij-$(id -u)/$zellij_version/$session"
+# Never derive on-disk paths from `zellij --version`: sockets live under
+# `<socket_dir>/<version>/<session>` and serialized state under
+# `<cache_base>/<version-or-contract>/session_info/<session>`, but the dir
+# name doesn't have to match the binary's version (e.g. zellij 0.44.x
+# writes `contract_version_1`), and leftovers from a previous version can
+# never match it. Glob every version dir instead — same style as
+# zelligent.sh's #179 socket sweep.
+socket_base="${TMPDIR:-/tmp}"
+socket_base="${socket_base%/}"
+socket_dir="$socket_base/zellij-$(id -u)"
+for session in "${TEST_SESSIONS[@]}"; do
+  for socket_path in "$socket_dir"/*/"$session"; do
+    [ -e "$socket_path" ] || continue
     kill_matching_pids "zellij --server $socket_path"
-    kill_matching_pids "zellij attach $session"
-    kill_matching_pids "zellij --session $session"
   done
+  kill_matching_pids "zellij attach $session"
+  kill_matching_pids "zellij --session $session"
+done
 
-  sleep 1
+sleep 1
 
-  for session in "${TEST_SESSIONS[@]}"; do
-    for cache_base in \
-      "$HOME/Library/Caches/org.Zellij-Contributors.Zellij" \
-      "${XDG_CACHE_HOME:-$HOME/.cache}/zellij"; do
-      rm -rf "$cache_base/$zellij_version/session_info/$session" 2>/dev/null || true
-    done
-    rm -f "$socket_base/zellij-$(id -u)/$zellij_version/$session" 2>/dev/null || true
+for session in "${TEST_SESSIONS[@]}"; do
+  for cache_base in \
+    "$HOME/Library/Caches/org.Zellij-Contributors.Zellij" \
+    "${XDG_CACHE_HOME:-$HOME/.cache}/zellij"; do
+    rm -rf "$cache_base"/*/session_info/"$session" 2>/dev/null || true
   done
-fi
+  rm -f "$socket_dir"/*/"$session" 2>/dev/null || true
+done
 
 rm -rf /tmp/zelligent-test-repo
 rm -rf /private/tmp/zelligent-test-repo

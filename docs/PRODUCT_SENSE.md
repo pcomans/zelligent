@@ -28,6 +28,7 @@ Ground truth: `plugin/src/lib.rs` unit tests for `handle_mouse_browse` / `handle
 - `Enter` activates the currently-selected item (switch to its tab, or spawn if detached) — a separate step from selection, unlike the mouse's combined click.
 - `n` opens branch-select mode (choose an existing branch to spawn); `i` opens input-branch mode (type a new branch name); `d` opens the remove-confirmation mode for the selected worktree tab; `r` refreshes; `q`/`Esc` are no-ops in browse mode.
 - The branch picker keeps its own cursor (it always opens on row 0); leaving the picker — Esc or Enter — never moves the browse selection, and after Enter the cursor follows the active-tab re-sync once the switch/spawn lands (#184, #151).
+- The picker never lists the branch checked out in the main repo — spawning it always fails, so it's suppressed rather than offered as a guaranteed dead end (#185). Its rows are annotated to say what Enter will do: ` (open)` for a branch with a tab already open (jumps to it), ` (worktree)` for one with a worktree but no tab (reopens a tab), no suffix for a fresh spawn. An empty picker (e.g. a brand-new repo with no other branches) shows a hint pointing at `i` instead of a blank list.
 
 Not part of this contract but a real driving hazard: Zellij's click-to-focus eats exactly one click when the sidebar pane isn't already focused (the "focus-claim click"), recurring after every cross-tab landing. Tracked as #189.
 

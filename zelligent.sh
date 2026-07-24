@@ -1374,7 +1374,13 @@ if [ "$1" = "list-worktrees" ]; then
 fi
 
 if [ "$1" = "list-branches" ]; then
-  git -C "$REPO_ROOT" branch --format='%(refname:short)'
+  # Suppress the branch checked out in the MAIN repo (#185): spawning it
+  # always fails ("checked out in the main repository", see the spawn guard
+  # below) — a guaranteed dead end, and in a fresh repo it's the only
+  # branch there is. Branches checked out in zelligent WORKTREES stay
+  # listed — selecting one just switches/spawns that tab, which is valid.
+  git -C "$REPO_ROOT" branch --format='%(HEAD)%09%(refname:short)' \
+    | awk -F'\t' '$1 != "*" { print $2 }'
   exit 0
 fi
 
