@@ -13,5 +13,5 @@
     "--dns=1.1.1.1",
     "--dns=8.8.8.8"
   ],
-  "postCreateCommand": "bash -c 'source /usr/local/share/nvm/nvm.sh && npm install -g opencode-ai@latest'"
+  "postCreateCommand": "bash -c 'source /usr/local/share/nvm/nvm.sh && npm install -g opencode-ai@latest && curl -fsSL https://claude.ai/install.sh | bash && export PATH=\"$HOME/.local/bin:$PATH\" && claude plugin marketplace add pcomans/devpods && claude plugin install git-credentials@devpods --scope user'"
 }
