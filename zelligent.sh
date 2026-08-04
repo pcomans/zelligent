@@ -327,6 +327,28 @@ resolve_default_layout_path() {
   resolve_shared_asset_path ZELLIGENT_DEFAULT_LAYOUT_SRC default-layout.kdl
 }
 
+# Run a `claude` subcommand, capturing its diagnostics into
+# CLAUDE_CMD_STDERR and returning its exit status. Claude Code writes
+# progress ("Adding marketplace…") to stdout and the actual outcome — both
+# the ✔ and the ✘ with the reason — to stderr, so doctor's old blanket
+# `2>/dev/null` discarded the only part worth reading and left users with a
+# half-finished progress line (#212). Callers decide when to print: a
+# failure that the next step recovers from is a note, not an error.
+CLAUDE_CMD_STDERR=""
+run_claude_cmd() {
+  CLAUDE_CMD_STDERR=$(claude "$@" 2>&1 >/dev/null)
+}
+
+# Echo captured `claude` diagnostics indented under the doctor line that
+# referenced them. Blank lines are dropped so a trailing newline from the
+# CLI doesn't punch a hole in doctor's output.
+print_claude_stderr() {
+  local text="$1" line
+  [ -n "$text" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] && echo "      $line"
+  done <<< "$text"
+}
 
 resolve_layout_source() {
   local repo_layout user_layout
@@ -933,49 +955,60 @@ PERMS
 
     if [ -z "$PLUGIN_MARKETPLACE" ]; then
       echo "  claude plugin: not bundled (skipped)"
+    elif [ ! -f "$PLUGIN_MARKETPLACE/.claude-plugin/marketplace.json" ]; then
+      # `marketplace add` needs the marketplace manifest; a directory without
+      # one means this zelligent install is incomplete, not that Claude Code
+      # is misconfigured. Upgrading from a release that predated the bundled
+      # plugin (0.2.5 -> 0.2.6+) can leave the share dir missing it (#212).
+      # Catch it here so the fix names the real problem — the old code let
+      # the add fail, swallowed the reason, and blamed a stale registration,
+      # sending users to `marketplace remove`, which cannot fix a missing
+      # manifest.
+      echo "  claude plugin: incomplete install — no marketplace manifest at $PLUGIN_MARKETPLACE/.claude-plugin/marketplace.json"
+      echo "                 reinstall zelligent (Homebrew: brew reinstall zelligent), then re-run: zelligent doctor"
+      ERRORS=1
     else
-      # known_marketplaces.json is keyed by name, so a stale "zelligent"
-      # entry (e.g. left over from a dev install after switching to
-      # Homebrew, or vice versa) makes `marketplace add` fail on a name
-      # collision — previously swallowed silently, leaving `plugin update`
-      # reading a path that may no longer exist. Repair it by removing the
-      # stale registration before re-adding. When the registered path
-      # already matches, skip `marketplace add` entirely: re-adding an
-      # identical registration is a redundant, and possibly erroring,
-      # no-op we don't want to have to distinguish from a real failure.
-      # `marketplace add` fails on a name collision whether the existing
-      # registration points at THIS path (healthy, idempotent re-run) or a
-      # stale one (e.g. an old dev install). Doctor deliberately does NOT
-      # introspect or mutate Claude Code's registration files to tell the
-      # difference — production code stays out of dev-environment hygiene
-      # (that's `bash dev-install.sh --uninstall`). If the plugin then
-      # installs/updates fine the user is served; if not, the fix is one
-      # command, printed in the failure line.
+      # `marketplace add` is attempted idempotently. On current Claude Code
+      # re-adding the same name succeeds and replaces the registration even
+      # when the path differs, so a failure here is a genuine one — but
+      # older CLIs errored on a name collision, so a failed add whose plugin
+      # then installs/updates fine is still reported as a note rather than
+      # an error. Either way the captured reason is printed instead of
+      # discarded. Doctor deliberately does NOT introspect or mutate Claude
+      # Code's registration files; stale dev registrations are dev hygiene
+      # (`bash dev-install.sh --uninstall`).
       MARKETPLACE_ADD_OK=1
-      claude plugin marketplace add "$PLUGIN_MARKETPLACE" 2>/dev/null || MARKETPLACE_ADD_OK=0
+      run_claude_cmd plugin marketplace add "$PLUGIN_MARKETPLACE" || MARKETPLACE_ADD_OK=0
+      MARKETPLACE_ADD_ERR="$CLAUDE_CMD_STDERR"
       if claude plugin list 2>/dev/null | grep -qF 'zelligent@zelligent'; then
-        if claude plugin update zelligent@zelligent 2>/dev/null; then
+        if run_claude_cmd plugin update zelligent@zelligent; then
           echo "  claude plugin: updated"
-          # The add failing while update succeeds usually just means the
-          # marketplace was already registered (healthy) — but it can also
-          # mean the update ran against a STALE registration while THIS
-          # install's path failed to register for a real reason. Doctor
-          # can't tell the difference without introspecting Claude's
-          # registration files (deliberately out of scope), so never print
-          # a bare green here: state the assumption and the one-command fix.
+          # The add failing while the update succeeds means the plugin is
+          # usable but this install's path may not be the one registered, so
+          # never print a bare green: show what the add actually said.
           if [ "$MARKETPLACE_ADD_OK" -eq 0 ]; then
-            echo "  claude plugin: note — using a previously registered 'zelligent' marketplace; if hooks seem stale, run: claude plugin marketplace remove zelligent && zelligent doctor"
+            echo "  claude plugin: note — marketplace registration was not refreshed; using the previously registered 'zelligent' marketplace"
+            print_claude_stderr "$MARKETPLACE_ADD_ERR"
           fi
           echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
           echo "  claude plugin: ok (update check failed)"
+          print_claude_stderr "$CLAUDE_CMD_STDERR"
         fi
       else
-        if claude plugin install zelligent@zelligent 2>/dev/null; then
+        if run_claude_cmd plugin install zelligent@zelligent; then
           echo "  claude plugin: installed"
           echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
-          echo "  claude plugin: failed to install — if a stale 'zelligent' marketplace is registered from an old install, run: claude plugin marketplace remove zelligent && zelligent doctor"
+          # The install is the symptom whenever the add failed first — lead
+          # with the registration failure so the reason is the first thing
+          # read, not a guess about stale state.
+          if [ "$MARKETPLACE_ADD_OK" -eq 0 ]; then
+            echo "  claude plugin: failed to register marketplace ($PLUGIN_MARKETPLACE)"
+            print_claude_stderr "$MARKETPLACE_ADD_ERR"
+          fi
+          echo "  claude plugin: failed to install"
+          print_claude_stderr "$CLAUDE_CMD_STDERR"
           ERRORS=1
         fi
       fi
