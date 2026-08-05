@@ -94,6 +94,18 @@ pub const PIPE_INVALIDATE: &str = "zelligent-invalidate";
 /// against the stale-in-flight-refresh race. See #140.
 pub const CTX_GENERATION: &str = "generation";
 
+/// Context key carrying the monotonically increasing request id
+/// (`State::refresh_seq`) a `list-worktrees` refresh was launched under
+/// (issue #216 rework, finding 1). Stamped by `fire_list_worktrees`, echoed
+/// back in `Event::RunCommandResult`, and matched against
+/// `State::refresh_inflight` in `handle_list_worktrees` so a superseded or
+/// timed-out-then-relaunched result can be told apart from the current one
+/// and ignored. Distinct from `CTX_GENERATION`, which tracks invalidation
+/// freshness rather than request identity. A result carrying no request id
+/// (only ever the case in tests / legacy callers — production always stamps
+/// one) skips the identity gate and is accepted.
+pub const CTX_REQUEST_ID: &str = "request_id";
+
 /// Pipe name for "reply with your known agent statuses". Broadcast once by
 /// a plugin instance when its RunCommands grant lands (`Event::
 /// PermissionRequestResult(Granted)` — never from `load()`, where
@@ -345,36 +357,69 @@ pub struct State {
     /// and an early-firing timer must re-chain for what's left rather than
     /// leave the message stranded until an unrelated event.
     pub status_timer_arm_secs: f64,
-    /// The most recent `list-worktrees` refresh failed and no success has
-    /// landed since — carries the full error text (issue #216). Unlike
-    /// `status_message`, this is STATE, not an event: it must NOT expire on
-    /// a TTL, because the displayed worktree list is stale for exactly as
-    /// long as this is set. Cleared only by a successful
-    /// `handle_list_worktrees`. Drives the persistent `stale · retrying`
-    /// marker (see `refresh_stale_reason` / `render_to`) and is re-shown in
-    /// full on demand by the `e` key (`handle_key_browse`), so the detail is
-    /// recoverable long after the transient error status expired.
+    /// Full text of the most recent FAILED refresh, or `None` when the last
+    /// attempt succeeded (issue #216). Unlike `status_message` this is STATE,
+    /// not a TTL'd event, and is recoverable in full on demand via the `e`
+    /// key (`handle_key_browse`). It is one of the two inputs to
+    /// `is_stale()`/`refresh_stale_reason()` (the other is `cache_dirty`),
+    /// which drive the persistent `stale · retrying` marker.
     pub refresh_error: Option<String>,
-    /// When the current in-flight `list-worktrees` was launched, or `None`
-    /// when none is running (issue #216). The in-flight guard: while this is
-    /// `Some` and younger than `REFRESH_IN_FLIGHT_TIMEOUT_SECS`,
-    /// `fire_worktrees_refresh` is a no-op so refreshes cannot stack. Set
-    /// when a refresh launches, cleared when its result lands (either exit
-    /// code) or when it ages past the timeout (covers a result lost while
-    /// the instance was hidden). WASI monotonic clock via `Instant`, like
-    /// `status_message_set_at`.
-    pub list_worktrees_started_at: Option<Instant>,
-    /// When the last refresh failure occurred — the start of the current
-    /// backoff window — or `None` when not backing off (issue #216). An
-    /// auto-retry is suppressed while `refresh_failed_at.elapsed() <
+    /// The single in-flight `list-worktrees` request as `(request id,
+    /// launched at)`, or `None` when nothing is running (issue #216 rework,
+    /// finding 1). Every launch stamps a fresh `refresh_seq` id into the
+    /// command context; only a result whose id matches this may touch
+    /// refresh/backoff/error state or fire the follow-on branch fetch — a
+    /// superseded or timed-out-then-relaunched result is ignored, so a late
+    /// result can't clear a newer request's guard or overwrite its state.
+    /// The `Instant` drives `REFRESH_IN_FLIGHT_TIMEOUT_SECS` abandonment of a
+    /// result lost while the instance was hidden. WASI monotonic clock.
+    pub refresh_inflight: Option<(u64, Instant)>,
+    /// Ever-increasing refresh request counter (issue #216 rework). Bumped
+    /// once per launch and stamped into the context as `CTX_REQUEST_ID` so
+    /// the result can be matched back to `refresh_inflight`.
+    pub refresh_seq: u64,
+    /// A refresh was wanted but couldn't launch (gate closed) — so it is
+    /// DEFERRED, not dropped (issue #216 finding 2). Drained by `pump_refresh`
+    /// the moment the gate reopens (active result landing, timer wake-up, or
+    /// reveal), so a tab-set change or invalidate that arrives mid-refresh is
+    /// never silently lost. `wants_refresh()` = this OR `cache_dirty`.
+    pub refresh_pending: bool,
+    /// Start of the current backoff window, or `None` when not backing off
+    /// (issue #216). Auto-retries are suppressed while `elapsed() <
     /// refresh_backoff_secs`. Reset by a success or a manual `r` refresh.
     pub refresh_failed_at: Option<Instant>,
-    /// Current backoff window length in seconds (issue #216). Zero when not
-    /// backing off; set to `REFRESH_BACKOFF_INITIAL_SECS` on the first
-    /// failure and doubled (capped at `REFRESH_BACKOFF_MAX_SECS`) on each
-    /// subsequent failure. This is what stops the spin: repeated failures
-    /// widen the window instead of respawning two processes per `TabUpdate`.
+    /// Current backoff window in seconds (issue #216): `0` when not backing
+    /// off, `REFRESH_BACKOFF_INITIAL_SECS` on the first failure, doubling to
+    /// `REFRESH_BACKOFF_MAX_SECS` on each subsequent failure. What stops the
+    /// spin: repeated failures widen the window instead of respawning on
+    /// every `TabUpdate`.
     pub refresh_backoff_secs: f64,
+    /// Set when the refresh lifecycle wants a future wake-up — a backoff
+    /// expiry or an in-flight timeout — so a retry actually fires without an
+    /// external event (issue #216 finding 3). Consumed by the update/pipe
+    /// shell's `arm_pending_refresh_timer`, mirroring the
+    /// `status_timer_needs_arming` split so the host `set_timeout` call stays
+    /// out of the pure lifecycle logic.
+    pub refresh_timer_needs_arming: bool,
+    /// Seconds the refresh retry wake-up should be armed for (issue #216).
+    /// Requested via `request_refresh_wakeup`, which keeps the EARLIEST
+    /// pending deadline when several are requested within one event.
+    pub refresh_timer_arm_secs: f64,
+}
+
+/// Outcome of applying a `list-worktrees` result (issue #216 rework). The
+/// pure `handle_list_worktrees` returns this so the shell can fire the
+/// follow-on branch fetch (`Succeeded` only, #219) and knows a superseded
+/// result changed nothing (`Ignored`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The result's request id didn't match the in-flight request — a
+    /// superseded/late/timed-out result. No state was touched.
+    Ignored,
+    /// The active refresh completed non-zero; error/backoff state was set.
+    Failed,
+    /// The active refresh succeeded; the list was applied.
+    Succeeded,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -653,64 +698,101 @@ impl State {
         );
     }
 
-    /// True when a fresh `list-worktrees` may be launched (issue #216).
-    /// Enforces two independent gates:
-    ///   - In-flight guard: a refresh younger than
-    ///     `REFRESH_IN_FLIGHT_TIMEOUT_SECS` is still running, so don't stack
-    ///     another. A stuck/lost result ages out of the window and unblocks.
-    ///   - Backoff gate: after a failure, auto-retries are suppressed until
-    ///     the current backoff window elapses. A manual `r` refresh clears
-    ///     the backoff (see `handle_key_browse`) so it always gets through.
-    fn refresh_gate_open(&self) -> bool {
-        if let Some(started) = self.list_worktrees_started_at {
-            if started.elapsed().as_secs_f64() < REFRESH_IN_FLIGHT_TIMEOUT_SECS {
-                return false;
-            }
-        }
-        if let Some(failed_at) = self.refresh_failed_at {
-            if failed_at.elapsed().as_secs_f64() < self.refresh_backoff_secs {
-                return false;
-            }
-        }
-        true
+    /// Is a refresh still owed? Either one was explicitly deferred, or a
+    /// known invalidation (`cache_dirty`) is unsatisfied. See finding 2.
+    fn wants_refresh(&self) -> bool {
+        self.refresh_pending || self.cache_dirty
     }
 
-    /// Guarded refresh of the worktree list (issues #216 and #219). The
-    /// single choke point every refresh trigger funnels through — bootstrap,
-    /// manual `r`, invalidate pipe, tab-set change, and dirty-cache retry —
-    /// so the in-flight guard and backoff can't be bypassed by adding a new
-    /// call site. Stamps `list_worktrees_started_at` when it actually
-    /// launches; a gated call is a silent no-op.
-    ///
-    /// Deliberately fires ONLY `list-worktrees`, not `list-branches`
-    /// (#219): the branch list is consumed exclusively by the `n` branch
-    /// picker, so it is fetched lazily — only alongside a *successful*
-    /// worktree refresh (see the `CMD_LIST_WORKTREES` shell arm). That
-    /// halves the process/descriptor pressure on the failing path: a
-    /// refresh that hits EMFILE now spawns one doomed process per attempt
-    /// instead of two, and never the branch spawn at all.
-    fn fire_worktrees_refresh(&mut self) {
-        if !self.refresh_gate_open() {
+    /// Seconds until the backoff window elapses, or `None` when not backing
+    /// off. Used to arm the retry wake-up (finding 3).
+    fn backoff_remaining_secs(&self) -> Option<f64> {
+        self.refresh_failed_at.map(|failed_at| {
+            (self.refresh_backoff_secs - failed_at.elapsed().as_secs_f64()).max(0.0)
+        })
+    }
+
+    /// Request a future wake-up so a deferred refresh actually retries with no
+    /// external event (issue #216 finding 3). Keeps the EARLIEST deadline when
+    /// several are requested within one event; the shell performs the host
+    /// `set_timeout` via `arm_pending_refresh_timer`.
+    fn request_refresh_wakeup(&mut self, secs: f64) {
+        let secs = secs.max(0.3);
+        if self.refresh_timer_needs_arming {
+            self.refresh_timer_arm_secs = self.refresh_timer_arm_secs.min(secs);
+        } else {
+            self.refresh_timer_needs_arming = true;
+            self.refresh_timer_arm_secs = secs;
+        }
+    }
+
+    /// Note that a refresh is wanted, then advance the lifecycle. The entry
+    /// point every explicit trigger routes through (via `Action::Refresh` /
+    /// the execute arms). SHELL method: may launch a `list-worktrees`.
+    fn request_refresh(&mut self) {
+        self.refresh_pending = true;
+        self.pump_refresh();
+    }
+
+    /// Advance the refresh lifecycle exactly one step (issue #216 rework —
+    /// unifies the in-flight guard, backoff, deferred-request drain, timer
+    /// wake-ups, and lost-result recovery). Idempotent and safe to call on
+    /// ANY event, which is how findings 2 and 3 are covered: the shell pumps
+    /// after every event, on the retry timer, and on reveal. SHELL method.
+    fn pump_refresh(&mut self) {
+        // Reap an abandoned in-flight request whose result never landed (lost
+        // while the instance was hidden — hidden instances get no results):
+        // re-desire the refresh so it relaunches.
+        if let Some((_, started)) = self.refresh_inflight {
+            if started.elapsed().as_secs_f64() >= REFRESH_IN_FLIGHT_TIMEOUT_SECS {
+                self.refresh_inflight = None;
+                self.refresh_pending = true;
+            }
+        }
+        // A fresh in-flight request will drive the next step when its result
+        // lands; just keep a timeout wake-up armed as a lost-result safety net.
+        if let Some((_, started)) = self.refresh_inflight {
+            let remaining = REFRESH_IN_FLIGHT_TIMEOUT_SECS - started.elapsed().as_secs_f64();
+            self.request_refresh_wakeup(remaining);
             return;
         }
-        self.list_worktrees_started_at = Some(Instant::now());
+        if !self.wants_refresh() {
+            return;
+        }
+        // Nothing in flight, so only the backoff gate can block. If it does,
+        // stay deferred and arm a wake-up for when it lifts.
+        if let Some(remaining) = self.backoff_remaining_secs() {
+            if remaining > 0.0 {
+                self.request_refresh_wakeup(remaining);
+                return;
+            }
+        }
+        // Launch. Stamp a fresh request id so the result can be matched back.
+        self.refresh_pending = false;
+        self.refresh_seq += 1;
+        self.refresh_inflight = Some((self.refresh_seq, Instant::now()));
         self.fire_list_worktrees();
+        self.request_refresh_wakeup(REFRESH_IN_FLIGHT_TIMEOUT_SECS);
     }
 
+    /// The single `list-worktrees` launch site (issues #216 / #219).
+    /// Deliberately fires ONLY `list-worktrees`, not `list-branches`: the
+    /// branch list is consumed only by the `n` picker, so it is fetched
+    /// lazily — alongside a *successful* refresh (the `CMD_LIST_WORKTREES`
+    /// shell arm). The failing path therefore spawns one doomed process per
+    /// attempt, not two (#219).
     fn fire_list_worktrees(&self) {
-        // Stamp the generation current at launch time (see
-        // `State::invalidate_generation`). This is the only launch site
-        // for `list-worktrees` — bootstrap, manual refresh, and
-        // invalidation-triggered refresh all funnel through here — so a
-        // single stamp covers every case. When there is no pending
-        // invalidation this just echoes the current (possibly stale from
-        // an already-cleared round) generation, which compares equal to
-        // itself and clears `cache_dirty` as a no-op.
+        // Stamp the generation current at launch time (freshness proof, see
+        // `State::invalidate_generation`) AND the request id (identity, see
+        // `CTX_REQUEST_ID` / `refresh_inflight`). Only `pump_refresh` calls
+        // this, and it has already bumped `refresh_seq` and set
+        // `refresh_inflight` to the same id.
         let mut ctx = Self::ctx(CMD_LIST_WORKTREES);
         ctx.insert(
             CTX_GENERATION.to_string(),
             self.invalidate_generation.to_string(),
         );
+        ctx.insert(CTX_REQUEST_ID.to_string(), self.refresh_seq.to_string());
         run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "list-worktrees"],
             BTreeMap::new(),
@@ -941,6 +1023,43 @@ impl State {
         }
     }
 
+    /// Imperative-shell counterpart to `pump_refresh`'s
+    /// `refresh_timer_needs_arming` flag (issue #216 finding 3): performs the
+    /// `set_timeout` host call the lifecycle requested so a deferred refresh
+    /// actually wakes up and retries. Called from `update`/`pipe` after
+    /// pumping, once per event.
+    fn arm_pending_refresh_timer(&mut self) {
+        if self.refresh_timer_needs_arming {
+            set_timeout(self.refresh_timer_arm_secs.max(0.3));
+            self.refresh_timer_needs_arming = false;
+        }
+    }
+
+    /// Whether the displayed worktree list should be flagged stale (issue
+    /// #216 finding 4). Derives from BOTH inputs: a failed refresh
+    /// (`refresh_error`), and a known-but-unsatisfied invalidation
+    /// (`cache_dirty`) that we are NOT actively resolving. The
+    /// `refresh_inflight.is_none()` clause keeps the marker from flickering
+    /// on every healthy spawn/remove, where `cache_dirty` is briefly true
+    /// while its satisfying refresh is already in flight.
+    fn is_stale(&self) -> bool {
+        self.refresh_stale_reason().is_some()
+    }
+
+    /// The short inline reason for the `stale · retrying` marker, or `None`
+    /// when the list is not flagged stale. A failed refresh yields its
+    /// condensed reason (and a recoverable full error via `e`); a bare
+    /// unsatisfied invalidation yields a generic phrase. See `is_stale`.
+    fn refresh_stale_reason(&self) -> Option<String> {
+        if let Some(err) = &self.refresh_error {
+            Some(short_refresh_reason(err))
+        } else if self.cache_dirty && self.refresh_inflight.is_none() {
+            Some("changes pending".to_string())
+        } else {
+            None
+        }
+    }
+
     fn execute(&mut self, action: &Action) {
         match action {
             Action::None => {}
@@ -976,7 +1095,7 @@ impl State {
                 if let Some(name) = return_to {
                     go_to_tab_name(name);
                 }
-                self.fire_worktrees_refresh();
+                self.request_refresh();
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
@@ -987,14 +1106,14 @@ impl State {
                 show_self(false);
             }
             Action::Refresh => {
-                self.fire_worktrees_refresh();
+                self.request_refresh();
             }
             Action::FetchToplevel => self.fire_git_toplevel(),
             Action::FetchWorktreesAndBranches => {
                 // Branches are no longer fired here: they follow lazily on a
                 // successful worktree refresh (#219, see the
                 // CMD_LIST_WORKTREES shell arm).
-                self.fire_worktrees_refresh();
+                self.request_refresh();
             }
             Action::DumpLayout => {
                 dump_session_layout();
@@ -1075,11 +1194,23 @@ impl State {
         stdout: &[u8],
         stderr: &[u8],
         context: &BTreeMap<String, String>,
-    ) {
-        // The result landed, so nothing is in flight anymore (issue #216) —
-        // clear the guard on BOTH paths before branching, so a failure
-        // doesn't leave it stuck and block the next backed-off retry.
-        self.list_worktrees_started_at = None;
+    ) -> RefreshOutcome {
+        // Request-identity gate (issue #216 finding 1). A result may only
+        // touch refresh state if its stamped request id matches the current
+        // in-flight request. This defeats the timed-out-then-relaunched race:
+        // request A exceeds the in-flight timeout, `pump_refresh` reaps it and
+        // launches B (a new id), then A's late result arrives — A's id no
+        // longer matches, so it can't clear B's guard, overwrite B's state,
+        // or fire a redundant branch fetch. A result carrying NO id (tests /
+        // legacy callers only — production always stamps one) skips the gate.
+        if let Some(result_id) = context.get(CTX_REQUEST_ID).and_then(|s| s.parse::<u64>().ok()) {
+            let matches = matches!(self.refresh_inflight, Some((id, _)) if id == result_id);
+            if !matches {
+                return RefreshOutcome::Ignored;
+            }
+        }
+        // The active request completed: clear the in-flight guard.
+        self.refresh_inflight = None;
         if exit_code != Some(0) {
             let err = String::from_utf8_lossy(stderr).trim().to_string();
             let full = format!("Failed to list worktrees: {err}");
@@ -1090,18 +1221,24 @@ impl State {
             // status TTL and the detail stays recoverable via `e`. The
             // worktree list is deliberately NOT cleared.
             self.refresh_error = Some(full);
-            // Grow the backoff so repeated failures stop respawning two
-            // processes on every `TabUpdate` (the spin, #216).
+            // Grow the backoff so repeated failures stop respawning on every
+            // `TabUpdate` (the spin, #216).
             self.refresh_backoff_secs = if self.refresh_backoff_secs <= 0.0 {
                 REFRESH_BACKOFF_INITIAL_SECS
             } else {
                 (self.refresh_backoff_secs * 2.0).min(REFRESH_BACKOFF_MAX_SECS)
             };
             self.refresh_failed_at = Some(Instant::now());
-            return;
+            // Keep wanting a refresh so the backoff wake-up (finding 3)
+            // retries this once the window elapses — "stale · retrying" is a
+            // promise the shell's `pump_refresh` now keeps.
+            self.refresh_pending = true;
+            return RefreshOutcome::Failed;
         }
-        // Success: the list is fresh again. Clear the staleness state and
-        // reset the backoff so the next legitimate trigger refreshes at once.
+        // Success: the refresh mechanism works. Clear the error and reset the
+        // backoff. `refresh_error` tracks "did the LAST attempt fail", so any
+        // success clears it; the still-stale case (below) is carried by
+        // `cache_dirty`, which `is_stale()` also honours (finding 4).
         self.refresh_error = None;
         self.refresh_failed_at = None;
         self.refresh_backoff_secs = 0.0;
@@ -1109,16 +1246,15 @@ impl State {
         self.worktrees = parse_worktrees(&output);
         // The listing is applied unconditionally — even a refresh launched
         // before the latest invalidation is harmless to apply: it's either
-        // still accurate or gets superseded when the newer refresh lands.
+        // still accurate or superseded when the newer refresh lands.
         //
         // Clearing `cache_dirty`, however, is conditional. Success alone
         // isn't proof of freshness (see `invalidate_generation`): only a
-        // refresh stamped with the CURRENT generation — i.e. one launched
-        // at-or-after the latest invalidation — can prove the cache
-        // reflects that invalidation. A stale-generation result leaves the
-        // bit set so the next `TabUpdate` retries. The failure path above
-        // deliberately returns before this, without touching either field:
-        // a failed refresh proves nothing about generation OR freshness.
+        // refresh stamped with the CURRENT generation can prove the cache
+        // reflects the latest invalidation. A stale-generation success leaves
+        // the bit set, so `is_stale()` keeps flagging the list and
+        // `pump_refresh` relaunches to satisfy the current generation — the
+        // silent-staleness gap finding 4 warned about cannot open.
         let result_generation = context
             .get(CTX_GENERATION)
             .and_then(|g| g.parse::<u64>().ok())
@@ -1127,6 +1263,7 @@ impl State {
             self.cache_dirty = false;
         }
         self.recompute_sidebar_items();
+        RefreshOutcome::Succeeded
     }
 
     pub fn recompute_sidebar_items(&mut self) {
@@ -1534,7 +1671,7 @@ impl State {
             self.sidebar_items.len(),
             self.selected_index,
             &self.status_message,
-            self.refresh_error.is_some(),
+            self.is_stale(),
         );
         let leading = layout.leading_lines();
         if line < leading {
@@ -1992,8 +2129,8 @@ impl State {
                     ui::render_header(w, &self.repo_name, cols);
                     // Even with no worktrees to list (e.g. the first refresh
                     // itself failed), surface staleness (#216).
-                    let stale_lines = if let Some(err) = &self.refresh_error {
-                        ui::render_stale_marker(w, &short_refresh_reason(err), cols);
+                    let stale_lines = if let Some(reason) = self.refresh_stale_reason() {
+                        ui::render_stale_marker(w, &reason, self.refresh_error.is_some(), cols);
                         1
                     } else {
                         0
@@ -2025,7 +2162,7 @@ impl State {
                         self.sidebar_items.len(),
                         self.selected_index,
                         &self.status_message,
-                        self.refresh_error.is_some(),
+                        self.is_stale(),
                     );
                     if layout.show_header {
                         ui::render_header(w, &self.repo_name, cols);
@@ -2033,8 +2170,8 @@ impl State {
                     // Persistent staleness marker (#216), between the header
                     // and the list. `layout.stale_lines` reserved its row, so
                     // it never pushes the frame past `rows`.
-                    if let Some(err) = &self.refresh_error {
-                        ui::render_stale_marker(w, &short_refresh_reason(err), cols);
+                    if let Some(reason) = self.refresh_stale_reason() {
+                        ui::render_stale_marker(w, &reason, self.refresh_error.is_some(), cols);
                     }
                     ui::render_sidebar_list(
                         w,
@@ -2058,7 +2195,15 @@ impl State {
                         writeln!(w).unwrap();
                     }
                     ui::render_status(w, &self.status_message, self.status_is_error);
-                    ui::render_footer(w, &self.mode, VERSION, cols);
+                    // Compact (version-only) footer on an undersized pane
+                    // (finding 5); the full footer otherwise. `footer_lines`
+                    // is the single source of truth so the padding above and
+                    // this write always agree.
+                    if layout.footer_lines <= 1 {
+                        ui::render_version_only(w, VERSION, cols);
+                    } else {
+                        ui::render_footer(w, &self.mode, VERSION, cols);
+                    }
                 }
             }
             Mode::SelectBranch => {
@@ -2178,12 +2323,30 @@ impl ZellijPlugin for State {
         // arm step runs on this path too.
         if let Event::Visible(visible) = event {
             let rerender = self.handle_visible(visible);
+            if visible {
+                // A reveal: any refresh that was in flight when we hid never
+                // delivered its result (hidden instances receive no Events),
+                // so abandon it and re-drive the lifecycle. Covers the
+                // "result lost while hidden leaves the sidebar frozen" case
+                // (issue #216 finding 3) without waiting out the 30s timeout.
+                if self.refresh_inflight.take().is_some() {
+                    self.refresh_pending = true;
+                }
+                self.pump_refresh();
+            }
             self.arm_pending_status_timer();
+            self.arm_pending_refresh_timer();
             return rerender;
         }
         if let Event::Timer(_) = event {
             let rerender = self.handle_timer();
+            // Timers are untagged monotonic wake-ups (issue #216 finding 3):
+            // reevaluate the refresh lifecycle so a backoff/in-flight deadline
+            // that has now elapsed actually retries, then re-arm if more
+            // waiting remains.
+            self.pump_refresh();
             self.arm_pending_status_timer(); // early-fire re-chain
+            self.arm_pending_refresh_timer();
             return rerender;
         }
         let action = match event {
@@ -2206,17 +2369,18 @@ impl ZellijPlugin for State {
                 match context.get("cmd_type").map(|s| s.as_str()) {
                     Some(CMD_GIT_TOPLEVEL) => self.handle_git_toplevel(exit_code, &stdout, &stderr),
                     Some(CMD_LIST_WORKTREES) => {
-                        self.handle_list_worktrees(exit_code, &stdout, &stderr, &context);
-                        // Lazily refresh the branch list only when the
-                        // worktree refresh actually succeeded (#219): the
-                        // branch picker is the sole consumer, and skipping
-                        // this on failure keeps the failing path down to one
-                        // spawn instead of two — no branch process piled onto
-                        // an already descriptor-starved environment. The side
-                        // effect lives in the shell (keyed on `exit_code`),
-                        // mirroring the spawn/remove invalidate-broadcast
-                        // pattern, so `handle_list_worktrees` stays pure.
-                        if exit_code == Some(0) {
+                        // Lazily refresh the branch list only when the ACCEPTED
+                        // worktree refresh actually succeeded (#219 + finding
+                        // 1): the picker is the sole consumer, skipping it on
+                        // failure keeps the failing path to one spawn, and
+                        // keying on the outcome (not a bare `exit_code`) means
+                        // a superseded/stale result fires no redundant branch
+                        // spawn. The side effect lives in the shell so
+                        // `handle_list_worktrees` stays pure; the tail
+                        // `pump_refresh` drains any refresh still owed.
+                        if self.handle_list_worktrees(exit_code, &stdout, &stderr, &context)
+                            == RefreshOutcome::Succeeded
+                        {
                             self.fire_git_branches();
                         }
                         Action::None
@@ -2274,7 +2438,14 @@ impl ZellijPlugin for State {
             _ => return false,
         };
         self.execute(&action);
+        // Advance the refresh lifecycle after every event (issue #216
+        // findings 2 & 3): drains a deferred refresh the moment the gate
+        // reopens, reaps a timed-out in-flight request, and re-arms the retry
+        // wake-up — so a change is never dropped and a stale marker never
+        // stops retrying. Idempotent; a no-op when nothing is owed.
+        self.pump_refresh();
         self.arm_pending_status_timer();
+        self.arm_pending_refresh_timer();
         true
     }
 
@@ -2293,7 +2464,12 @@ impl ZellijPlugin for State {
         }
         let action = self.handle_pipe(&pipe_message);
         self.execute(&action);
+        // See the matching tail in `update` (issue #216 findings 2 & 3):
+        // an invalidate pipe that arrives mid-refresh is deferred by
+        // `pump_refresh`, not dropped, and drained when the gate reopens.
+        self.pump_refresh();
         self.arm_pending_status_timer();
+        self.arm_pending_refresh_timer();
         true
     }
 
@@ -3982,47 +4158,57 @@ mod tests {
         assert_eq!(action, Action::Refresh);
     }
 
-    // --- #216: staleness state, backoff, in-flight guard, on-demand error ---
+    // --- #216 (reworked): request identity, backoff, deferral, staleness ---
+
+    /// Set up an accepted-request context: a fresh in-flight request whose
+    /// id and generation the returned context echoes back, so
+    /// `handle_list_worktrees` treats the result as the active one.
+    fn accept_ctx(s: &mut State, generation: u64) -> BTreeMap<String, String> {
+        s.refresh_seq += 1;
+        s.refresh_inflight = Some((s.refresh_seq, Instant::now()));
+        let mut c = BTreeMap::new();
+        c.insert(CTX_REQUEST_ID.to_string(), s.refresh_seq.to_string());
+        c.insert(CTX_GENERATION.to_string(), generation.to_string());
+        c
+    }
 
     #[test]
-    fn failed_refresh_keeps_list_and_records_persistent_error() {
+    fn failed_refresh_keeps_list_records_error_and_wants_retry() {
         let mut s = state_with_worktrees();
-        // A refresh is in flight (guard stamped by fire_worktrees_refresh).
-        s.list_worktrees_started_at = Some(Instant::now());
+        let ctx = accept_ctx(&mut s, 0);
         let before = s.worktrees.clone();
 
-        s.handle_list_worktrees(Some(1), b"", b"Too many open files (os error 24)", &BTreeMap::new());
+        let outcome =
+            s.handle_list_worktrees(Some(1), b"", b"Too many open files (os error 24)", &ctx);
 
+        assert_eq!(outcome, RefreshOutcome::Failed);
         assert_eq!(s.worktrees, before, "the last known list must be kept on failure");
-        let err = s.refresh_error.expect("failure must record persistent error state");
-        assert!(err.contains("Too many open files"), "full error text is retained: {err}");
+        let err = s.refresh_error.clone().expect("failure records persistent error state");
+        assert!(err.contains("Too many open files"), "full error retained: {err}");
         assert!(s.status_is_error, "the failure also shows transiently in the status line");
-        assert_eq!(
-            s.refresh_backoff_secs, REFRESH_BACKOFF_INITIAL_SECS,
-            "first failure arms the initial backoff window"
-        );
-        assert!(s.refresh_failed_at.is_some(), "backoff window start is stamped");
-        assert!(
-            s.list_worktrees_started_at.is_none(),
-            "the in-flight guard is cleared on the result (either exit code)"
-        );
+        assert_eq!(s.refresh_backoff_secs, REFRESH_BACKOFF_INITIAL_SECS, "first backoff window");
+        assert!(s.refresh_failed_at.is_some(), "backoff window start stamped");
+        assert!(s.refresh_inflight.is_none(), "the in-flight guard is cleared on the result");
+        assert!(s.refresh_pending, "a failure keeps wanting a refresh so the timer retries it");
+        assert!(s.is_stale(), "the list is flagged stale while the error stands");
     }
 
     #[test]
     fn successful_refresh_clears_stale_state_and_resets_backoff() {
         let mut s = state_with_worktrees();
-        // Simulate a prior failure.
         s.refresh_error = Some("Failed to list worktrees: boom".into());
         s.refresh_failed_at = Some(Instant::now());
         s.refresh_backoff_secs = 8.0;
-        s.list_worktrees_started_at = Some(Instant::now());
+        let ctx = accept_ctx(&mut s, 0);
 
-        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &BTreeMap::new());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
 
-        assert!(s.refresh_error.is_none(), "success clears the staleness marker");
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_error.is_none(), "success clears the error");
         assert!(s.refresh_failed_at.is_none(), "success resets the backoff window");
         assert_eq!(s.refresh_backoff_secs, 0.0, "success resets the backoff magnitude");
-        assert!(s.list_worktrees_started_at.is_none(), "the in-flight guard is cleared");
+        assert!(s.refresh_inflight.is_none(), "the in-flight guard is cleared");
+        assert!(!s.is_stale(), "a clean success is not stale");
     }
 
     #[test]
@@ -4030,7 +4216,8 @@ mod tests {
         let mut s = state_with_worktrees();
         let mut expected = REFRESH_BACKOFF_INITIAL_SECS;
         for _ in 0..12 {
-            s.handle_list_worktrees(Some(1), b"", b"boom", &BTreeMap::new());
+            let ctx = accept_ctx(&mut s, 0);
+            s.handle_list_worktrees(Some(1), b"", b"boom", &ctx);
             assert_eq!(s.refresh_backoff_secs, expected);
             expected = (expected * 2.0).min(REFRESH_BACKOFF_MAX_SECS);
         }
@@ -4041,33 +4228,67 @@ mod tests {
     }
 
     #[test]
-    fn refresh_gate_closed_during_backoff_window_open_after() {
-        let mut s = State::default();
-        // Inside the window: failed just now, non-zero backoff.
-        s.refresh_failed_at = Some(Instant::now());
-        s.refresh_backoff_secs = REFRESH_BACKOFF_INITIAL_SECS;
-        assert!(!s.refresh_gate_open(), "auto-retry is suppressed inside the backoff window");
+    fn superseded_result_is_ignored_and_leaves_active_request_intact() {
+        // Finding 1: request A times out, B (a new id) is launched, then A's
+        // late result arrives. A must not clear B's guard or set error state.
+        let mut s = state_with_worktrees();
+        // B is the current in-flight request, id = 5.
+        s.refresh_seq = 5;
+        s.refresh_inflight = Some((5, Instant::now()));
 
-        // Window elapsed (modelled by a zero-length window).
-        s.refresh_backoff_secs = 0.0;
-        assert!(s.refresh_gate_open(), "the gate reopens once the window has elapsed");
+        let mut a_ctx = BTreeMap::new();
+        a_ctx.insert(CTX_REQUEST_ID.to_string(), "4".to_string()); // A, older id
+        let outcome = s.handle_list_worktrees(Some(1), b"", b"stale boom", &a_ctx);
+
+        assert_eq!(outcome, RefreshOutcome::Ignored, "a superseded result is ignored");
+        assert_eq!(s.refresh_inflight, Some((5, s.refresh_inflight.unwrap().1)));
+        assert!(s.refresh_error.is_none(), "A must not set error state over B");
+        assert_eq!(s.refresh_backoff_secs, 0.0, "A must not arm backoff over B");
+
+        // B's own result (matching id) is accepted.
+        let mut b_ctx = BTreeMap::new();
+        b_ctx.insert(CTX_REQUEST_ID.to_string(), "5".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &b_ctx);
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_inflight.is_none());
     }
 
     #[test]
-    fn refresh_gate_closed_while_in_flight_reopens_when_abandoned() {
-        let mut s = State::default();
-        s.list_worktrees_started_at = Some(Instant::now());
-        assert!(!s.refresh_gate_open(), "a fresh in-flight refresh blocks stacking");
+    fn stale_generation_success_keeps_the_list_flagged_stale() {
+        // Finding 4: an old-generation refresh succeeds while a newer
+        // invalidation is unsatisfied. The error clears, but cache_dirty (and
+        // hence the marker) must persist — no silent staleness.
+        let mut s = state_with_worktrees();
+        s.invalidate_generation = 1;
+        s.cache_dirty = true; // a newer invalidation is outstanding
+        // A refresh launched at the OLD generation (0) succeeds.
+        let ctx = accept_ctx(&mut s, 0);
 
-        // A refresh whose result never landed ages out of the guard window.
-        s.list_worktrees_started_at = Some(
-            Instant::now()
-                - std::time::Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS + 1.0),
-        );
-        assert!(
-            s.refresh_gate_open(),
-            "an abandoned (timed-out) in-flight refresh must not wedge future refreshes"
-        );
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_error.is_none(), "the refresh itself succeeded, so no error");
+        assert!(s.cache_dirty, "a stale-generation success cannot clear cache_dirty");
+        assert!(s.is_stale(), "staleness persists via cache_dirty (finding 4)");
+        assert_eq!(s.refresh_stale_reason().as_deref(), Some("changes pending"));
+    }
+
+    #[test]
+    fn is_stale_derives_from_error_and_cache_dirty() {
+        // Finding 4: staleness = a failed refresh OR an unsatisfied
+        // invalidation we're not actively resolving.
+        let mut s = State::default();
+        assert!(!s.is_stale(), "fresh state is not stale");
+
+        s.refresh_error = Some("Failed to list worktrees: boom".into());
+        assert!(s.is_stale(), "a failed refresh is stale");
+        s.refresh_error = None;
+
+        s.cache_dirty = true;
+        assert!(s.is_stale(), "an unsatisfied invalidation with no refresh in flight is stale");
+        // While a refresh is actively resolving it, don't flicker the marker.
+        s.refresh_inflight = Some((1, Instant::now()));
+        assert!(!s.is_stale(), "cache_dirty while a refresh is in flight is not flagged");
     }
 
     #[test]
@@ -4088,8 +4309,7 @@ mod tests {
         let mut s = state_with_sidebar();
         let full = "Failed to list worktrees: git: Too many open files (os error 24)";
         s.refresh_error = Some(full.into());
-        // The transient status has long since expired.
-        s.status_message.clear();
+        s.status_message.clear(); // the transient status has long since expired
 
         let action = s.handle_key_browse(&key(BareKey::Char('e')));
         assert_eq!(action, Action::None);
@@ -4116,8 +4336,19 @@ mod tests {
 
         assert_eq!(action, Action::Refresh);
         assert!(s.cache_dirty);
+        assert!(s.wants_refresh(), "an invalidation means a refresh is owed");
         assert!(s.refresh_failed_at.is_none(), "a genuine invalidation retries at once");
         assert_eq!(s.refresh_backoff_secs, 0.0);
+    }
+
+    #[test]
+    fn backoff_remaining_reports_the_open_window() {
+        let mut s = State::default();
+        assert!(s.backoff_remaining_secs().is_none(), "no window when not backing off");
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = REFRESH_BACKOFF_INITIAL_SECS;
+        let remaining = s.backoff_remaining_secs().expect("a window is open");
+        assert!(remaining > 0.0 && remaining <= REFRESH_BACKOFF_INITIAL_SECS);
     }
 
     #[test]

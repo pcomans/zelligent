@@ -95,6 +95,12 @@ Current plans:
 - `session-resurrection.md`: serialized-session lifecycle — clean resurrection
   after a hard server kill, the stale-plugin-path footgun (#155/#157), the
   spawn-flow guard, and nuke recovery (#158).
+- `refresh-failure-staleness.md`: reworked refresh lifecycle (#216/#219) — a
+  failed `list-worktrees` keeps the last known list, raises a persistent
+  `stale · retrying` marker that outlives the 8s status TTL, recovers the full
+  error via `e`, does not spin, and clears on a timer-driven or manual retry.
+  Simulates failure by moving the installed `zelligent` CLI aside (restore it
+  if the run aborts mid-plan).
 
 **CLI-under-test rule:** fixtures clone the source repo's checked-out branch
 (usually `main`) into `/tmp/zelligent-test-repo`, so `./zelligent.sh` inside the

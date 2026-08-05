@@ -111,7 +111,6 @@ pub fn sidebar_layout(
     status_message: &str,
     stale: bool,
 ) -> SidebarLayout {
-    let footer_lines = if cols >= 55 { 3 } else { 4 };
     let status_lines = status_height(status_message, cols);
     // The persistent stale marker (issue #216) is reserved up front, ahead
     // of the header/separator degradation decision: staleness is more
@@ -119,7 +118,22 @@ pub fn sidebar_layout(
     // marker survives while the header/separator are sacrificed first.
     let stale_lines = usize::from(stale);
 
-    let content_budget = rows.saturating_sub(status_lines + footer_lines + stale_lines);
+    // Footer degradation for undersized panes (issue #216 finding 5). The
+    // full footer (blank + hints + version) is 3–4 rows; on a pane too short
+    // to also fit the status, the marker, and at least one two-row item, it
+    // collapses to the single version line so those never overflow `rows`
+    // and force the header-swallowing scroll (#135/#136). One line is always
+    // kept as the terminal's bottom anchor (see `render_footer`), so the
+    // final write stays a newline-less `write!`.
+    let full_footer = if cols >= 55 { 3 } else { 4 };
+    let overhead = status_lines + stale_lines;
+    let footer_lines = if rows >= overhead + 2 + full_footer {
+        full_footer
+    } else {
+        1
+    };
+
+    let content_budget = rows.saturating_sub(overhead + footer_lines);
     let (show_header, show_separator) = if content_budget >= MIN_ROWS_HEADER_AND_SEPARATOR {
         (true, true)
     } else if content_budget >= MIN_ROWS_HEADER_ONLY {
@@ -130,7 +144,12 @@ pub fn sidebar_layout(
 
     let leading = show_header as usize + show_separator as usize;
     let item_rows_budget = content_budget.saturating_sub(leading);
-    let max_items = (item_rows_budget / 2).max(1);
+    // No `.max(1)` here (finding 5): on a truly tiny pane the item viewport
+    // may legitimately shrink to zero rather than overflow. The full-footer
+    // guard above still reserves room for one item on any normally-sized
+    // pane, so the frozen "an item row is never sacrificed" rule (#135/#136)
+    // holds for every case a user actually sees.
+    let max_items = item_rows_budget / 2;
     let start = if selected >= max_items {
         selected - max_items + 1
     } else {
@@ -228,23 +247,39 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
 }
 
 /// Persistent `stale · retrying` marker (issue #216). Drawn between the
-/// header and the item list whenever the worktree cache is flagged stale by
-/// a failed refresh. Yellow (a warning, not the red alarm of a hard error),
-/// carries the short `reason` inline, and advertises the `e` key for the
-/// full error text. Exactly one physical line: the whole string is clipped
-/// to the pane width (prefix included) so it can never wrap and throw off
-/// the layout arithmetic. The `e: details` hint is dropped first when width
-/// is tight, so the reason survives on a narrow pane.
-pub fn render_stale_marker(w: &mut impl Write, reason: &str, cols: usize) {
+/// header and the item list whenever `State::is_stale()` holds. Yellow (a
+/// warning, not the red alarm of a hard error) and carries the short `reason`
+/// inline. When `has_details` (a failed refresh has full error text
+/// recoverable via the `e` key) it advertises `e: details`; a bare
+/// unsatisfied-invalidation marker omits the hint since there's nothing extra
+/// to show. Exactly one physical line: the whole string is clipped to the
+/// pane width (prefix included) so it can never wrap and throw off the layout
+/// arithmetic. The hint is dropped first when width is tight, so the reason
+/// survives on a narrow pane.
+pub fn render_stale_marker(w: &mut impl Write, reason: &str, has_details: bool, cols: usize) {
     let base = format!("⚠ stale · retrying — {reason}");
-    let with_hint = format!("{base} · e: details");
-    let content = if visible_width(&with_hint) + 2 <= cols {
-        with_hint
+    let content = if has_details {
+        let with_hint = format!("{base} · e: details");
+        if visible_width(&with_hint) + 2 <= cols {
+            with_hint
+        } else {
+            base
+        }
     } else {
         base
     };
     let clipped = clip_to_width(&content, cols.saturating_sub(2));
     writeln!(w, "  {YELLOW}{clipped}{RESET}").unwrap();
+}
+
+/// The version-only footer for an undersized pane (issue #216 finding 5):
+/// the single bottom-anchor line `render_footer` always ends with, without
+/// the leading blank or the command hints there's no room for. Newline-less
+/// `write!` like `render_footer`, so a frame that fills `rows` exactly does
+/// not scroll (#135/#136).
+pub fn render_version_only(w: &mut impl Write, version: &str, cols: usize) {
+    let version_line = fit_text(version, cols.saturating_sub(2));
+    write!(w, "  {DIM}{version_line}{RESET}").unwrap();
 }
 
 pub fn render_empty_state(w: &mut impl Write) {

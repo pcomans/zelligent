@@ -109,6 +109,53 @@ fn render_browse_empty_with_stale_marker() {
     insta::assert_snapshot!(output);
 }
 
+/// #216 finding 4: an unsatisfied invalidation with no refresh in flight
+/// (`cache_dirty`, no `refresh_error`) shows the generic `changes pending`
+/// marker — no `e: details` hint, since there's no error text to recover.
+#[test]
+fn render_browse_stale_marker_cache_dirty_generic() {
+    let mut s = state_with_worktrees();
+    s.cache_dirty = true; // known-but-unsatisfied invalidation, not in flight
+    let output = render_to_string(&s, 20, 80);
+    assert_eq!(physical_rows(&output, 80), 20);
+    assert!(output.contains("stale"), "cache_dirty alone flags staleness");
+    assert!(output.contains("changes pending"), "generic reason for a bare invalidation");
+    assert!(!output.contains("e: details"), "no on-demand error when there's no error text");
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5: an undersized pane (rows=5) carrying BOTH a persistent
+/// stale marker AND an active wrapped error status must degrade (footer
+/// collapses to the version line, item viewport may shrink to zero) rather
+/// than overflow `rows` and scroll the frame (#135/#136).
+#[test]
+fn render_browse_stale_marker_tiny_pane_5_rows_no_overflow() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 5, 40);
+    assert_eq!(physical_rows(&output, 40), 5, "rows=5 with wrapped error must not overflow");
+    assert!(output.contains("stale"), "the marker survives even at rows=5");
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5: rows=6 boundary — one more row than the tightest case,
+/// so a single item can reappear while still not overflowing.
+#[test]
+fn render_browse_stale_marker_tiny_pane_6_rows_no_overflow() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 6, 40);
+    assert_eq!(physical_rows(&output, 40), 6, "rows=6 with wrapped error must not overflow");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
 #[test]
 fn render_select_branch() {
     let s = state_with_branches();

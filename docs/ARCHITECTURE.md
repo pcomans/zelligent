@@ -200,24 +200,44 @@ event-delivery model.
 **Failure handling (#216 / #219).** A refresh that fails — e.g. Zellij can't
 even spawn the command under EMFILE (`os error 24`) on a low `ulimit -n`
 with many worktrees — must not turn a transient failure into a permanent
-spin. Every refresh funnels through one guarded choke point
-(`fire_worktrees_refresh`) enforcing two gates: an **in-flight guard**
-(`list_worktrees_started_at`) so refreshes can't stack — a result lost to a
-hidden instance ages out after `REFRESH_IN_FLIGHT_TIMEOUT_SECS` so it can't
-wedge forever — and **exponential backoff** (`refresh_backoff_secs`, from
-`REFRESH_BACKOFF_INITIAL_SECS` doubling to `REFRESH_BACKOFF_MAX_SECS`) that
-suppresses the `cache_dirty`/tab-set auto-retries after a failure, so a
-persistent failure stops respawning a process on every `TabUpdate`. A
-manual `r` refresh and a genuine `zelligent-invalidate` both reset the
-backoff so real triggers still fire at once. Because the branch list is
-consumed only by the `n` picker, `list-branches` is fetched lazily — only
-alongside a *successful* worktree refresh — so the failing path spawns one
-doomed process per attempt, not two (#219). The failed refresh keeps the
-last known list on screen (usable-but-flagged beats blank) and records
-durable staleness state (`refresh_error`, distinct from the TTL'd
-`status_message`): a persistent yellow `stale · retrying` marker with a
-short reason, cleared only by a successful refresh, with the full error
-text recoverable on demand via the `e` key.
+spin. A single lifecycle (`pump_refresh`, driven via `Action::Refresh` and
+pumped by the update/pipe shell after *every* event) unifies five concerns:
+
+- **Request identity.** Each launch bumps `refresh_seq` and stamps it into
+  the context as `CTX_REQUEST_ID`; the in-flight request is `refresh_inflight
+  = (id, launched_at)`. Only a result whose id matches the current in-flight
+  request may touch state or fire the follow-on branch fetch — so a
+  timed-out-then-relaunched request's late result can't clear the newer
+  request's guard, overwrite its state, or double-spawn branches.
+- **In-flight guard + timeout.** Refreshes can't stack; a result lost to a
+  hidden instance ages out after `REFRESH_IN_FLIGHT_TIMEOUT_SECS`, and
+  `pump_refresh` reaps it (and reveal abandons any in-flight request, whose
+  result was lost while hidden) so nothing wedges.
+- **Exponential backoff** (`refresh_backoff_secs`, `REFRESH_BACKOFF_INITIAL_SECS`
+  doubling to `REFRESH_BACKOFF_MAX_SECS`) suppresses auto-retries after a
+  failure, so a persistent failure stops respawning on every `TabUpdate`. A
+  manual `r` and a genuine `zelligent-invalidate` reset it.
+- **Deferral, not drop.** A trigger that arrives while the gate is closed sets
+  `refresh_pending` (drained the moment the gate reopens) instead of being
+  lost — a tab-set change or invalidate mid-refresh always eventually runs.
+- **Timer wake-ups.** `pump_refresh` arms a `set_timeout` (via
+  `refresh_timer_needs_arming`, mirroring the status-timer split) for the
+  backoff/in-flight deadline, so a stale marker actually *retries* with no
+  external event and a lost result self-heals.
+
+Because the branch list is consumed only by the `n` picker, `list-branches`
+is fetched lazily — only alongside a *successful* worktree refresh — so the
+failing path spawns one doomed process per attempt, not two (#219). The
+failed refresh keeps the last known list on screen (usable-but-flagged beats
+blank). Staleness is displayed by `is_stale()`, which derives from BOTH a
+failed refresh (`refresh_error`, distinct from the TTL'd `status_message`)
+AND an unsatisfied invalidation (`cache_dirty`, when not already resolving):
+a persistent yellow `stale · retrying` marker with a short reason, cleared
+only by a *current-generation* success — so a stale-generation success can't
+silently drop the marker while the list is known-stale. The full error is
+recoverable on demand via the `e` key. The marker occupies one budgeted
+layout row, and on an undersized pane the footer collapses to its version
+line rather than overflowing the frame.
 
 ## Key files
 
