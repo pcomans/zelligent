@@ -64,14 +64,39 @@ fi
 cp "$DEFAULT_LAYOUT_SRC" "$DEFAULT_LAYOUT_DST"
 echo "Installed default layout to $DEFAULT_LAYOUT_DST"
 
+# The pre-#218 canonical shipped default (bordered sidebar pane). A user layout
+# byte-identical to this was auto-provisioned from the old default, so migrate
+# it to the current borderless default — otherwise the sidebar keeps the frame
+# title stacked over the plugin's in-pane header (the "double header", #218).
+# Frozen historical constant — keep in sync with legacy_default_layout_pre218
+# in zelligent.sh.
+legacy_default_layout_pre218() {
+  cat <<'LEGACY_KDL'
+pane split_direction="Vertical" {
+    pane name="zelligent" size=36 {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
+}
+LEGACY_KDL
+}
+
 USER_LAYOUT_DIR="$HOME/.zelligent"
 USER_LAYOUT_DST="$USER_LAYOUT_DIR/layout.kdl"
 mkdir -p "$USER_LAYOUT_DIR"
 if [ ! -f "$USER_LAYOUT_DST" ]; then
   cp "$DEFAULT_LAYOUT_DST" "$USER_LAYOUT_DST"
   echo "Created user layout at $USER_LAYOUT_DST"
+elif cmp -s "$DEFAULT_LAYOUT_DST" "$USER_LAYOUT_DST"; then
+  echo "User layout up to date at $USER_LAYOUT_DST"
+elif legacy_default_layout_pre218 | cmp -s - "$USER_LAYOUT_DST"; then
+  cp "$DEFAULT_LAYOUT_DST" "$USER_LAYOUT_DST"
+  echo "Migrated legacy default user layout to current (#218) at $USER_LAYOUT_DST"
 else
-  echo "Preserved existing user layout at $USER_LAYOUT_DST"
+  echo "Preserved existing (customized) user layout at $USER_LAYOUT_DST"
 fi
 
 # Install Claude Code plugin (marketplace directory) for `zelligent doctor`

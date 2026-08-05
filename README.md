@@ -147,7 +147,7 @@ Example:
 
 ```kdl
 pane split_direction="Vertical" {
-    pane name="zelligent" size=36 {
+    pane name="zelligent" size=36 borderless=true {
         {{zelligent_sidebar}}
     }
     pane {
@@ -159,6 +159,8 @@ pane size=1 borderless=true {
     plugin location="zellij:status-bar"
 }
 ```
+
+Keep `borderless=true` on the sidebar pane: a bordered pane draws a Zellij frame title (from the pane `name`) directly above the plugin's own in-pane header, producing a doubled title bar (the "double header" of [#218](https://github.com/pcomans/zelligent/issues/218)).
 
 Custom layouts bypass the automatic `setup.sh` preamble. If you need setup to run before the agent, wrap it in your command, e.g. `args "-c" "bash .zelligent/setup.sh /repo /worktree && exec {{agent_cmd}}"`.
 

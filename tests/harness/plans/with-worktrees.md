@@ -22,9 +22,9 @@ worktrees. The fixture creates three worktrees: `feature-a`, `feature-b`, and
 - Action: Press `r`
 - Expected: The sidebar remains visible and responsive after refresh
 
-## Test 4: Spawned tabs keep the sidebar frame
+## Test 4: Spawned tabs keep the sidebar pane
 - Action: Spawn from the sidebar UI itself (never from the control window — see README "CLI under test"): focus the sidebar in the view window, press `i`, type `feature-d`, press Enter
-- Expected: The new `feature-d` tab appears in the live session and still renders the left sidebar
+- Expected: The new `feature-d` tab appears in the live session and still renders the borderless left sidebar pane (36 cols, plugin's in-pane ` <repo> ` header, no Zellij frame title above it)
 
 ## Test 5: Version is displayed
 - Action: Read the terminal buffer

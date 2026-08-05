@@ -32,8 +32,10 @@ pub struct SidebarViewport {
 /// disagreeing whenever the guesses drifted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidebarLayout {
-    /// Whether the ` <repo> ` header banner line is drawn this frame (#156:
-    /// repo name only — the pane frame title carries the tool name).
+    /// Whether the ` <repo> ` header banner line is drawn this frame. Since
+    /// #218 the sidebar pane is `borderless=true`, so this in-pane banner is
+    /// the sidebar's sole title bar (there is no Zellij frame title above it);
+    /// it carries the repo name only (#156).
     pub show_header: bool,
     /// Whether a blank separator line is drawn between the header (or the
     /// pane top, if the header itself was dropped) and the first item.
