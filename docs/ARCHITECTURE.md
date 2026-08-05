@@ -226,35 +226,42 @@ pumped by the update/pipe shell after *every* event) unifies five concerns:
   the backoff expiry, or the `cache_dirty_since + STALE_GRACE_SECS` grace
   boundary. But `set_timeout` arms an untagged one-shot that CANNOT be
   cancelled, so when an earlier deadline preempts an already-armed later one,
-  the old timer stays queued and still delivers. The scheduler therefore
-  *accounts* for outstanding arms rather than pretending a single record can be
-  overwritten: `outstanding_arms` holds the fire-times of the queued one-shots.
-  `schedule_wakeup` first purges already-fired arms (`retain(> now)`, which also
-  drops any that fired-and-were-lost while hidden), then arms ONE more host
-  timer only when no remaining arm already fires at-or-before the desired
-  deadline — so a whole window of events collapses to one timer, and a
-  preempting earlier deadline adds at most one. Each delivered `Event::Timer`
-  retires the earliest arm via `retire_earliest_arm` (the one that fired, even
-  if a hair early), so a stale late delivery retires its own arm and re-arms
-  nothing (a remaining arm already covers the future deadline) — no duplicate,
-  no phantom, and the count is bounded by the number of in-flight preemptions
-  (≈2). Invariant (debug-asserted every schedule): a future desired deadline is
-  always covered by an outstanding arm, so a wake-up is never lost. The grace
-  boundary being a scheduled deadline is what makes the stale marker *appear*
-  with no other event; the Timer/reveal paths repaint when `is_stale()` differs
-  from the last painted frame (`last_rendered_stale`), and a reveal always
-  repaints (so a status message cleared while hidden is redrawn away).
+  the old timer stays queued and still delivers. Crucially, zellij *always*
+  delivers a `set_timeout` timer — it is directed and reaches even a hidden
+  instance, never lost (verified in zellij-server 0.44.3). So the scheduler
+  simply *accounts* for outstanding arms: `outstanding_arms` holds the
+  fire-times of the queued one-shots, and it mirrors the real host timers by
+  construction — every push is retired by exactly one future delivery.
+  `schedule_wakeup` arms ONE more host timer only when no remaining arm already
+  fires at-or-before the desired deadline (using the same `WAKEUP_FLOOR_SECS`
+  floor for the coverage check as for the arm, so a sub-floor deadline isn't
+  re-armed every event) — a whole window of events collapses to one timer, and
+  a preempting earlier deadline adds at most one. Each delivered `Event::Timer`
+  retires the earliest arm via `retire_earliest_arm` — nothing else removes
+  entries (there is deliberately NO time-based purge: it could drop an arm
+  whose delayed Timer is still queued, whose delivery would then misretire a
+  different arm). A stale late delivery therefore retires its own arm and
+  re-arms nothing — no duplicate, and the count is bounded by the number of
+  in-flight preemptions (≈2). Invariant (debug-asserted every schedule): a
+  desired deadline is covered by an outstanding arm, so a wake-up is never lost.
+  The grace boundary being a scheduled deadline is what makes the stale marker
+  *appear* with no other event; the Timer/reveal paths repaint when `is_stale()`
+  differs from the last painted frame (`last_rendered_stale`), and a reveal
+  always repaints (so a status message cleared while hidden is redrawn away).
 - **Hidden instances don't spin the refresh lifecycle.** While `!is_visible`,
-  `next_wakeup_deadline` omits the refresh deadlines, the Timer path skips
-  `pump_refresh`, and — crucially — the *pipe* path (which reaches hidden
-  instances, unlike Events) only RECORDS `refresh_pending`/`cache_dirty` via a
-  visibility-gated `request_refresh`, never pumping or launching. So a hidden
-  instance whose results are lost never wakes to reap-and-relaunch
-  `list-worktrees` every 30s, and a broadcast invalidate/status pipe can't
-  drive one either. Receiving any *Event* (not a pipe) proves visibility —
-  zellij delivers Events only to the visible tab — so `update` sets
-  `is_visible = true` for Event-driven refreshes (bootstrap, the `r` key),
-  keeping those working. The owed refresh survives in
+  `next_wakeup_deadline` omits the refresh deadlines, the Timer path and the
+  `update`/`pipe` tails skip `pump_refresh`, and `request_refresh` only RECORDS
+  `refresh_pending`/`cache_dirty`. So a hidden instance never wakes to
+  reap-and-relaunch `list-worktrees`, and a broadcast invalidate/status pipe
+  (which reaches hidden instances) can't drive one either. `is_visible` is
+  authoritative ONLY from `Event::Visible(true/false)` and from genuine user
+  input (`Key`/`Mouse`, which reach only a focused pane) — NOT from a
+  `TabUpdate`/`PaneUpdate` or a directed `RunCommandResult`/
+  `PermissionRequestResult`, all of which zellij delivers to background
+  instances too (verified in zellij-server 0.44.3), so treating them as proof
+  of visibility would un-hide a hidden instance and reopen its pumps. Bootstrap
+  and the `r`-key refresh still work: the active sidebar gets `Visible(true)`,
+  and a keystroke marks visibility directly. The owed refresh survives in
   `refresh_pending`/`cache_dirty`, and the reveal path (which abandons any
   in-flight request and pumps) drains it. Status expiry is still scheduled
   while hidden — it spawns no process — so a message can clear on its own.

@@ -79,6 +79,13 @@ pub const REFRESH_BACKOFF_MAX_SECS: f64 = 60.0;
 /// this long the marker shows regardless of in-flight status.
 pub const STALE_GRACE_SECS: f64 = 3.0;
 
+/// Minimum arm for a wake-up host timer (issue #216). A deadline nearer than
+/// this — or already due — is armed for `WAKEUP_FLOOR_SECS` instead of 0, so a
+/// timer always makes forward progress. `schedule_wakeup`'s coverage check
+/// uses the SAME floor as the recording, so a sub-floor deadline isn't seen as
+/// perpetually uncovered and re-armed every event (fifth-pass finding 3).
+pub const WAKEUP_FLOOR_SECS: f64 = 0.3;
+
 // Command context keys used to route RunCommandResult
 pub const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
 pub const CMD_LIST_WORKTREES: &str = "list_worktrees";
@@ -786,37 +793,51 @@ impl State {
 
     /// Recompute the earliest wake-up from current state and arm ONE more host
     /// timer for it, but ONLY when no outstanding arm already fires at-or-before
-    /// that deadline (issue #216 finding 1, fifth pass). `set_timeout` can't be
-    /// cancelled, so a preempting earlier arm is ADDED while the old later one
-    /// stays queued; each delivered Timer retires the earliest via
-    /// `retire_earliest_arm`. First purges arms that have already fired
-    /// (`retain(> now)`) — including any that fired-and-were-lost while hidden,
-    /// so a phantom can't suppress arming. The host `set_timeout` is performed
-    /// by `arm_pending_timer`.
+    /// that deadline (issue #216 finding 1). `set_timeout` can't be cancelled,
+    /// so a preempting earlier arm is ADDED while the old later one stays
+    /// queued; each delivered Timer retires exactly the earliest via
+    /// `retire_earliest_arm`.
+    ///
+    /// There is NO time-based purge (sixth-pass finding 2): zellij's
+    /// `set_timeout` ALWAYS delivers its `Event::Timer` — directed, even to a
+    /// hidden instance, never lost (verified in zellij-server 0.44.3). So every
+    /// pushed arm is retired by exactly one future delivery, and
+    /// `outstanding_arms` mirrors the queued host one-shots by construction. A
+    /// time-based `retain` would wrongly drop an arm whose (delayed) Timer is
+    /// still queued, whose later delivery would then misretire a different arm.
+    ///
+    /// The coverage check uses the same `WAKEUP_FLOOR_SECS` bound as the
+    /// recording (sixth-pass finding 3), so a sub-floor deadline armed at
+    /// `now + FLOOR` isn't seen as perpetually uncovered and re-armed.
+    /// The host `set_timeout` is performed by `arm_pending_timer`.
     fn schedule_wakeup(&mut self) {
-        let now = Instant::now();
-        self.outstanding_arms.retain(|fire_at| *fire_at > now);
         let Some(deadline) = self.next_wakeup_deadline() else {
             return;
         };
-        let covered = self.outstanding_arms.iter().any(|fire_at| *fire_at <= deadline);
+        let now = Instant::now();
+        let floor = Duration::from_secs_f64(WAKEUP_FLOOR_SECS);
+        // The earliest instant a freshly-armed timer could actually fire: a
+        // deadline nearer than the floor is armed at `now + FLOOR`.
+        let effective = deadline.max(now + floor);
+        let covered = self
+            .outstanding_arms
+            .iter()
+            .any(|fire_at| *fire_at <= effective);
         if !covered {
-            let secs = deadline.saturating_duration_since(now).as_secs_f64().max(0.3);
+            let secs = deadline
+                .saturating_duration_since(now)
+                .as_secs_f64()
+                .max(WAKEUP_FLOOR_SECS);
             self.timer_needs_arming = true;
             self.timer_arm_secs = secs;
-            // Record the ACTUAL fire-time (now + armed secs), which equals the
-            // deadline unless it was already due or within the 0.3s floor.
             self.outstanding_arms.push(now + Duration::from_secs_f64(secs));
         }
-        // Invariant: a desired deadline is always covered by an outstanding arm
-        // that fires no later than `max(deadline, now + floor)` — so a wake-up
-        // is never lost (the `max` admits the 0.3s minimum-arm floor for a
-        // deadline that is already due or nearer than the floor).
+        // Invariant: a wake-up is never lost. For a deadline at or beyond the
+        // floor, coverage is EXACT (some arm fires at-or-before it); a sub-floor
+        // deadline is covered by an arm firing within the floor.
         debug_assert!(
-            {
-                let bound = deadline.max(now + Duration::from_secs_f64(0.3));
-                self.outstanding_arms.iter().any(|fire_at| *fire_at <= bound)
-            },
+            self.outstanding_arms.iter().any(|fire_at| *fire_at <= deadline)
+                || deadline < now + floor,
             "a desired deadline must be covered by an outstanding arm — no lost wake-up"
         );
     }
@@ -1450,9 +1471,12 @@ impl State {
     }
 
     pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) -> Action {
-        // Receiving any Event means this instance's pane is in the visible
-        // tab (hidden instances get no Events) — see `is_visible`.
-        self.is_visible = true;
+        // NOTE: a `TabUpdate` does NOT mark this instance visible (sixth-pass
+        // finding 1). Zellij delivers `TabUpdate`/`PaneUpdate` to the active
+        // tab's plugins PLUS every subscribed background plugin (verified in
+        // zellij-server 0.44.3 screen.rs), so receipt is not proof of
+        // visibility. `is_visible` is authoritative only from `Event::Visible`
+        // (and genuine `Key`/`Mouse` input) — see the `update` shell.
         let had_tabs = !self.tabs.is_empty();
         // Snapshot pending_close before the confirm loop below mutates it.
         // The disappeared-tab check further down needs to know which names
@@ -2498,13 +2522,13 @@ impl ZellijPlugin for State {
             // flipped (e.g. the grace deadline just elapsed, finding B).
             return status_rerender || (self.is_stale() != was_stale);
         }
-        // Reaching here means a non-Timer, non-Visible Event was delivered, and
-        // zellij delivers Events only to instances in the visible tab — so this
-        // instance is visible. Recording that here (not just on `TabUpdate`)
-        // keeps the refresh lifecycle running for Event-driven refreshes such as
-        // the bootstrap `FetchWorktreesAndBranches` and the `r` key, while the
-        // pipe path (which reaches hidden instances) stays gated (finding 2).
-        self.is_visible = true;
+        // `is_visible` is NOT set here (sixth-pass finding 1): a directed
+        // `RunCommandResult`/`PermissionRequestResult` reaches a HIDDEN instance
+        // too (verified in zellij-server 0.44.3), so treating any delivered
+        // Event as proof of visibility would un-hide the instance and reopen the
+        // refresh pumps while hidden. Visibility is authoritative only from
+        // `Event::Visible` and from genuine user input (`Key`/`Mouse`, which can
+        // only reach a focused/visible pane — set in those arms below).
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 // First moment run_command is actually allowed. Ask any
@@ -2579,29 +2603,42 @@ impl ZellijPlugin for State {
                 }
             }
             Event::TabUpdate(tab_info) => self.handle_tab_update(tab_info),
-            Event::Key(key) => match self.mode {
-                Mode::Loading => Action::None,
-                Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
-                Mode::BrowseWorktrees => self.handle_key_browse(&key),
-                Mode::SelectBranch => self.handle_key_select_branch(&key),
-                Mode::InputBranch => self.handle_key_input_branch(&key),
-                Mode::Confirming => self.handle_key_confirming(&key),
-            },
-            Event::Mouse(mouse) => match self.mode {
-                Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
-                _ => Action::None,
-            },
+            Event::Key(key) => {
+                // User keystrokes reach only a focused (hence visible) pane —
+                // authoritative visibility (sixth-pass finding 1). This is what
+                // keeps the `r`-key refresh working even if no `Event::Visible`
+                // arrived yet.
+                self.is_visible = true;
+                match self.mode {
+                    Mode::Loading => Action::None,
+                    Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
+                    Mode::BrowseWorktrees => self.handle_key_browse(&key),
+                    Mode::SelectBranch => self.handle_key_select_branch(&key),
+                    Mode::InputBranch => self.handle_key_input_branch(&key),
+                    Mode::Confirming => self.handle_key_confirming(&key),
+                }
+            }
+            Event::Mouse(mouse) => {
+                // A mouse event likewise reaches only the focused/visible pane.
+                self.is_visible = true;
+                match self.mode {
+                    Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
+                    _ => Action::None,
+                }
+            }
             _ => return false,
         };
         self.execute(&action);
         // Advance the refresh lifecycle after every event (issue #216
-        // findings 2 & 3): drains a deferred refresh the moment the gate
-        // reopens, reaps a timed-out in-flight request, and re-arms the retry
-        // wake-up — so a change is never dropped and a stale marker never
-        // stops retrying. This is the visible path (is_visible was just set),
-        // so pumping is correct. `schedule_wakeup` dedups against outstanding
-        // arms, so a whole window of events collapses to one timer.
-        self.pump_refresh();
+        // findings 2 & 3) — but only while VISIBLE (sixth-pass finding 1): a
+        // directed `RunCommandResult`/`TabUpdate` can reach a hidden instance,
+        // which must not pump/relaunch. A visible instance drains any deferred
+        // refresh, reaps a timed-out in-flight request, and re-arms the retry
+        // wake-up. `schedule_wakeup` (run regardless — while hidden it yields
+        // only the process-free status wake-up) dedups against outstanding arms.
+        if self.is_visible {
+            self.pump_refresh();
+        }
         self.schedule_wakeup();
         self.arm_pending_timer();
         true
@@ -4676,24 +4713,71 @@ mod tests {
         assert_eq!(s.outstanding_arms.len(), 1, "exactly one arm — no duplicate");
     }
 
-    // Finding 1 (fifth pass): an arm that fired-and-was-lost while hidden
-    // (fire-time now in the past) is purged by the next schedule, so it can't
-    // linger as a phantom that suppresses arming.
+    // Finding 2 (sixth pass, Codex test a): a delayed delivery. An arm whose
+    // fire-time has passed but whose (directed) Timer is still queued must NOT
+    // be purged by a schedule — zellij always delivers it. Purging it would let
+    // that later delivery misretire a DIFFERENT arm and desync the vec from the
+    // real host one-shots. Delivering the arm's Timer retires exactly it,
+    // leaving the other entry intact.
     #[test]
-    fn schedule_purges_arms_that_already_fired() {
+    fn delayed_delivery_arm_is_not_purged_and_retires_correctly() {
         let mut s = State::default();
         s.is_visible = true;
-        s.refresh_inflight = Some((1, Instant::now()));
-        s.outstanding_arms.push(Instant::now() - Duration::from_secs_f64(5.0)); // lost phantom
+        // A (status-ish) arm already past its fire-time but not yet delivered,
+        // and B (refresh-ish) still in the future.
+        let a = Instant::now() - Duration::from_secs_f64(0.5);
+        let b = Instant::now() + Duration::from_secs_f64(30.0);
+        s.outstanding_arms.push(a);
+        s.outstanding_arms.push(b);
 
+        // A schedule (e.g. from an unrelated event) must NOT drop A.
+        s.set_status("note", false);
         s.schedule_wakeup();
-
-        assert!(s.timer_needs_arming, "a past phantom must not suppress arming the real deadline");
         assert!(
-            s.outstanding_arms.iter().all(|d| *d > Instant::now()),
-            "no already-fired arms remain"
+            s.outstanding_arms.contains(&a),
+            "a past-but-undelivered arm must not be purged — its Timer is still queued"
         );
+
+        // A's delayed Timer finally delivers: retire the earliest (A). B stays.
+        s.retire_earliest_arm();
+        assert!(!s.outstanding_arms.contains(&a), "the delivered arm is retired");
+        assert!(s.outstanding_arms.contains(&b), "B's entry is intact");
+    }
+
+    // Finding 3 (sixth pass, Codex test b): a sub-floor deadline (nearer than
+    // WAKEUP_FLOOR_SECS) is armed at `now + FLOOR`; the coverage check uses the
+    // same floor, so repeated scheduling across events arms exactly ONE timer,
+    // not one per event.
+    #[test]
+    fn sub_floor_deadline_scheduled_repeatedly_arms_once() {
+        let mut s = State::default();
+        s.set_status("x", false);
+        // Age the message to ~its full TTL so its expiry deadline is essentially
+        // now — well within the floor.
+        backdate_status(&mut s, STATUS_MESSAGE_TTL_SECS as u64);
+
+        let mut arms = 0;
+        for _ in 0..10 {
+            s.schedule_wakeup();
+            if s.timer_needs_arming {
+                arms += 1;
+                s.timer_needs_arming = false;
+            }
+        }
+        assert_eq!(arms, 1, "a sub-floor deadline arms exactly one timer, not one per event");
         assert_eq!(s.outstanding_arms.len(), 1);
+    }
+
+    // Finding 1 (sixth pass, Codex test c): a directed RunCommandResult reaches
+    // a HIDDEN instance (zellij-server 0.44.3), so applying one must not flip
+    // is_visible — otherwise the next pipe/timer would pump while hidden.
+    #[test]
+    fn applying_a_refresh_result_does_not_mark_instance_visible() {
+        let mut s = state_with_worktrees();
+        s.is_visible = false;
+        let ctx = accept_ctx(&mut s, 0);
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+        assert!(!s.is_visible, "a directed result must not un-hide the instance");
     }
 
     // Finding 2 (fourth pass): a hidden instance schedules NO refresh wake-up,
@@ -5403,12 +5487,19 @@ mod tests {
     }
 
     #[test]
-    fn tab_update_marks_instance_visible_for_focus_pipe() {
-        // An instance that never saw Visible(true) but receives a TabUpdate
-        // is visible by definition (hidden instances get no Events) and
-        // must answer the focus pipe.
+    fn tab_update_alone_does_not_mark_instance_visible() {
+        // A TabUpdate reaches subscribed BACKGROUND plugins too (zellij-server
+        // 0.44.3 screen.rs), so it is NOT proof of visibility and must not
+        // answer the focus pipe (sixth-pass finding 1). Only Event::Visible(true)
+        // — or genuine user input — makes an instance visible.
         let mut s = State::default();
         s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert!(!s.is_visible, "a TabUpdate must not un-hide the instance");
+        assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::None);
+
+        // Once Visible(true) arrives, it is authoritative and the focus pipe
+        // is answered.
+        s.handle_visible(true);
         assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::FocusSelf);
     }
 
