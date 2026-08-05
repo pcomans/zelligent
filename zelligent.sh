@@ -350,6 +350,15 @@ print_claude_stderr() {
   done <<< "$text"
 }
 
+# Report a `marketplace add` failure that a later step recovered from: the
+# plugin is usable, but it came from whatever marketplace was already
+# registered rather than this install's path, so the reason still has to be
+# visible. Never let a recovered add failure print as a bare green (#212).
+print_stale_registration_note() {
+  echo "  claude plugin: note — marketplace registration was not refreshed; using the previously registered 'zelligent' marketplace"
+  print_claude_stderr "$1"
+}
+
 resolve_layout_source() {
   local repo_layout user_layout
   repo_layout="$REPO_ROOT/.zelligent/layout.kdl"
@@ -987,17 +996,33 @@ PERMS
           # usable but this install's path may not be the one registered, so
           # never print a bare green: show what the add actually said.
           if [ "$MARKETPLACE_ADD_OK" -eq 0 ]; then
-            echo "  claude plugin: note — marketplace registration was not refreshed; using the previously registered 'zelligent' marketplace"
-            print_claude_stderr "$MARKETPLACE_ADD_ERR"
+            print_stale_registration_note "$MARKETPLACE_ADD_ERR"
           fi
           echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
-          echo "  claude plugin: ok (update check failed)"
-          print_claude_stderr "$CLAUDE_CMD_STDERR"
+          UPDATE_ERR="$CLAUDE_CMD_STDERR"
+          if [ "$MARKETPLACE_ADD_OK" -eq 0 ]; then
+            # Neither the registration nor the update landed. The already
+            # installed plugin still works, so this stays non-fatal, but
+            # nothing this run attempted took effect — reporting a bare
+            # "ok" here would repeat exactly the #212 failure of hiding the
+            # reason behind a reassuring word.
+            echo "  claude plugin: installed, but not refreshed — marketplace registration and update both failed"
+            print_claude_stderr "$MARKETPLACE_ADD_ERR"
+          else
+            echo "  claude plugin: ok (update check failed)"
+          fi
+          print_claude_stderr "$UPDATE_ERR"
         fi
       else
         if run_claude_cmd plugin install zelligent@zelligent; then
           echo "  claude plugin: installed"
+          # Same ambiguity as the update-success case: a failed add means
+          # the install resolved through a marketplace that was already
+          # registered, which may not be this install's path.
+          if [ "$MARKETPLACE_ADD_OK" -eq 0 ]; then
+            print_stale_registration_note "$MARKETPLACE_ADD_ERR"
+          fi
           echo "  claude plugin: restart running Claude Code sessions to pick up hook changes"
         else
           # The install is the symptom whenever the add failed first — lead

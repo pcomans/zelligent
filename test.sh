@@ -1455,6 +1455,7 @@ mock_claude_recording_argv() {
   # flow's plugin subcommands. Failures write a reason to stderr, the way
   # the real CLI does, so tests can assert doctor relays it.
   local bin_dir="$1" log_file="$2" list_output="$3" add_exit="$4" install_exit="${5:-0}"
+  local update_exit="${6:-0}"
   cat > "$bin_dir/claude" <<EOF
 #!/bin/bash
 echo "\$*" >> "$log_file"
@@ -1466,7 +1467,9 @@ case "\$1 \$2 \$3" in
 esac
 case "\$1 \$2" in
   "plugin list") echo "$list_output"; exit 0 ;;
-  "plugin update") exit 0 ;;
+  "plugin update")
+    [ $update_exit -eq 0 ] || echo "MOCK_UPDATE_FAILED_REASON" >&2
+    exit $update_exit ;;
   "plugin install")
     [ $install_exit -eq 0 ] || echo "MOCK_INSTALL_FAILED_REASON" >&2
     exit $install_exit ;;
@@ -1601,6 +1604,87 @@ check "doctor missing-manifest: never invokes claude" "false" \
   "$([ -s "$CLAUDE_ARGV_LOG_MP4" ] && echo true || echo false)"
 check "doctor missing-manifest: exits nonzero" "1" "$code"
 rm -rf "$MOCK_DR_MP4" "$MOCK_DR_MP4_HOME" "$FAKE_WASM_MP4_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP4")"
+
+# A recovered `marketplace add` failure must never print as a bare green,
+# on EITHER recovery path. The update-success path had this note; the
+# install-success path did not, so a plugin installed through a marketplace
+# that is not this install's path was reported as a clean "installed".
+MOCK_DR_MP5=$(mktemp -d)
+MOCK_DR_MP5_HOME=$(mktemp -d)
+FAKE_WASM_MP5_DIR=$(mktemp -d)
+FAKE_WASM_MP5="$FAKE_WASM_MP5_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MP5"
+FAKE_PLUGIN_DIR_MP5=$(mktemp -d)/claude-plugin
+make_fake_marketplace_dir "$FAKE_PLUGIN_DIR_MP5"
+cat > "$MOCK_DR_MP5/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_MP5/zellij"
+CLAUDE_ARGV_LOG_MP5="$MOCK_DR_MP5_HOME/claude-argv.log"
+mock_claude_recording_argv "$MOCK_DR_MP5" "$CLAUDE_ARGV_LOG_MP5" "no plugins" 1 0
+out=$(HOME="$MOCK_DR_MP5_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP5" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP5" \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
+  PATH="$MOCK_DR_MP5:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor add-fail+install-ok: exits 0 (the plugin is usable)" "0" "$code"
+contains "doctor add-fail+install-ok: still reports the install" "claude plugin: installed" "$out"
+contains "doctor add-fail+install-ok: never a bare green — notes the stale registration" \
+  "using the previously registered 'zelligent' marketplace" "$out"
+contains "doctor add-fail+install-ok: relays why the add failed" "MOCK_ADD_FAILED_REASON" "$out"
+rm -rf "$MOCK_DR_MP5" "$MOCK_DR_MP5_HOME" "$FAKE_WASM_MP5_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP5")"
+
+# Add fails AND update fails: the installed plugin still works so this stays
+# non-fatal, but nothing this run attempted took effect. Reporting a bare
+# "ok" while discarding the add's reason would repeat the #212 failure of
+# hiding the cause behind a reassuring word.
+MOCK_DR_MP6=$(mktemp -d)
+MOCK_DR_MP6_HOME=$(mktemp -d)
+FAKE_WASM_MP6_DIR=$(mktemp -d)
+FAKE_WASM_MP6="$FAKE_WASM_MP6_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MP6"
+FAKE_PLUGIN_DIR_MP6=$(mktemp -d)/claude-plugin
+make_fake_marketplace_dir "$FAKE_PLUGIN_DIR_MP6"
+cat > "$MOCK_DR_MP6/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_MP6/zellij"
+CLAUDE_ARGV_LOG_MP6="$MOCK_DR_MP6_HOME/claude-argv.log"
+mock_claude_recording_argv "$MOCK_DR_MP6" "$CLAUDE_ARGV_LOG_MP6" "zelligent@zelligent" 1 0 1
+out=$(HOME="$MOCK_DR_MP6_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP6" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP6" \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
+  PATH="$MOCK_DR_MP6:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+not_contains "doctor add-fail+update-fail: never reports a bare ok" \
+  "claude plugin: ok (update check failed)" "$out"
+contains "doctor add-fail+update-fail: says nothing was refreshed" \
+  "not refreshed — marketplace registration and update both failed" "$out"
+contains "doctor add-fail+update-fail: relays why the add failed" "MOCK_ADD_FAILED_REASON" "$out"
+contains "doctor add-fail+update-fail: relays why the update failed" "MOCK_UPDATE_FAILED_REASON" "$out"
+rm -rf "$MOCK_DR_MP6" "$MOCK_DR_MP6_HOME" "$FAKE_WASM_MP6_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP6")"
+
+# The update-success path keeps relaying the update's own stderr when only
+# the update fails (add fine) — the tolerated "ok" case must still not be silent.
+MOCK_DR_MP7=$(mktemp -d)
+MOCK_DR_MP7_HOME=$(mktemp -d)
+FAKE_WASM_MP7_DIR=$(mktemp -d)
+FAKE_WASM_MP7="$FAKE_WASM_MP7_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_WASM_MP7"
+FAKE_PLUGIN_DIR_MP7=$(mktemp -d)/claude-plugin
+make_fake_marketplace_dir "$FAKE_PLUGIN_DIR_MP7"
+cat > "$MOCK_DR_MP7/zellij" <<'MOCK'
+#!/bin/bash
+MOCK
+chmod +x "$MOCK_DR_MP7/zellij"
+CLAUDE_ARGV_LOG_MP7="$MOCK_DR_MP7_HOME/claude-argv.log"
+mock_claude_recording_argv "$MOCK_DR_MP7" "$CLAUDE_ARGV_LOG_MP7" "zelligent@zelligent" 0 0 1
+out=$(HOME="$MOCK_DR_MP7_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM_MP7" ZELLIGENT_PLUGIN_DIR="$FAKE_PLUGIN_DIR_MP7" \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$ZELLIGENT_DEFAULT_LAYOUT_SRC" \
+  PATH="$MOCK_DR_MP7:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code=$?
+check "doctor update-fail only: exits 0 (tolerated)" "0" "$code"
+contains "doctor update-fail only: keeps the tolerated ok wording" \
+  "claude plugin: ok (update check failed)" "$out"
+contains "doctor update-fail only: relays why the update failed" "MOCK_UPDATE_FAILED_REASON" "$out"
+not_contains "doctor update-fail only: no stale-registration note when the add succeeded" \
+  "using the previously registered 'zelligent' marketplace" "$out"
+rm -rf "$MOCK_DR_MP7" "$MOCK_DR_MP7_HOME" "$FAKE_WASM_MP7_DIR" "$(dirname "$FAKE_PLUGIN_DIR_MP7")"
 
 # dev-install --uninstall removes the Claude plugin + marketplace and the
 # dev artifacts (grep-level contract; the flag is the designated home for
