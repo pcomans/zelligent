@@ -25,6 +25,14 @@
 5. **Close the tab when running inside Zellij** — `zelligent` checks `$ZELLIJ`; if set, records the current tab via `zellij action current-tab-info`, switches to the worktree's tab via `zellij action go-to-tab-name <sanitized-branch>`, runs `zellij action close-tab`, then returns to the original tab. This stops the sidebar from showing the stale row as an orphaned "user tab". When invoked outside Zellij, prints a hint to close the tab manually instead.
 6. **Note the branch is preserved** — `git worktree remove` does not delete the local branch.
 
+## Open file descriptor advisory (#217)
+
+`zelligent doctor` compares the shell's soft `ulimit -n` against the worktree count and prints an advisory when they are on a collision course. Zellij holds several descriptors per pane (PTY master/slave, session sockets); a few dozen sidebar tabs plus Zellij's own sockets approach the macOS 256 default before a spawn, and each sidebar refresh opens more for two child processes and their pipes. When they run out the sidebar shows `Failed to list worktrees: … Too many open files (os error 24)` — a wall you can see coming.
+
+**Threshold:** warn when `ulimit -n < worktrees * 8 + 128`. The factor 8 budgets the descriptors a worktree pane holds plus the transient pair each refresh opens; 128 is headroom for Zellij's own sockets and the base shell. A fresh repo (3 worktrees → needs 152) stays quiet on the 256 default; 50 worktrees (→ 528) trips it. The suggested raise target is a generous round `4096` (or the computed minimum when that is higher), and the message points at `ulimit -Hn` for the ceiling.
+
+**Advisory only.** The check never adds to `ERRORS` and never changes the exit code — a soft descriptor limit is something a user may reasonably choose not to change, and #212 is the standing lesson that making `doctor` permanently red for an unfixable-by-intent condition is how `doctor` stops being read. The message also states that `ulimit -n` reflects the shell running `doctor`, not necessarily the shell that launched Zellij. `unlimited` is reported as fine; run outside a git repo (0 worktrees), the check stays silent.
+
 ## Nuke (`zelligent nuke`)
 
 Destroys the entire Zellij session for the repo:

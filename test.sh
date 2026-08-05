@@ -1240,6 +1240,57 @@ check "doctor sweep: exited-zelligent-stale cache dir removed" "false" \
 
 rm -rf "$MOCK_DR_SWEEP" "$MOCK_DR_SWEEP_HOME" "$FAKE_SWEEP_WASM_DIR"
 
+# doctor open-file-limit advisory (#217): compares `ulimit -n` against the
+# worktree count and warns when they are on a collision course — but stays an
+# ADVISORY, never touching ERRORS or the exit code (the #212 lesson). Threshold
+# is limit < worktrees * 8 + 128. A real git repo with two extra worktrees
+# (3 total -> needs 152) drives the count deterministically; the soft ulimit is
+# lowered in a subshell to sit either side of the line.
+MOCK_FD_BIN=$(mktemp -d)
+MOCK_FD_HOME=$(mktemp -d)
+FAKE_FD_WASM_DIR=$(mktemp -d)
+FAKE_FD_WASM="$FAKE_FD_WASM_DIR/zelligent-plugin.wasm"
+echo "fake-wasm" > "$FAKE_FD_WASM"
+printf '#!/bin/bash\n' > "$MOCK_FD_BIN/zellij"
+chmod +x "$MOCK_FD_BIN/zellij"
+FD_REPO=$(mktemp -d)
+git -C "$FD_REPO" init -q
+git -C "$FD_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git -C "$FD_REPO" worktree add -q "$FD_REPO-wt1" -b fd-wt1 >/dev/null 2>&1
+git -C "$FD_REPO" worktree add -q "$FD_REPO-wt2" -b fd-wt2 >/dev/null 2>&1
+
+# Low case: 3 worktrees, soft limit 128 < 152 -> advisory prints, exit stays 0.
+out_fd_low=$(cd "$FD_REPO" && ulimit -Sn 128 && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_low=$?
+check "doctor fd-limit low: exits 0 (advisory only)" "0" "$code_fd_low"
+contains "doctor fd-limit low: reports low limit" "open file limit: low (ulimit -n 128, 3 worktrees)" "$out_fd_low"
+contains "doctor fd-limit low: names the descriptors-per-pane cause" "descriptors per pane" "$out_fd_low"
+contains "doctor fd-limit low: caveats which shell was measured" "not necessarily the one that launched Zellij" "$out_fd_low"
+contains "doctor fd-limit low: gives a raise command" "Raise with: ulimit -n" "$out_fd_low"
+contains "doctor fd-limit low: points at the hard ceiling" "ulimit -Hn" "$out_fd_low"
+excludes "doctor fd-limit low: does not print the failure summary" "Some checks failed" "$out_fd_low"
+
+# Ok case: same 3 worktrees, soft limit 4096 >= 152 -> single ok line, no advice.
+out_fd_ok=$(cd "$FD_REPO" && ulimit -Sn 4096 && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_ok=$?
+check "doctor fd-limit ok: exits 0" "0" "$code_fd_ok"
+contains "doctor fd-limit ok: reports ok with counts" "open file limit: ok (ulimit -n 4096, 3 worktrees)" "$out_fd_ok"
+excludes "doctor fd-limit ok: no raise advice when fine" "Raise with: ulimit -n" "$out_fd_ok"
+
+# Outside a git repo: nothing to count, so the check stays silent entirely.
+FD_NONREPO=$(mktemp -d)
+out_fd_norepo=$(cd "$FD_NONREPO" && ulimit -Sn 64 && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_norepo=$?
+check "doctor fd-limit no-repo: exits 0" "0" "$code_fd_norepo"
+excludes "doctor fd-limit no-repo: stays silent outside a git repo" "open file limit" "$out_fd_norepo"
+
+git -C "$FD_REPO" worktree remove --force "$FD_REPO-wt1" >/dev/null 2>&1 || true
+git -C "$FD_REPO" worktree remove --force "$FD_REPO-wt2" >/dev/null 2>&1 || true
+rm -rf "$MOCK_FD_BIN" "$MOCK_FD_HOME" "$FAKE_FD_WASM_DIR" "$FD_REPO" "$FD_REPO-wt1" "$FD_REPO-wt2" "$FD_NONREPO"
+
 # doctor with existing keybinds block in config: preserves existing keybinds
 MOCK_DR_BIN2=$(mktemp -d)
 MOCK_DR_HOME2=$(mktemp -d)

@@ -1054,7 +1054,48 @@ PERMS
     fi
   fi
 
-  # 8. Sweep serialized (resurrectable) sessions for stale plugin URLs
+  # 8. Open file descriptor limit vs worktree count (#217). Advisory ONLY —
+  #    it never touches ERRORS or the exit code. A soft `ulimit -n` is
+  #    something a user may reasonably choose not to change, and #212 is the
+  #    standing lesson that making doctor permanently red for an unfixable-by-
+  #    intent condition is how doctor stops being read. A low limit with many
+  #    worktrees is still a collision you can see coming: Zellij holds several
+  #    descriptors per pane (PTY master/slave, session sockets), so a few dozen
+  #    sidebar tabs plus Zellij's own sockets approach the macOS 256 default
+  #    before a spawn, and each sidebar refresh needs more for two child
+  #    processes and their pipes — the wall is `Too many open files (os error
+  #    24)` in the sidebar. Runs before the git-repo gate below, so count
+  #    worktrees defensively: 0 (no repo, or git absent) means skip silently.
+  WORKTREE_COUNT=$(git worktree list --porcelain 2>/dev/null | grep -c '^worktree ' || true)
+  FD_LIMIT=$(ulimit -n 2>/dev/null || echo unlimited)
+  if [ "${WORKTREE_COUNT:-0}" -gt 0 ]; then
+    if [ "$FD_LIMIT" = "unlimited" ]; then
+      echo "  open file limit: ok (ulimit -n unlimited, $WORKTREE_COUNT worktrees)"
+    else
+      # Warn when the soft limit is below what the worktrees can demand:
+      # ~8 descriptors budgeted per worktree pane (PTY master/slave, session
+      # sockets, plus the transient pair each sidebar refresh opens for its two
+      # child processes) on top of 128 headroom for Zellij's own sockets and
+      # the base shell. Simple and explainable: limit < worktrees * 8 + 128.
+      # A fresh repo (3 worktrees -> 152) stays quiet on the 256 default;
+      # 50 worktrees (-> 528) trips it. See #217 for the threshold rationale.
+      RECOMMENDED_FD=$((WORKTREE_COUNT * 8 + 128))
+      if [ "$FD_LIMIT" -lt "$RECOMMENDED_FD" ]; then
+        # Suggest a generous round target, not the bare threshold (which leaves
+        # no headroom as worktrees grow); 4096 is a common comfortable default.
+        SUGGESTED_FD=4096
+        [ "$RECOMMENDED_FD" -gt "$SUGGESTED_FD" ] && SUGGESTED_FD=$RECOMMENDED_FD
+        echo "  open file limit: low (ulimit -n $FD_LIMIT, $WORKTREE_COUNT worktrees)"
+        echo "     Zellij needs descriptors per pane; $WORKTREE_COUNT worktrees can exhaust this and surface as 'Too many open files' in the sidebar."
+        echo "     This is the limit of the shell running doctor, not necessarily the one that launched Zellij."
+        echo "     Raise with: ulimit -n $SUGGESTED_FD   (check the ceiling with: ulimit -Hn)"
+      else
+        echo "  open file limit: ok (ulimit -n $FD_LIMIT, $WORKTREE_COUNT worktrees)"
+      fi
+    fi
+  fi
+
+  # 9. Sweep serialized (resurrectable) sessions for stale plugin URLs
   # (#155/#157). Startup and spawn only reconcile the current repo's own
   # session; this is the only place ALL cached sessions get checked,
   # including other repos' and alive-but-stale ones (which the startup
