@@ -1,7 +1,7 @@
 pub mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -69,6 +69,15 @@ pub const REFRESH_BACKOFF_INITIAL_SECS: f64 = 2.0;
 /// window from `REFRESH_BACKOFF_INITIAL_SECS` up to this cap; a success or a
 /// manual `r` refresh resets it to zero. See issue #216.
 pub const REFRESH_BACKOFF_MAX_SECS: f64 = 60.0;
+
+/// Grace period before an unsatisfied invalidation (`cache_dirty`) that is
+/// still being actively resolved (a refresh in flight) is flagged stale
+/// (issue #216 finding 4, second pass). A healthy spawn/remove clears
+/// `cache_dirty` well within this window, so the marker never flickers on the
+/// happy path — but a replacement refresh that hangs or repeatedly times out
+/// can't hide known-staleness indefinitely: once the dirtiness has persisted
+/// this long the marker shows regardless of in-flight status.
+pub const STALE_GRACE_SECS: f64 = 3.0;
 
 // Command context keys used to route RunCommandResult
 pub const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
@@ -405,6 +414,23 @@ pub struct State {
     /// Requested via `request_refresh_wakeup`, which keeps the EARLIEST
     /// pending deadline when several are requested within one event.
     pub refresh_timer_arm_secs: f64,
+    /// Absolute time the currently-outstanding refresh wake-up is expected to
+    /// fire, or `None` when no wake-up is pending (issue #216 finding 1,
+    /// second pass). `set_timeout` arms an independent one-shot per call, and
+    /// `pump_refresh` runs on EVERY event — so without this,
+    /// N unrelated events during one in-flight/backoff window would arm N
+    /// timers. `request_refresh_wakeup` arms a new host timer only when no
+    /// wake-up is outstanding or a strictly earlier one is needed; a fired or
+    /// elapsed deadline is cleared in `pump_refresh` so the next window can
+    /// re-arm.
+    pub refresh_timer_deadline: Option<Instant>,
+    /// When `cache_dirty` last transitioned false→true, or `None` while the
+    /// cache is clean (issue #216 finding 4, second pass). Lets `is_stale`
+    /// flag a known-but-unsatisfied invalidation that a hung/repeatedly-failing
+    /// replacement refresh has failed to resolve within `STALE_GRACE_SECS`,
+    /// without flickering the marker during the sub-second in-flight window of
+    /// a healthy refresh. Maintained by `set_cache_dirty`.
+    pub cache_dirty_since: Option<Instant>,
 }
 
 /// Outcome of applying a `list-worktrees` result (issue #216 rework). The
@@ -698,6 +724,19 @@ impl State {
         );
     }
 
+    /// Set/clear `cache_dirty`, maintaining `cache_dirty_since` on the
+    /// false→true edge and clearing it on true→false (issue #216 finding 4,
+    /// second pass). The single writer for the bit so the timestamp can't
+    /// drift from it.
+    fn set_cache_dirty(&mut self, dirty: bool) {
+        if dirty && !self.cache_dirty {
+            self.cache_dirty_since = Some(Instant::now());
+        } else if !dirty {
+            self.cache_dirty_since = None;
+        }
+        self.cache_dirty = dirty;
+    }
+
     /// Is a refresh still owed? Either one was explicitly deferred, or a
     /// known invalidation (`cache_dirty`) is unsatisfied. See finding 2.
     fn wants_refresh(&self) -> bool {
@@ -713,17 +752,27 @@ impl State {
     }
 
     /// Request a future wake-up so a deferred refresh actually retries with no
-    /// external event (issue #216 finding 3). Keeps the EARLIEST deadline when
-    /// several are requested within one event; the shell performs the host
-    /// `set_timeout` via `arm_pending_refresh_timer`.
+    /// external event (issue #216 finding 3), while arming AT MOST ONE host
+    /// timer per distinct deadline (finding 1, second pass). `set_timeout`
+    /// arms an independent one-shot per call and `pump_refresh` runs on every
+    /// event, so we track the outstanding wake-up's absolute deadline and arm
+    /// a new host timer only when none is pending or a STRICTLY EARLIER one is
+    /// needed. During a single in-flight/backoff window the requested deadline
+    /// is a constant absolute instant (`started + TIMEOUT` / `failed_at +
+    /// backoff`), so repeated per-event requests collapse to one timer.
     fn request_refresh_wakeup(&mut self, secs: f64) {
         let secs = secs.max(0.3);
-        if self.refresh_timer_needs_arming {
-            self.refresh_timer_arm_secs = self.refresh_timer_arm_secs.min(secs);
-        } else {
-            self.refresh_timer_needs_arming = true;
-            self.refresh_timer_arm_secs = secs;
+        let new_deadline = Instant::now() + Duration::from_secs_f64(secs);
+        // A wake-up already outstanding that fires at or before what we need
+        // (small slop for clock jitter) covers us — don't arm another.
+        if let Some(existing) = self.refresh_timer_deadline {
+            if existing <= new_deadline + Duration::from_millis(50) {
+                return;
+            }
         }
+        self.refresh_timer_needs_arming = true;
+        self.refresh_timer_arm_secs = secs;
+        self.refresh_timer_deadline = Some(new_deadline);
     }
 
     /// Note that a refresh is wanted, then advance the lifecycle. The entry
@@ -740,6 +789,18 @@ impl State {
     /// ANY event, which is how findings 2 and 3 are covered: the shell pumps
     /// after every event, on the retry timer, and on reveal. SHELL method.
     fn pump_refresh(&mut self) {
+        // A wake-up whose deadline has passed has fired (or is about to);
+        // clear it so `request_refresh_wakeup` can arm the NEXT window's timer
+        // rather than dedup against a stale deadline (finding 1, second pass).
+        // The 100ms tolerance matches the host timer's observed early-fire slop
+        // (see `status_message_expired`): a timer firing marginally early must
+        // still clear its deadline, or the dedup would suppress the re-arm and
+        // stall the retry chain until an unrelated event.
+        if let Some(deadline) = self.refresh_timer_deadline {
+            if Instant::now() + Duration::from_millis(100) >= deadline {
+                self.refresh_timer_deadline = None;
+            }
+        }
         // Reap an abandoned in-flight request whose result never landed (lost
         // while the instance was hidden — hidden instances get no results):
         // re-desire the refresh so it relaunches.
@@ -1036,24 +1097,35 @@ impl State {
     }
 
     /// Whether the displayed worktree list should be flagged stale (issue
-    /// #216 finding 4). Derives from BOTH inputs: a failed refresh
-    /// (`refresh_error`), and a known-but-unsatisfied invalidation
-    /// (`cache_dirty`) that we are NOT actively resolving. The
-    /// `refresh_inflight.is_none()` clause keeps the marker from flickering
-    /// on every healthy spawn/remove, where `cache_dirty` is briefly true
-    /// while its satisfying refresh is already in flight.
+    /// #216 finding 4). See `refresh_stale_reason` for the derivation.
     fn is_stale(&self) -> bool {
         self.refresh_stale_reason().is_some()
     }
 
+    /// Whether an unsatisfied invalidation has now outlived the resolution
+    /// grace period (issue #216 finding 4, second pass). A healthy refresh
+    /// clears `cache_dirty` well within `STALE_GRACE_SECS`; a hung or
+    /// repeatedly-timing-out replacement does not — and must not hide
+    /// staleness indefinitely just because a request is nominally in flight.
+    fn dirty_persisted_past_grace(&self) -> bool {
+        self.cache_dirty_since
+            .is_some_and(|since| since.elapsed().as_secs_f64() >= STALE_GRACE_SECS)
+    }
+
     /// The short inline reason for the `stale · retrying` marker, or `None`
     /// when the list is not flagged stale. A failed refresh yields its
-    /// condensed reason (and a recoverable full error via `e`); a bare
-    /// unsatisfied invalidation yields a generic phrase. See `is_stale`.
+    /// condensed reason (and a recoverable full error via `e`). An unsatisfied
+    /// invalidation (`cache_dirty`) yields a generic phrase — shown as soon as
+    /// no refresh is resolving it, OR, if one is, once the dirtiness has
+    /// persisted past the grace window (so a hung/looping replacement can't
+    /// leave a known-stale list unflagged; finding 4 second pass). The grace
+    /// window is what keeps a healthy spawn/remove from flickering the marker.
     fn refresh_stale_reason(&self) -> Option<String> {
         if let Some(err) = &self.refresh_error {
             Some(short_refresh_reason(err))
-        } else if self.cache_dirty && self.refresh_inflight.is_none() {
+        } else if self.cache_dirty
+            && (self.refresh_inflight.is_none() || self.dirty_persisted_past_grace())
+        {
             Some("changes pending".to_string())
         } else {
             None
@@ -1201,12 +1273,18 @@ impl State {
         // request A exceeds the in-flight timeout, `pump_refresh` reaps it and
         // launches B (a new id), then A's late result arrives — A's id no
         // longer matches, so it can't clear B's guard, overwrite B's state,
-        // or fire a redundant branch fetch. A result carrying NO id (tests /
-        // legacy callers only — production always stamps one) skips the gate.
-        if let Some(result_id) = context.get(CTX_REQUEST_ID).and_then(|s| s.parse::<u64>().ok()) {
-            let matches = matches!(self.refresh_inflight, Some((id, _)) if id == result_id);
-            if !matches {
-                return RefreshOutcome::Ignored;
+        // or fire a redundant branch fetch. A result carrying NO id key (tests
+        // / legacy callers only — production always stamps one) skips the gate;
+        // but a PRESENT-but-unparseable id fails CLOSED (`Ignored`) as cheap
+        // defense-in-depth — production never emits a malformed id.
+        if let Some(raw_id) = context.get(CTX_REQUEST_ID) {
+            match raw_id.parse::<u64>() {
+                Ok(result_id) => {
+                    if !matches!(self.refresh_inflight, Some((id, _)) if id == result_id) {
+                        return RefreshOutcome::Ignored;
+                    }
+                }
+                Err(_) => return RefreshOutcome::Ignored,
             }
         }
         // The active request completed: clear the in-flight guard.
@@ -1260,7 +1338,7 @@ impl State {
             .and_then(|g| g.parse::<u64>().ok())
             .unwrap_or(0);
         if result_generation == self.invalidate_generation {
-            self.cache_dirty = false;
+            self.set_cache_dirty(false);
         }
         self.recompute_sidebar_items();
         RefreshOutcome::Succeeded
@@ -1900,7 +1978,7 @@ impl State {
         // `invalidate_generation`), so a refresh already in flight when we
         // get here can't consume this invalidation.
         if msg.name == PIPE_INVALIDATE {
-            self.cache_dirty = true;
+            self.set_cache_dirty(true);
             self.invalidate_generation += 1;
             // A genuine spawn/remove happened somewhere — reset the backoff
             // so this real state change retries at once rather than waiting
@@ -2126,26 +2204,50 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 if self.should_render_empty_state() {
-                    ui::render_header(w, &self.repo_name, cols);
+                    // Budget the empty state the same way as the populated
+                    // list (issue #216 finding 5, second pass) so a
+                    // first-refresh-failure-with-no-worktrees can't overflow a
+                    // short pane: reserve status + marker + footer, collapse
+                    // the footer to its version line when tight, then fit the
+                    // header and a truncated empty-state body into what remains.
+                    let stale_reason = self.refresh_stale_reason();
+                    let stale_lines = usize::from(stale_reason.is_some());
+                    let status_lines = ui::status_height(&self.status_message, cols);
+                    let full_footer = if cols >= 55 { 3 } else { 4 };
+                    let overhead = status_lines + stale_lines;
+                    let footer_lines = if rows >= overhead + 2 + full_footer {
+                        full_footer
+                    } else {
+                        1
+                    };
+                    let content_budget = rows.saturating_sub(overhead + footer_lines);
+                    let show_header = content_budget >= 2;
+                    let body_budget = content_budget.saturating_sub(usize::from(show_header));
+
+                    if show_header {
+                        ui::render_header(w, &self.repo_name, cols);
+                    }
                     // Even with no worktrees to list (e.g. the first refresh
                     // itself failed), surface staleness (#216).
-                    let stale_lines = if let Some(reason) = self.refresh_stale_reason() {
-                        ui::render_stale_marker(w, &reason, self.refresh_error.is_some(), cols);
-                        1
-                    } else {
-                        0
-                    };
-                    ui::render_empty_state(w);
-                    let list_height = 6;
-                    let status_height = ui::status_height(&self.status_message, cols);
-                    let footer_height = if cols >= 55 { 3 } else { 4 };
-                    let used_lines = 1 + stale_lines + list_height + status_height + footer_height;
+                    if let Some(reason) = &stale_reason {
+                        ui::render_stale_marker(w, reason, self.refresh_error.is_some(), cols);
+                    }
+                    let body_lines = ui::render_empty_state(w, body_budget);
+                    let used_lines = usize::from(show_header)
+                        + stale_lines
+                        + body_lines
+                        + status_lines
+                        + footer_lines;
                     let padding = rows.saturating_sub(used_lines);
                     for _ in 0..padding {
                         writeln!(w).unwrap();
                     }
                     ui::render_status(w, &self.status_message, self.status_is_error);
-                    ui::render_footer(w, &self.mode, VERSION, cols);
+                    if footer_lines <= 1 {
+                        ui::render_version_only(w, VERSION, cols);
+                    } else {
+                        ui::render_footer(w, &self.mode, VERSION, cols);
+                    }
                 } else {
                     // `layout` is computed once here and is the ONLY thing
                     // that decides header/separator visibility and the item
@@ -4349,6 +4451,92 @@ mod tests {
         s.refresh_backoff_secs = REFRESH_BACKOFF_INITIAL_SECS;
         let remaining = s.backoff_remaining_secs().expect("a window is open");
         assert!(remaining > 0.0 && remaining <= REFRESH_BACKOFF_INITIAL_SECS);
+    }
+
+    // Finding 1 (2nd pass): a whole in-flight/backoff window arms ONE timer,
+    // not one per event. `pump_refresh` requests the wake-up for a CONSTANT
+    // absolute deadline each event (remaining shrinks exactly as time passes,
+    // so `now + remaining` is fixed at `started + window`); this exercises the
+    // dedup in the pure `request_refresh_wakeup` directly (calling
+    // `pump_refresh` in a unit test would pull in the host `run_command`
+    // shim and fail to link).
+    #[test]
+    fn repeated_wakeups_for_one_window_request_a_single_timer() {
+        let mut s = State::default();
+        let started = Instant::now();
+        let mut arms = 0;
+        for _ in 0..100 {
+            let remaining = REFRESH_IN_FLIGHT_TIMEOUT_SECS - started.elapsed().as_secs_f64();
+            s.request_refresh_wakeup(remaining);
+            if s.refresh_timer_needs_arming {
+                arms += 1;
+                s.refresh_timer_needs_arming = false; // the shell arms & consumes it
+            }
+        }
+        assert_eq!(arms, 1, "100 events in one window must request exactly one host timer");
+    }
+
+    #[test]
+    fn only_a_strictly_earlier_deadline_rearms_the_timer() {
+        let mut s = State::default();
+        s.request_refresh_wakeup(30.0);
+        assert!(s.refresh_timer_needs_arming, "first request arms");
+        s.refresh_timer_needs_arming = false;
+
+        s.request_refresh_wakeup(40.0);
+        assert!(!s.refresh_timer_needs_arming, "a later deadline reuses the outstanding timer");
+
+        s.request_refresh_wakeup(1.0);
+        assert!(s.refresh_timer_needs_arming, "a strictly earlier deadline arms a new timer");
+        s.refresh_timer_needs_arming = false;
+
+        // Once the outstanding timer has fired (pump_refresh clears the
+        // elapsed deadline), the next window arms afresh.
+        s.refresh_timer_deadline = None;
+        s.request_refresh_wakeup(30.0);
+        assert!(s.refresh_timer_needs_arming, "a new window after the timer fired re-arms");
+    }
+
+    // Finding 4 (2nd pass): a known-stale list must stay flagged even while a
+    // replacement is nominally in flight, once it has dragged past the grace
+    // window — but a healthy sub-grace in-flight refresh must NOT flicker it.
+    #[test]
+    fn dirty_past_grace_stays_flagged_even_while_in_flight() {
+        let mut s = state_with_worktrees();
+        s.invalidate_generation = 1;
+        s.cache_dirty = true;
+        s.cache_dirty_since =
+            Some(Instant::now() - Duration::from_secs_f64(STALE_GRACE_SECS + 1.0));
+        s.refresh_inflight = Some((7, Instant::now())); // a replacement is running
+        assert!(
+            s.is_stale(),
+            "an invalidation unresolved past the grace window stays flagged despite in-flight"
+        );
+        assert_eq!(s.refresh_stale_reason().as_deref(), Some("changes pending"));
+    }
+
+    #[test]
+    fn healthy_in_flight_under_grace_does_not_flicker_the_marker() {
+        let mut s = state_with_worktrees();
+        s.set_cache_dirty(true); // stamps cache_dirty_since = now
+        s.refresh_inflight = Some((1, Instant::now()));
+        assert!(
+            !s.is_stale(),
+            "cache_dirty briefly true while its refresh is in flight (under grace) is not flagged"
+        );
+    }
+
+    // Defense-in-depth: a present-but-unparseable request id fails closed.
+    #[test]
+    fn malformed_request_id_is_ignored() {
+        let mut s = state_with_worktrees();
+        s.refresh_inflight = Some((3, Instant::now()));
+        let mut ctx = BTreeMap::new();
+        ctx.insert(CTX_REQUEST_ID.to_string(), "not-a-number".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+        assert_eq!(outcome, RefreshOutcome::Ignored, "a malformed id is ignored, not applied");
+        assert!(s.refresh_inflight.is_some(), "the active request's guard is untouched");
+        assert!(s.refresh_error.is_none());
     }
 
     #[test]

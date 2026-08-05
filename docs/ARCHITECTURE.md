@@ -220,10 +220,15 @@ pumped by the update/pipe shell after *every* event) unifies five concerns:
 - **Deferral, not drop.** A trigger that arrives while the gate is closed sets
   `refresh_pending` (drained the moment the gate reopens) instead of being
   lost — a tab-set change or invalidate mid-refresh always eventually runs.
-- **Timer wake-ups.** `pump_refresh` arms a `set_timeout` (via
+- **Timer wake-ups, deduplicated.** `pump_refresh` arms a `set_timeout` (via
   `refresh_timer_needs_arming`, mirroring the status-timer split) for the
   backoff/in-flight deadline, so a stale marker actually *retries* with no
-  external event and a lost result self-heals.
+  external event and a lost result self-heals. Because `set_timeout` arms an
+  independent one-shot per call and `pump_refresh` runs on every event,
+  `request_refresh_wakeup` tracks the outstanding wake-up's absolute deadline
+  (`refresh_timer_deadline`) and arms a new host timer only when none is
+  pending or a strictly earlier one is needed — so a whole window of unrelated
+  events collapses to a single timer, not one per event.
 
 Because the branch list is consumed only by the `n` picker, `list-branches`
 is fetched lazily — only alongside a *successful* worktree refresh — so the
@@ -231,13 +236,17 @@ failing path spawns one doomed process per attempt, not two (#219). The
 failed refresh keeps the last known list on screen (usable-but-flagged beats
 blank). Staleness is displayed by `is_stale()`, which derives from BOTH a
 failed refresh (`refresh_error`, distinct from the TTL'd `status_message`)
-AND an unsatisfied invalidation (`cache_dirty`, when not already resolving):
-a persistent yellow `stale · retrying` marker with a short reason, cleared
-only by a *current-generation* success — so a stale-generation success can't
-silently drop the marker while the list is known-stale. The full error is
-recoverable on demand via the `e` key. The marker occupies one budgeted
-layout row, and on an undersized pane the footer collapses to its version
-line rather than overflowing the frame.
+AND an unsatisfied invalidation (`cache_dirty`): the marker shows as soon as
+no refresh is resolving the invalidation, or — if one is — once the dirtiness
+has outlived `STALE_GRACE_SECS` (`cache_dirty_since`), so a hung or
+repeatedly-timing-out replacement can't leave a known-stale list unflagged,
+while a healthy sub-grace refresh never flickers the marker. `refresh_error`
+clears on any success but a stale-generation success keeps `cache_dirty` set,
+so the marker persists until a *current-generation* success. The full error
+is recoverable on demand via the `e` key. The marker occupies one budgeted
+layout row; on an undersized pane both the populated and empty-state arms
+degrade through the same budget (footer collapses to its version line, header
+drops, body truncates, item viewport may reach zero) rather than overflow.
 
 ## Key files
 

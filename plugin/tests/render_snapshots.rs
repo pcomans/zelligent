@@ -109,6 +109,36 @@ fn render_browse_empty_with_stale_marker() {
     insta::assert_snapshot!(output);
 }
 
+/// #216 finding 5 (2nd pass): the EMPTY-STATE arm (first refresh failed, no
+/// worktrees) must also degrade on a short pane — collapse the footer, drop
+/// the header, truncate the empty-state body — rather than overflow `rows`.
+#[test]
+fn render_browse_empty_stale_tiny_pane_5_rows_no_overflow() {
+    let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 5, 40);
+    assert_eq!(physical_rows(&output, 40), 5, "empty-state rows=5 with error must not overflow");
+    assert!(output.contains("stale"), "the marker survives even in the empty state at rows=5");
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5 (2nd pass): rows=6 empty-state boundary.
+#[test]
+fn render_browse_empty_stale_tiny_pane_6_rows_no_overflow() {
+    let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 6, 40);
+    assert_eq!(physical_rows(&output, 40), 6, "empty-state rows=6 with error must not overflow");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
 /// #216 finding 4: an unsatisfied invalidation with no refresh in flight
 /// (`cache_dirty`, no `refresh_error`) shows the generic `changes pending`
 /// marker — no `e: details` hint, since there's no error text to recover.

@@ -282,17 +282,24 @@ pub fn render_version_only(w: &mut impl Write, version: &str, cols: usize) {
     write!(w, "  {DIM}{version_line}{RESET}").unwrap();
 }
 
-pub fn render_empty_state(w: &mut impl Write) {
-    writeln!(w).unwrap();
-    writeln!(w, "  {BOLD}No managed worktrees yet.{RESET}").unwrap();
-    writeln!(
-        w,
-        "  {DIM}Pick a branch or type a new one to get started.{RESET}"
-    )
-    .unwrap();
-    writeln!(w).unwrap();
-    writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
-    writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
+/// Render up to `max_lines` of the six-line empty-state body, returning how
+/// many it actually wrote. Truncating from the full six lets an undersized
+/// pane (issue #216 finding 5, second pass) drop the body rather than overflow
+/// `rows`; a normally-sized pane passes a budget ≥ 6 and gets the whole thing.
+pub fn render_empty_state(w: &mut impl Write, max_lines: usize) -> usize {
+    let lines = [
+        String::new(),
+        format!("  {BOLD}No managed worktrees yet.{RESET}"),
+        format!("  {DIM}Pick a branch or type a new one to get started.{RESET}"),
+        String::new(),
+        format!("  {DIM}n{RESET}  pick an existing branch"),
+        format!("  {DIM}i{RESET}  type a new branch name"),
+    ];
+    let n = max_lines.min(lines.len());
+    for line in &lines[..n] {
+        writeln!(w, "{line}").unwrap();
+    }
+    n
 }
 
 pub fn render_sidebar_list(
