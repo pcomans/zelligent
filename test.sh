@@ -1244,8 +1244,10 @@ rm -rf "$MOCK_DR_SWEEP" "$MOCK_DR_SWEEP_HOME" "$FAKE_SWEEP_WASM_DIR"
 # worktree count and warns when they are on a collision course — but stays an
 # ADVISORY, never touching ERRORS or the exit code (the #212 lesson). Threshold
 # is limit < worktrees * 8 + 128. A real git repo with two extra worktrees
-# (3 total -> needs 152) drives the count deterministically; the soft ulimit is
-# lowered in a subshell to sit either side of the line.
+# (3 total -> needs 152) drives the count deterministically. The measured limit
+# is injected via the ZELLIGENT_DOCTOR_FD_LIMIT test seam so the numeric-value
+# assertions never depend on the host's real (possibly low) descriptor ceiling;
+# one case additionally lowers the *real* ulimit to prove the live path works.
 MOCK_FD_BIN=$(mktemp -d)
 MOCK_FD_HOME=$(mktemp -d)
 FAKE_FD_WASM_DIR=$(mktemp -d)
@@ -1259,9 +1261,9 @@ git -C "$FD_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m in
 git -C "$FD_REPO" worktree add -q "$FD_REPO-wt1" -b fd-wt1 >/dev/null 2>&1
 git -C "$FD_REPO" worktree add -q "$FD_REPO-wt2" -b fd-wt2 >/dev/null 2>&1
 
-# Low case: 3 worktrees, soft limit 128 < 152 -> advisory prints, exit stays 0.
-out_fd_low=$(cd "$FD_REPO" && ulimit -Sn 128 && \
-  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" \
+# Low case (seam): 3 worktrees, limit 128 < 152 -> advisory prints, exit 0.
+out_fd_low=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT=128 \
   PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_low=$?
 check "doctor fd-limit low: exits 0 (advisory only)" "0" "$code_fd_low"
 contains "doctor fd-limit low: reports low limit" "open file limit: low (ulimit -n 128, 3 worktrees)" "$out_fd_low"
@@ -1271,18 +1273,70 @@ contains "doctor fd-limit low: gives a raise command" "Raise with: ulimit -n" "$
 contains "doctor fd-limit low: points at the hard ceiling" "ulimit -Hn" "$out_fd_low"
 excludes "doctor fd-limit low: does not print the failure summary" "Some checks failed" "$out_fd_low"
 
-# Ok case: same 3 worktrees, soft limit 4096 >= 152 -> single ok line, no advice.
-out_fd_ok=$(cd "$FD_REPO" && ulimit -Sn 4096 && \
+# Low case (LIVE ulimit): lower the real soft limit below the threshold and
+# confirm doctor reads it — no seam here. 128 is safely below any supported
+# hard limit, so `ulimit -Sn 128` cannot fail the way a raise-to-4096 would.
+out_fd_live=$(cd "$FD_REPO" && ulimit -Sn 128 && \
   HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_live=$?
+check "doctor fd-limit live: exits 0 (advisory only)" "0" "$code_fd_live"
+contains "doctor fd-limit live: reads the real lowered ulimit" "open file limit: low (ulimit -n 128, 3 worktrees)" "$out_fd_live"
+
+# Ok case (seam): limit 200 >= 152 -> single ok line, no advice.
+out_fd_ok=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT=200 \
   PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_ok=$?
 check "doctor fd-limit ok: exits 0" "0" "$code_fd_ok"
-contains "doctor fd-limit ok: reports ok with counts" "open file limit: ok (ulimit -n 4096, 3 worktrees)" "$out_fd_ok"
+contains "doctor fd-limit ok: reports ok with counts" "open file limit: ok (ulimit -n 200, 3 worktrees)" "$out_fd_ok"
 excludes "doctor fd-limit ok: no raise advice when fine" "Raise with: ulimit -n" "$out_fd_ok"
+
+# Boundary: limit == threshold (3 worktrees -> 152). Equality must NOT warn.
+out_fd_eq=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT=152 \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_eq=$?
+check "doctor fd-limit boundary: exits 0" "0" "$code_fd_eq"
+contains "doctor fd-limit boundary: equality reports ok" "open file limit: ok (ulimit -n 152, 3 worktrees)" "$out_fd_eq"
+excludes "doctor fd-limit boundary: equality does not warn" "open file limit: low" "$out_fd_eq"
+
+# Unlimited: reported as fine, never warns.
+out_fd_unl=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT=unlimited \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_unl=$?
+check "doctor fd-limit unlimited: exits 0" "0" "$code_fd_unl"
+contains "doctor fd-limit unlimited: reports ok" "open file limit: ok (ulimit -n unlimited, 3 worktrees)" "$out_fd_unl"
+excludes "doctor fd-limit unlimited: never warns" "open file limit: low" "$out_fd_unl"
+
+# Unreadable: empty or non-numeric ulimit -> "unknown", never a false "ok",
+# never a `[ -lt ]` error. Test both an empty string and a junk value.
+out_fd_empty=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT= \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_empty=$?
+check "doctor fd-limit empty: exits 0" "0" "$code_fd_empty"
+contains "doctor fd-limit empty: reports unknown" "open file limit: unknown (could not read ulimit -n, 3 worktrees)" "$out_fd_empty"
+excludes "doctor fd-limit empty: no false ok" "open file limit: ok" "$out_fd_empty"
+
+out_fd_junk=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT="not-a-number" \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_junk=$?
+check "doctor fd-limit non-numeric: exits 0" "0" "$code_fd_junk"
+contains "doctor fd-limit non-numeric: reports unknown" "open file limit: unknown (could not read ulimit -n, 3 worktrees)" "$out_fd_junk"
+
+# Advisory coexists with a real failure without masking or altering it: a low
+# limit AND an independent doctor error (missing default layout) must still
+# print the advisory AND exit 1 with the failure summary. Proves the advisory
+# neither suppresses a genuine error nor is the cause of one.
+out_fd_err=$(cd "$FD_REPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT=128 \
+  ZELLIGENT_DEFAULT_LAYOUT_SRC="$FD_REPO/does-not-exist.kdl" \
+  PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_err=$?
+check "doctor fd-limit + real error: exits 1 (advisory doesn't mask errors)" "1" "$code_fd_err"
+contains "doctor fd-limit + real error: advisory still prints" "open file limit: low (ulimit -n 128, 3 worktrees)" "$out_fd_err"
+contains "doctor fd-limit + real error: real failure still reported" "Some checks failed" "$out_fd_err"
 
 # Outside a git repo: nothing to count, so the check stays silent entirely.
 FD_NONREPO=$(mktemp -d)
-out_fd_norepo=$(cd "$FD_NONREPO" && ulimit -Sn 64 && \
-  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" \
+out_fd_norepo=$(cd "$FD_NONREPO" && \
+  HOME="$MOCK_FD_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_FD_WASM" ZELLIGENT_DOCTOR_FD_LIMIT=64 \
   PATH="$MOCK_FD_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_fd_norepo=$?
 check "doctor fd-limit no-repo: exits 0" "0" "$code_fd_norepo"
 excludes "doctor fd-limit no-repo: stays silent outside a git repo" "open file limit" "$out_fd_norepo"
