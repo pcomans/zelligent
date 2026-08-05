@@ -222,15 +222,32 @@ git -C "$REPO_ROOT" branch -D renamed-dir-branch &>/dev/null || true
 # Test (#174 follow-up): the branch checked out in the MAIN repository must
 # never be "reused" as a worktree — `git worktree list` includes the main
 # checkout, and opening an agent tab there breaks the isolation model.
-MAIN_CHECKOUT_BRANCH=$(git -C "$REPO_ROOT" branch --show-current)
-out_mainwt=$(ZELLIJ=1 ZELLIJ_SESSION_NAME=fake PATH="$MOCK_BIN_LAYOUT:$PATH" \
-  "$SCRIPT" spawn "$MAIN_CHECKOUT_BRANCH" claude 2>&1); code_mainwt=$?
+#
+# Built on a throwaway repo rather than this checkout. `actions/checkout` on a
+# pull_request lands on a DETACHED HEAD, where `git branch --show-current` is
+# empty: the old version then ran `spawn ""`, which exits 1 down the
+# argument-validation path, so only the message assertion noticed that the
+# guard was no longer being exercised at all. A fixture repo with a known
+# branch checked out reproduces the scenario identically everywhere.
+MAIN_CO_REPO=$(mktemp -d)/repo
+MAIN_CO_HOME=$(mktemp -d)
+mkdir -p "$MAIN_CO_REPO" "$MAIN_CO_HOME/.zelligent"
+cp "$REPO_ROOT/share/default-layout.kdl" "$MAIN_CO_HOME/.zelligent/layout.kdl"
+git -C "$MAIN_CO_REPO" init -q
+# symbolic-ref rather than `init -b`: portable to git < 2.28
+git -C "$MAIN_CO_REPO" symbolic-ref HEAD refs/heads/main-co-branch
+echo "fixture" > "$MAIN_CO_REPO/file.txt"
+git -C "$MAIN_CO_REPO" add -A
+git -C "$MAIN_CO_REPO" -c user.email=t@example.com -c user.name=test commit -qm init
+out_mainwt=$(cd "$MAIN_CO_REPO" && HOME="$MAIN_CO_HOME" ZELLIJ=1 ZELLIJ_SESSION_NAME=fake \
+  PATH="$MOCK_BIN_LAYOUT:$PATH" "$SCRIPT" spawn main-co-branch claude 2>&1); code_mainwt=$?
 check "main-checkout branch: spawn exits non-zero" "1" "$code_mainwt"
 contains "main-checkout branch: names the main repository" \
   "checked out in the main repository" "$out_mainwt"
 excludes "main-checkout branch: never reuses the main checkout" \
   "Worktree already exists" "$out_mainwt"
-excludes "main-checkout branch: no tab opened" 'cwd="'"$REPO_ROOT"'"' "$out_mainwt"
+excludes "main-checkout branch: no tab opened" 'cwd="'"$MAIN_CO_REPO"'"' "$out_mainwt"
+rm -rf "$(dirname "$MAIN_CO_REPO")" "$MAIN_CO_HOME"
 
 # Test (#174 follow-up): a stale registration (worktree dir deleted without
 # `git worktree remove`) must produce an actionable error, not git's
