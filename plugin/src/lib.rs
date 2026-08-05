@@ -399,19 +399,21 @@ pub struct State {
     /// spin: repeated failures widen the window instead of respawning on
     /// every `TabUpdate`.
     pub refresh_backoff_secs: f64,
-    /// Absolute time the ONE consolidated wake-up host timer will fire, or
-    /// `None` when none is armed (issue #216 finding 1/3, fourth pass — the
-    /// single-deadline scheduler now covers status expiry AND the refresh
-    /// deadlines). `schedule_wakeup` recomputes the earliest live deadline
-    /// (`next_wakeup_deadline`) and arms a host timer only when none is armed
-    /// or a STRICTLY EARLIER one is needed, so N unrelated events in one window
-    /// collapse to one timer. Because `set_timeout` arms an untagged one-shot
-    /// per call and status/refresh once had SEPARATE records, an untagged
-    /// `Event::Timer` used to clear one record and duplicate the other's timer;
-    /// with a single record, EVERY delivered `Event::Timer` clears this
-    /// unconditionally and reschedules from current state — no tolerance-window
-    /// inference and no cross-timer duplication.
-    pub wakeup_at: Option<Instant>,
+    /// Fire-times of the host wake-up one-shots currently outstanding (issue
+    /// #216 finding 1, fifth pass). `set_timeout` arms an UNCANCELLABLE untagged
+    /// one-shot per call, so when an earlier deadline preempts a later one the
+    /// old timer stays queued and later delivers — we must ACCOUNT for it, not
+    /// pretend it's gone. `schedule_wakeup` arms (and pushes here) only when no
+    /// outstanding arm already fires at-or-before the desired deadline; each
+    /// delivered `Event::Timer` retires the earliest arm (the one that fired).
+    /// So a stale late delivery retires its own arm and re-arms nothing (a
+    /// remaining arm already covers the future deadline) — no duplicate, and
+    /// the count is bounded by the number of in-flight preemptions (≈2). Fired
+    /// arms are purged (`retain(> now)`), which also drops any that fired-and-
+    /// were-lost while the instance was hidden. Invariant: a future desired
+    /// deadline is always covered by some outstanding arm — see
+    /// `schedule_wakeup`'s `debug_assert`.
+    pub outstanding_arms: Vec<Instant>,
     /// When `cache_dirty` last transitioned false→true, or `None` while the
     /// cache is clean (issue #216 finding 4, second pass). Lets `is_stale`
     /// flag a known-but-unsatisfied invalidation that a hung/repeatedly-failing
@@ -765,41 +767,73 @@ impl State {
         candidates.into_iter().min()
     }
 
-    /// Recompute the earliest wake-up from current state and arm the single
-    /// consolidated host timer for it, but ONLY when none is armed or a
-    /// strictly earlier one is now needed (issue #216 finding 1/3, fourth
-    /// pass). Called after every event: non-`Timer` events leave `wakeup_at`
-    /// set, so a whole window of unrelated events collapses to one timer; a
-    /// `Timer`/reveal clears `wakeup_at` first (its untagged one-shot has fired
-    /// or may have been lost), so this re-arms fresh. Because there is now ONE
-    /// record for both status and refresh deadlines, a status timer firing can
-    /// no longer clear a refresh record and duplicate its timer (finding 1).
-    /// The host `set_timeout` itself is performed by `arm_pending_timer`.
+    /// Retire the earliest outstanding host arm — called once per delivered
+    /// `Event::Timer` (issue #216 finding 1, fifth pass). A Timer delivery
+    /// means one one-shot fired; the earliest-deadline arm fires first, so the
+    /// min is the delivered one. Retiring by min (not by `> now`) is what makes
+    /// an early fire safe: the delivered arm is removed even if its recorded
+    /// fire-time is a hair in the future, so it can't linger as a phantom.
+    fn retire_earliest_arm(&mut self) {
+        if let Some((idx, _)) = self
+            .outstanding_arms
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cmp(b))
+        {
+            self.outstanding_arms.swap_remove(idx);
+        }
+    }
+
+    /// Recompute the earliest wake-up from current state and arm ONE more host
+    /// timer for it, but ONLY when no outstanding arm already fires at-or-before
+    /// that deadline (issue #216 finding 1, fifth pass). `set_timeout` can't be
+    /// cancelled, so a preempting earlier arm is ADDED while the old later one
+    /// stays queued; each delivered Timer retires the earliest via
+    /// `retire_earliest_arm`. First purges arms that have already fired
+    /// (`retain(> now)`) — including any that fired-and-were-lost while hidden,
+    /// so a phantom can't suppress arming. The host `set_timeout` is performed
+    /// by `arm_pending_timer`.
     fn schedule_wakeup(&mut self) {
+        let now = Instant::now();
+        self.outstanding_arms.retain(|fire_at| *fire_at > now);
         let Some(deadline) = self.next_wakeup_deadline() else {
             return;
         };
-        if let Some(armed) = self.wakeup_at {
-            if armed <= deadline {
-                return; // an earlier-or-equal wake-up is already armed
-            }
+        let covered = self.outstanding_arms.iter().any(|fire_at| *fire_at <= deadline);
+        if !covered {
+            let secs = deadline.saturating_duration_since(now).as_secs_f64().max(0.3);
+            self.timer_needs_arming = true;
+            self.timer_arm_secs = secs;
+            // Record the ACTUAL fire-time (now + armed secs), which equals the
+            // deadline unless it was already due or within the 0.3s floor.
+            self.outstanding_arms.push(now + Duration::from_secs_f64(secs));
         }
-        let secs = deadline
-            .saturating_duration_since(Instant::now())
-            .as_secs_f64()
-            .max(0.3);
-        self.timer_needs_arming = true;
-        self.timer_arm_secs = secs;
-        self.wakeup_at = Some(deadline);
+        // Invariant: a desired deadline is always covered by an outstanding arm
+        // that fires no later than `max(deadline, now + floor)` — so a wake-up
+        // is never lost (the `max` admits the 0.3s minimum-arm floor for a
+        // deadline that is already due or nearer than the floor).
+        debug_assert!(
+            {
+                let bound = deadline.max(now + Duration::from_secs_f64(0.3));
+                self.outstanding_arms.iter().any(|fire_at| *fire_at <= bound)
+            },
+            "a desired deadline must be covered by an outstanding arm — no lost wake-up"
+        );
     }
 
-    /// Note that a refresh is wanted, then advance the lifecycle. The entry
-    /// point every explicit trigger routes through (via `Action::Refresh` /
-    /// the execute arms). SHELL method: may launch a `list-worktrees`.
-    /// `schedule_wakeup` (run by the shell tail) arms the wake-up.
+    /// Record that a refresh is wanted (via `Action::Refresh` / the execute
+    /// arms). Advances the lifecycle only while VISIBLE (issue #216 finding 2,
+    /// fifth pass): a HIDDEN instance — which still receives cross-instance
+    /// pipes (invalidate, status) — must only RECORD `refresh_pending`, never
+    /// pump/launch, or every broadcast pipe would reap-and-relaunch a
+    /// lost-result refresh once per timeout window. The reveal path drains the
+    /// owed refresh. A visible instance's shell tail pumps regardless; the
+    /// explicit pump here just makes the pipe/visible path immediate.
     fn request_refresh(&mut self) {
         self.refresh_pending = true;
-        self.pump_refresh();
+        if self.is_visible {
+            self.pump_refresh();
+        }
     }
 
     /// Advance the refresh lifecycle one step (issue #216 rework — unifies the
@@ -2422,12 +2456,12 @@ impl ZellijPlugin for State {
             self.handle_visible(visible);
             if visible {
                 // A reveal: any refresh in flight when we hid never delivered
-                // its result, and any wake-up armed while hidden may have been
-                // lost (hidden instances receive no Events). Abandon both and
-                // re-drive the lifecycle from scratch — covers the "result lost
-                // while hidden leaves the sidebar frozen" case (issue #216
-                // finding 3) without waiting out the 30s timeout.
-                self.wakeup_at = None;
+                // its result. Abandon it and re-drive the lifecycle — covers the
+                // "result lost while hidden leaves the sidebar frozen" case
+                // (issue #216 finding 3) without waiting out the 30s timeout.
+                // The outstanding host arms are NOT cleared here (they can't be
+                // cancelled and will still deliver); `schedule_wakeup` purges
+                // any that already fired-and-were-lost while hidden.
                 if self.refresh_inflight.take().is_some() {
                     self.refresh_pending = true;
                 }
@@ -2442,11 +2476,11 @@ impl ZellijPlugin for State {
             return visible || self.is_stale() != self.last_rendered_stale;
         }
         if let Event::Timer(_) = event {
-            // A delivered Timer means our (untagged) one-shot fired — forget
-            // the armed deadline unconditionally and reschedule from current
-            // state (issue #216 finding 1/3). One record now covers status AND
-            // refresh, so a status-timer fire can't duplicate a refresh timer.
-            self.wakeup_at = None;
+            // A delivered Timer means one outstanding (untagged) one-shot fired.
+            // Retire exactly that arm (the earliest) — NOT all of them — so a
+            // stale late delivery can't clear a newer arm's accounting and
+            // cause a duplicate re-arm (issue #216 finding 1, fifth pass).
+            self.retire_earliest_arm();
             let was_stale = self.last_rendered_stale;
             let status_rerender = self.handle_timer();
             // Only a VISIBLE instance advances the refresh lifecycle on a timer
@@ -2464,6 +2498,13 @@ impl ZellijPlugin for State {
             // flipped (e.g. the grace deadline just elapsed, finding B).
             return status_rerender || (self.is_stale() != was_stale);
         }
+        // Reaching here means a non-Timer, non-Visible Event was delivered, and
+        // zellij delivers Events only to instances in the visible tab — so this
+        // instance is visible. Recording that here (not just on `TabUpdate`)
+        // keeps the refresh lifecycle running for Event-driven refreshes such as
+        // the bootstrap `FetchWorktreesAndBranches` and the `r` key, while the
+        // pipe path (which reaches hidden instances) stays gated (finding 2).
+        self.is_visible = true;
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 // First moment run_command is actually allowed. Ask any
@@ -2557,8 +2598,9 @@ impl ZellijPlugin for State {
         // findings 2 & 3): drains a deferred refresh the moment the gate
         // reopens, reaps a timed-out in-flight request, and re-arms the retry
         // wake-up — so a change is never dropped and a stale marker never
-        // stops retrying. `schedule_wakeup` dedups against the armed deadline,
-        // so a whole window of events collapses to one timer.
+        // stops retrying. This is the visible path (is_visible was just set),
+        // so pumping is correct. `schedule_wakeup` dedups against outstanding
+        // arms, so a whole window of events collapses to one timer.
         self.pump_refresh();
         self.schedule_wakeup();
         self.arm_pending_timer();
@@ -2580,10 +2622,17 @@ impl ZellijPlugin for State {
         }
         let action = self.handle_pipe(&pipe_message);
         self.execute(&action);
-        // See the matching tail in `update` (issue #216 findings 2 & 3):
-        // an invalidate pipe that arrives mid-refresh is deferred by
-        // `pump_refresh`, not dropped, and drained when the gate reopens.
-        self.pump_refresh();
+        // Pipes reach HIDDEN instances too, so — unlike the update tail — the
+        // refresh lifecycle only advances while visible (issue #216 finding 2,
+        // fifth pass). A hidden instance records the invalidate (cache_dirty /
+        // refresh_pending set by `handle_pipe`/`request_refresh`) but never
+        // pumps or launches; the reveal path drains it. A visible instance
+        // pumps immediately. The wake-up scheduling runs regardless — while
+        // hidden `next_wakeup_deadline` yields only the status expiry (no
+        // process), so no refresh timer is armed.
+        if self.is_visible {
+            self.pump_refresh();
+        }
         self.schedule_wakeup();
         self.arm_pending_timer();
         true
@@ -4512,9 +4561,10 @@ mod tests {
         assert!(s.timer_needs_arming, "an earlier grace deadline arms a new timer");
         s.timer_needs_arming = false;
 
-        // A delivered Timer clears the armed record unconditionally; the next
-        // schedule re-arms afresh — no phantom deadline can suppress it.
-        s.wakeup_at = None;
+        // A delivered Timer retires the earliest arm (the grace one); the next
+        // schedule re-arms the grace deadline afresh (the queued in-flight arm
+        // is later, so it doesn't cover it).
+        s.retire_earliest_arm();
         s.schedule_wakeup();
         assert!(s.timer_needs_arming, "after a timer fires, the next wake-up re-arms");
     }
@@ -4547,17 +4597,103 @@ mod tests {
             s.timer_arm_secs
         );
 
-        // The (single) status timer fires: clear the shared record, handle_timer
-        // leaves the young message, reschedule arms exactly one timer for the
-        // next deadline — NOT a duplicate refresh timer.
-        s.wakeup_at = None;
+        // The (single) status timer fires: retire the delivered arm,
+        // handle_timer leaves the young message, reschedule arms exactly one
+        // timer for the next deadline — no duplicate.
+        s.retire_earliest_arm();
         let _ = s.handle_timer();
         s.schedule_wakeup();
         if s.timer_needs_arming {
             arms += 1;
             s.timer_needs_arming = false;
         }
-        assert_eq!(arms, 2, "the fire re-armed exactly once — no duplicate refresh timer");
+        assert_eq!(arms, 2, "the fire re-armed exactly once — no duplicate timer");
+    }
+
+    // Finding 1 (fifth pass, Codex test a): an earlier deadline preempts an
+    // already-armed later one. The old host one-shot can't be cancelled, so a
+    // SECOND arm is accounted; when BOTH eventually deliver, retiring each in
+    // turn leaves no duplicate and the count stays bounded — and no wake-up is
+    // ever lost (the schedule debug_assert enforces coverage every call).
+    #[test]
+    fn preemption_keeps_arms_bounded_and_loses_no_wakeup() {
+        let mut s = State::default();
+        s.is_visible = true;
+        s.refresh_inflight = Some((1, Instant::now())); // in-flight timeout ~30s
+        s.schedule_wakeup();
+        s.timer_needs_arming = false;
+        assert_eq!(s.outstanding_arms.len(), 1);
+
+        // A status message preempts with an earlier (~8s) deadline.
+        s.set_status("working", false);
+        s.schedule_wakeup();
+        s.timer_needs_arming = false;
+        assert_eq!(
+            s.outstanding_arms.len(),
+            2,
+            "preemption adds an arm; the uncancellable old one stays queued"
+        );
+
+        // The status timer (earliest) delivers with its message expired: retire
+        // it, clear the message, reschedule. The queued in-flight arm still
+        // covers the 30s deadline → NO duplicate.
+        backdate_status(&mut s, STATUS_MESSAGE_TTL_SECS as u64 + 1);
+        s.retire_earliest_arm();
+        assert!(s.handle_timer(), "the expired status clears");
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "the queued in-flight arm already covers — no duplicate");
+        assert_eq!(s.outstanding_arms.len(), 1, "bounded: back to one outstanding arm");
+
+        // The in-flight timer eventually delivers too: retire it, reschedule.
+        s.retire_earliest_arm();
+        s.schedule_wakeup();
+        assert!(
+            s.next_wakeup_deadline().is_none() || !s.outstanding_arms.is_empty(),
+            "no lost wake-up: a desired deadline always leaves an outstanding arm"
+        );
+        assert!(s.outstanding_arms.len() <= 2, "no unbounded growth");
+    }
+
+    // Finding 1 (fifth pass, Codex test b): a queued arm from before a
+    // hide/reveal covers the current deadline, so reveal arms NO duplicate;
+    // when that stale arm finally delivers, exactly one real arm is scheduled.
+    #[test]
+    fn a_queued_arm_covers_the_deadline_and_delivering_it_makes_no_duplicate() {
+        let mut s = State::default();
+        s.is_visible = true;
+        s.refresh_inflight = Some((1, Instant::now())); // desired ~now+30
+        // A pre-existing queued arm (armed before the hide) that fires sooner.
+        s.outstanding_arms.push(Instant::now() + Duration::from_secs_f64(1.0));
+
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "a queued earlier arm covers the desired deadline");
+        assert_eq!(s.outstanding_arms.len(), 1);
+
+        // That queued arm delivers: retire it, then the real deadline arms once.
+        s.retire_earliest_arm();
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming, "after the stale arm retires, the real deadline arms once");
+        assert_eq!(s.outstanding_arms.len(), 1, "exactly one arm — no duplicate");
+    }
+
+    // Finding 1 (fifth pass): an arm that fired-and-was-lost while hidden
+    // (fire-time now in the past) is purged by the next schedule, so it can't
+    // linger as a phantom that suppresses arming.
+    #[test]
+    fn schedule_purges_arms_that_already_fired() {
+        let mut s = State::default();
+        s.is_visible = true;
+        s.refresh_inflight = Some((1, Instant::now()));
+        s.outstanding_arms.push(Instant::now() - Duration::from_secs_f64(5.0)); // lost phantom
+
+        s.schedule_wakeup();
+
+        assert!(s.timer_needs_arming, "a past phantom must not suppress arming the real deadline");
+        assert!(
+            s.outstanding_arms.iter().all(|d| *d > Instant::now()),
+            "no already-fired arms remain"
+        );
+        assert_eq!(s.outstanding_arms.len(), 1);
     }
 
     // Finding 2 (fourth pass): a hidden instance schedules NO refresh wake-up,
@@ -4589,6 +4725,43 @@ mod tests {
             s.next_wakeup_deadline().is_some(),
             "visible: the refresh in-flight/grace wake-up is scheduled again"
         );
+    }
+
+    // Finding 2 (fifth pass): a broadcast PIPE reaching a HIDDEN dirty instance
+    // with an expired in-flight refresh RECORDS staleness but schedules no
+    // refresh — so it does not reap-and-relaunch every timeout window. (The
+    // shell's pipe path gates its pump/launch on `is_visible`; that guard isn't
+    // unit-callable — `pump_refresh`/`request_refresh` reach the host
+    // `run_command` shim — so this asserts the pure pieces: the pipe records,
+    // and while hidden `next_wakeup_deadline` schedules no refresh wake-up.)
+    #[test]
+    fn hidden_instance_pipe_records_staleness_without_scheduling_a_refresh() {
+        let mut s = state_with_worktrees();
+        s.is_visible = false;
+        // An in-flight refresh whose result was lost while hidden, already past
+        // the timeout — a visible pump WOULD reap and relaunch it.
+        s.refresh_inflight = Some((
+            7,
+            Instant::now() - Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS + 1.0),
+        ));
+
+        // A broadcast invalidate pipe reaches this hidden instance.
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert_eq!(action, Action::Refresh, "the pipe requests a refresh");
+        assert!(s.cache_dirty, "…which is RECORDED durably");
+
+        // But while hidden nothing schedules a refresh wake-up, so the expired
+        // in-flight is not reaped and relaunched.
+        assert!(
+            s.next_wakeup_deadline().is_none(),
+            "hidden: no refresh wake-up despite the expired in-flight"
+        );
+        assert_eq!(
+            s.refresh_inflight.map(|(id, _)| id),
+            Some(7),
+            "hidden: the stale in-flight is untouched"
+        );
+        assert!(s.wants_refresh(), "the owed refresh survives for reveal to drain");
     }
 
     // Finding B (third pass): the grace boundary must (1) be a scheduled
@@ -6179,9 +6352,9 @@ mod tests {
         let mut s = State::default();
         s.set_status("Spawned 'feature-c'", false);
         backdate_status(&mut s, 5);
-        // Simulate the wake-up firing: the shell clears the record, calls
-        // handle_timer (no clear — too young), then reschedules.
-        s.wakeup_at = None;
+        // Simulate the wake-up firing: the shell retires the delivered arm,
+        // calls handle_timer (no clear — too young), then reschedules.
+        s.retire_earliest_arm();
 
         assert!(!s.handle_timer(), "a fresh message must survive an early wake-up");
         assert_eq!(s.status_message, "Spawned 'feature-c'");

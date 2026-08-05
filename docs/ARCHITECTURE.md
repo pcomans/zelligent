@@ -220,30 +220,41 @@ pumped by the update/pipe shell after *every* event) unifies five concerns:
 - **Deferral, not drop.** A trigger that arrives while the gate is closed sets
   `refresh_pending` (drained the moment the gate reopens) instead of being
   lost — a tab-set change or invalidate mid-refresh always eventually runs.
-- **One consolidated wake-up scheduler** (status expiry *and* the refresh
-  deadlines). `set_timeout` arms an independent untagged one-shot per call and
-  the lifecycle is pumped on every event, so a naive arm-per-event — or two
-  separate records for status and refresh — would spawn duplicate timers.
-  `next_wakeup_deadline` computes the single earliest instant a wake-up is
-  needed: the status-message TTL expiry, the refresh in-flight timeout, the
-  backoff expiry, or the `cache_dirty_since + STALE_GRACE_SECS` grace boundary.
-  `schedule_wakeup` arms a host timer only when none is armed (`wakeup_at`) or
-  a strictly earlier one is now needed, so a whole window of unrelated events
-  collapses to one timer. Because Timer events are untagged and there is now a
-  SINGLE record, EVERY delivered `Event::Timer` clears `wakeup_at`
-  unconditionally and reschedules from current state — no tolerance-window
-  inference (an early fire can't leave a phantom deadline), and a status timer
-  firing can't clear a separate refresh record and duplicate its timer. A
-  reveal likewise clears `wakeup_at` (a timer armed while hidden may have been
-  lost). The grace boundary being a scheduled deadline is what makes the stale
-  marker *appear* with no other event; the Timer/reveal paths repaint when
-  `is_stale()` differs from the last painted frame (`last_rendered_stale`), and
-  a reveal always repaints (so a status message cleared while hidden is redrawn
-  away).
+- **One consolidated wake-up scheduler, accounting for uncancellable timers.**
+  `next_wakeup_deadline` computes the single earliest instant *anything* needs
+  a wake-up for: the status-message TTL expiry, the refresh in-flight timeout,
+  the backoff expiry, or the `cache_dirty_since + STALE_GRACE_SECS` grace
+  boundary. But `set_timeout` arms an untagged one-shot that CANNOT be
+  cancelled, so when an earlier deadline preempts an already-armed later one,
+  the old timer stays queued and still delivers. The scheduler therefore
+  *accounts* for outstanding arms rather than pretending a single record can be
+  overwritten: `outstanding_arms` holds the fire-times of the queued one-shots.
+  `schedule_wakeup` first purges already-fired arms (`retain(> now)`, which also
+  drops any that fired-and-were-lost while hidden), then arms ONE more host
+  timer only when no remaining arm already fires at-or-before the desired
+  deadline — so a whole window of events collapses to one timer, and a
+  preempting earlier deadline adds at most one. Each delivered `Event::Timer`
+  retires the earliest arm via `retire_earliest_arm` (the one that fired, even
+  if a hair early), so a stale late delivery retires its own arm and re-arms
+  nothing (a remaining arm already covers the future deadline) — no duplicate,
+  no phantom, and the count is bounded by the number of in-flight preemptions
+  (≈2). Invariant (debug-asserted every schedule): a future desired deadline is
+  always covered by an outstanding arm, so a wake-up is never lost. The grace
+  boundary being a scheduled deadline is what makes the stale marker *appear*
+  with no other event; the Timer/reveal paths repaint when `is_stale()` differs
+  from the last painted frame (`last_rendered_stale`), and a reveal always
+  repaints (so a status message cleared while hidden is redrawn away).
 - **Hidden instances don't spin the refresh lifecycle.** While `!is_visible`,
-  `next_wakeup_deadline` omits the refresh deadlines and the Timer path skips
-  `pump_refresh`, so a hidden instance whose results are lost never wakes to
-  reap-and-relaunch `list-worktrees` every 30s. The owed refresh survives in
+  `next_wakeup_deadline` omits the refresh deadlines, the Timer path skips
+  `pump_refresh`, and — crucially — the *pipe* path (which reaches hidden
+  instances, unlike Events) only RECORDS `refresh_pending`/`cache_dirty` via a
+  visibility-gated `request_refresh`, never pumping or launching. So a hidden
+  instance whose results are lost never wakes to reap-and-relaunch
+  `list-worktrees` every 30s, and a broadcast invalidate/status pipe can't
+  drive one either. Receiving any *Event* (not a pipe) proves visibility —
+  zellij delivers Events only to the visible tab — so `update` sets
+  `is_visible = true` for Event-driven refreshes (bootstrap, the `r` key),
+  keeping those working. The owed refresh survives in
   `refresh_pending`/`cache_dirty`, and the reveal path (which abandons any
   in-flight request and pumps) drains it. Status expiry is still scheduled
   while hidden — it spawns no process — so a message can clear on its own.
