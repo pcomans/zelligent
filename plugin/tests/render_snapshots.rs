@@ -62,6 +62,53 @@ fn render_browse_with_error_message() {
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
+/// #216: a failed refresh keeps the last known worktree list on screen and
+/// adds a persistent `stale · retrying` marker with a short reason plus the
+/// `e: details` on-demand hint. The marker occupies exactly one budgeted
+/// row, so the frame still fits `rows` (no #135/#136 scroll).
+#[test]
+fn render_browse_stale_marker() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    let output = render_to_string(&s, 20, 80);
+    assert_eq!(
+        physical_rows(&output, 80),
+        20,
+        "the stale marker must be budgeted, not overflow the frame"
+    );
+    assert!(output.contains("stale"), "persistent staleness marker is shown");
+    assert!(output.contains("too many open files"), "short reason is inline");
+    assert!(output.contains("e: details"), "wide pane advertises the on-demand full error");
+    assert!(output.contains("feat-a"), "the last known list stays visible");
+    insta::assert_snapshot!(output);
+}
+
+/// #216: on a narrow pane the marker drops the `e: details` hint first so the
+/// reason survives, and still fits `rows` exactly.
+#[test]
+fn render_browse_stale_marker_narrow_drops_hint() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    let output = render_to_string(&s, 20, 30);
+    assert_eq!(physical_rows(&output, 30), 20, "narrow marker must not wrap past `rows`");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
+/// #216: even with no worktrees to list (the first refresh itself failed),
+/// the empty state still surfaces the staleness marker.
+#[test]
+fn render_browse_empty_with_stale_marker() {
+    let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    s.refresh_error = Some("Failed to list worktrees: boom".into());
+    let output = render_to_string(&s, 20, 80);
+    assert_eq!(physical_rows(&output, 80), 20, "empty-state stale marker must be budgeted");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
 #[test]
 fn render_select_branch() {
     let s = state_with_branches();

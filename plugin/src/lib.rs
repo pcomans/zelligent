@@ -45,6 +45,31 @@ pub const VERSION: &str = env!("ZELLIGENT_VERSION");
 /// subsequent actions). See `State::set_status` / `State::handle_timer`.
 pub const STATUS_MESSAGE_TTL_SECS: f64 = 8.0;
 
+/// In-flight guard timeout for a `list-worktrees` refresh (issue #216). A
+/// refresh whose `RunCommandResult` never lands — the instance went hidden
+/// before it completed, and hidden instances receive no Events — would
+/// otherwise pin `list_worktrees_started_at` forever and wedge every future
+/// refresh. Once a launched-but-unanswered refresh is this many seconds old
+/// it is treated as abandoned and a new one may start. Comfortably longer
+/// than any real `git worktree list` while still self-healing a lost result
+/// on the next `TabUpdate` after the window. Uses the WASI monotonic clock
+/// via `Instant`, exactly like `status_message_set_at`.
+pub const REFRESH_IN_FLIGHT_TIMEOUT_SECS: f64 = 30.0;
+
+/// First backoff window after a failed refresh (issue #216). The next
+/// auto-retry (a `cache_dirty`/tab-set-change `Action::Refresh` from
+/// `handle_tab_update`) is suppressed until this much time has passed since
+/// the failure, so a persistent failure — EMFILE at a low `ulimit -n` —
+/// can't respawn two processes on every single `TabUpdate`. This is the
+/// fix for the spin: without it a failed refresh stays `cache_dirty` and
+/// re-fires on the next tab change forever.
+pub const REFRESH_BACKOFF_INITIAL_SECS: f64 = 2.0;
+
+/// Ceiling for the exponential backoff. Each successive failure doubles the
+/// window from `REFRESH_BACKOFF_INITIAL_SECS` up to this cap; a success or a
+/// manual `r` refresh resets it to zero. See issue #216.
+pub const REFRESH_BACKOFF_MAX_SECS: f64 = 60.0;
+
 // Command context keys used to route RunCommandResult
 pub const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
 pub const CMD_LIST_WORKTREES: &str = "list_worktrees";
@@ -320,6 +345,36 @@ pub struct State {
     /// and an early-firing timer must re-chain for what's left rather than
     /// leave the message stranded until an unrelated event.
     pub status_timer_arm_secs: f64,
+    /// The most recent `list-worktrees` refresh failed and no success has
+    /// landed since — carries the full error text (issue #216). Unlike
+    /// `status_message`, this is STATE, not an event: it must NOT expire on
+    /// a TTL, because the displayed worktree list is stale for exactly as
+    /// long as this is set. Cleared only by a successful
+    /// `handle_list_worktrees`. Drives the persistent `stale · retrying`
+    /// marker (see `refresh_stale_reason` / `render_to`) and is re-shown in
+    /// full on demand by the `e` key (`handle_key_browse`), so the detail is
+    /// recoverable long after the transient error status expired.
+    pub refresh_error: Option<String>,
+    /// When the current in-flight `list-worktrees` was launched, or `None`
+    /// when none is running (issue #216). The in-flight guard: while this is
+    /// `Some` and younger than `REFRESH_IN_FLIGHT_TIMEOUT_SECS`,
+    /// `fire_worktrees_refresh` is a no-op so refreshes cannot stack. Set
+    /// when a refresh launches, cleared when its result lands (either exit
+    /// code) or when it ages past the timeout (covers a result lost while
+    /// the instance was hidden). WASI monotonic clock via `Instant`, like
+    /// `status_message_set_at`.
+    pub list_worktrees_started_at: Option<Instant>,
+    /// When the last refresh failure occurred — the start of the current
+    /// backoff window — or `None` when not backing off (issue #216). An
+    /// auto-retry is suppressed while `refresh_failed_at.elapsed() <
+    /// refresh_backoff_secs`. Reset by a success or a manual `r` refresh.
+    pub refresh_failed_at: Option<Instant>,
+    /// Current backoff window length in seconds (issue #216). Zero when not
+    /// backing off; set to `REFRESH_BACKOFF_INITIAL_SECS` on the first
+    /// failure and doubled (capped at `REFRESH_BACKOFF_MAX_SECS`) on each
+    /// subsequent failure. This is what stops the spin: repeated failures
+    /// widen the window instead of respawning two processes per `TabUpdate`.
+    pub refresh_backoff_secs: f64,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -392,6 +447,33 @@ pub fn parse_branches(output: &str) -> Vec<String> {
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+/// Condense a full refresh error into a short, sidebar-width reason for the
+/// persistent `stale · retrying` marker (issue #216). The sidebar is far too
+/// narrow for the full text of errors like the EMFILE one that motivated
+/// this (or the enterprise-policy one in #212), so we map the common cases
+/// to a fixed human phrase and fall back to the first line of the error
+/// (stripped of our own `Failed to list worktrees:` prefix). The renderer
+/// clips the result to the pane width regardless.
+pub fn short_refresh_reason(full: &str) -> String {
+    let lower = full.to_lowercase();
+    if lower.contains("too many open files") || lower.contains("os error 24") {
+        return "too many open files".to_string();
+    }
+    if lower.contains("permission denied") || lower.contains("os error 13") {
+        return "permission denied".to_string();
+    }
+    let first = full.lines().next().unwrap_or(full).trim();
+    let stripped = first
+        .strip_prefix("Failed to list worktrees:")
+        .unwrap_or(first)
+        .trim();
+    if stripped.is_empty() {
+        "refresh failed".to_string()
+    } else {
+        stripped.to_string()
+    }
 }
 
 /// Wrapping navigation: move `current` by `delta` within `[0, len)`, wrapping around.
@@ -569,6 +651,50 @@ impl State {
             self.initial_cwd.clone(),
             Self::ctx(CMD_GIT_TOPLEVEL),
         );
+    }
+
+    /// True when a fresh `list-worktrees` may be launched (issue #216).
+    /// Enforces two independent gates:
+    ///   - In-flight guard: a refresh younger than
+    ///     `REFRESH_IN_FLIGHT_TIMEOUT_SECS` is still running, so don't stack
+    ///     another. A stuck/lost result ages out of the window and unblocks.
+    ///   - Backoff gate: after a failure, auto-retries are suppressed until
+    ///     the current backoff window elapses. A manual `r` refresh clears
+    ///     the backoff (see `handle_key_browse`) so it always gets through.
+    fn refresh_gate_open(&self) -> bool {
+        if let Some(started) = self.list_worktrees_started_at {
+            if started.elapsed().as_secs_f64() < REFRESH_IN_FLIGHT_TIMEOUT_SECS {
+                return false;
+            }
+        }
+        if let Some(failed_at) = self.refresh_failed_at {
+            if failed_at.elapsed().as_secs_f64() < self.refresh_backoff_secs {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Guarded refresh of the worktree list (issues #216 and #219). The
+    /// single choke point every refresh trigger funnels through — bootstrap,
+    /// manual `r`, invalidate pipe, tab-set change, and dirty-cache retry —
+    /// so the in-flight guard and backoff can't be bypassed by adding a new
+    /// call site. Stamps `list_worktrees_started_at` when it actually
+    /// launches; a gated call is a silent no-op.
+    ///
+    /// Deliberately fires ONLY `list-worktrees`, not `list-branches`
+    /// (#219): the branch list is consumed exclusively by the `n` branch
+    /// picker, so it is fetched lazily — only alongside a *successful*
+    /// worktree refresh (see the `CMD_LIST_WORKTREES` shell arm). That
+    /// halves the process/descriptor pressure on the failing path: a
+    /// refresh that hits EMFILE now spawns one doomed process per attempt
+    /// instead of two, and never the branch spawn at all.
+    fn fire_worktrees_refresh(&mut self) {
+        if !self.refresh_gate_open() {
+            return;
+        }
+        self.list_worktrees_started_at = Some(Instant::now());
+        self.fire_list_worktrees();
     }
 
     fn fire_list_worktrees(&self) {
@@ -815,7 +941,7 @@ impl State {
         }
     }
 
-    fn execute(&self, action: &Action) {
+    fn execute(&mut self, action: &Action) {
         match action {
             Action::None => {}
             Action::Close => close_self(),
@@ -850,8 +976,7 @@ impl State {
                 if let Some(name) = return_to {
                     go_to_tab_name(name);
                 }
-                self.fire_list_worktrees();
-                self.fire_git_branches();
+                self.fire_worktrees_refresh();
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
@@ -862,13 +987,14 @@ impl State {
                 show_self(false);
             }
             Action::Refresh => {
-                self.fire_list_worktrees();
-                self.fire_git_branches();
+                self.fire_worktrees_refresh();
             }
             Action::FetchToplevel => self.fire_git_toplevel(),
             Action::FetchWorktreesAndBranches => {
-                self.fire_list_worktrees();
-                self.fire_git_branches();
+                // Branches are no longer fired here: they follow lazily on a
+                // successful worktree refresh (#219, see the
+                // CMD_LIST_WORKTREES shell arm).
+                self.fire_worktrees_refresh();
             }
             Action::DumpLayout => {
                 dump_session_layout();
@@ -950,11 +1076,35 @@ impl State {
         stderr: &[u8],
         context: &BTreeMap<String, String>,
     ) {
+        // The result landed, so nothing is in flight anymore (issue #216) —
+        // clear the guard on BOTH paths before branching, so a failure
+        // doesn't leave it stuck and block the next backed-off retry.
+        self.list_worktrees_started_at = None;
         if exit_code != Some(0) {
-            let err = String::from_utf8_lossy(stderr);
-            self.set_status(format!("Failed to list worktrees: {err}"), true);
+            let err = String::from_utf8_lossy(stderr).trim().to_string();
+            let full = format!("Failed to list worktrees: {err}");
+            // The error is an EVENT: show the full text transiently (#216).
+            self.set_status(full.clone(), true);
+            // Staleness is STATE: keep the last known list on screen and
+            // record the failure durably so the marker persists past the
+            // status TTL and the detail stays recoverable via `e`. The
+            // worktree list is deliberately NOT cleared.
+            self.refresh_error = Some(full);
+            // Grow the backoff so repeated failures stop respawning two
+            // processes on every `TabUpdate` (the spin, #216).
+            self.refresh_backoff_secs = if self.refresh_backoff_secs <= 0.0 {
+                REFRESH_BACKOFF_INITIAL_SECS
+            } else {
+                (self.refresh_backoff_secs * 2.0).min(REFRESH_BACKOFF_MAX_SECS)
+            };
+            self.refresh_failed_at = Some(Instant::now());
             return;
         }
+        // Success: the list is fresh again. Clear the staleness state and
+        // reset the backoff so the next legitimate trigger refreshes at once.
+        self.refresh_error = None;
+        self.refresh_failed_at = None;
+        self.refresh_backoff_secs = 0.0;
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
         // The listing is applied unconditionally — even a refresh launched
@@ -1384,6 +1534,7 @@ impl State {
             self.sidebar_items.len(),
             self.selected_index,
             &self.status_message,
+            self.refresh_error.is_some(),
         );
         let leading = layout.leading_lines();
         if line < leading {
@@ -1466,8 +1617,25 @@ impl State {
                     }
                 }
                 BareKey::Char('r') => {
+                    // A manual refresh is an explicit user request: clear the
+                    // backoff window so the gate in `fire_worktrees_refresh`
+                    // lets it through even mid-backoff (issue #216). The
+                    // in-flight guard still applies — we won't stack onto a
+                    // refresh that's genuinely running.
+                    self.refresh_failed_at = None;
+                    self.refresh_backoff_secs = 0.0;
                     self.set_status("Refreshed", false);
                     return Action::Refresh;
+                }
+                BareKey::Char('e') => {
+                    // Recover the full refresh error on demand (issue #216).
+                    // The persistent `stale · retrying` marker only carries a
+                    // short reason; this re-shows the complete text in the
+                    // status line long after its original transient TTL
+                    // expired. No-op when the last refresh succeeded.
+                    if let Some(err) = self.refresh_error.clone() {
+                        self.set_status(err, true);
+                    }
                 }
                 BareKey::Char('q') | BareKey::Esc => {}
                 _ => {}
@@ -1597,6 +1765,14 @@ impl State {
         if msg.name == PIPE_INVALIDATE {
             self.cache_dirty = true;
             self.invalidate_generation += 1;
+            // A genuine spawn/remove happened somewhere — reset the backoff
+            // so this real state change retries at once rather than waiting
+            // out a window opened by earlier failures (issue #216). Invalidate
+            // pipes only arrive from actual worktree changes, so this can't
+            // reopen the spin (a persistent EMFILE produces no successful
+            // spawns/removes, hence no invalidates).
+            self.refresh_failed_at = None;
+            self.refresh_backoff_secs = 0.0;
             return Action::Refresh;
         }
         // "Focus the sidebar" (Alt+z keybind — see PIPE_FOCUS). The pipe
@@ -1814,11 +1990,19 @@ impl State {
             Mode::BrowseWorktrees => {
                 if self.should_render_empty_state() {
                     ui::render_header(w, &self.repo_name, cols);
+                    // Even with no worktrees to list (e.g. the first refresh
+                    // itself failed), surface staleness (#216).
+                    let stale_lines = if let Some(err) = &self.refresh_error {
+                        ui::render_stale_marker(w, &short_refresh_reason(err), cols);
+                        1
+                    } else {
+                        0
+                    };
                     ui::render_empty_state(w);
                     let list_height = 6;
                     let status_height = ui::status_height(&self.status_message, cols);
                     let footer_height = if cols >= 55 { 3 } else { 4 };
-                    let used_lines = 1 + list_height + status_height + footer_height;
+                    let used_lines = 1 + stale_lines + list_height + status_height + footer_height;
                     let padding = rows.saturating_sub(used_lines);
                     for _ in 0..padding {
                         writeln!(w).unwrap();
@@ -1841,9 +2025,16 @@ impl State {
                         self.sidebar_items.len(),
                         self.selected_index,
                         &self.status_message,
+                        self.refresh_error.is_some(),
                     );
                     if layout.show_header {
                         ui::render_header(w, &self.repo_name, cols);
+                    }
+                    // Persistent staleness marker (#216), between the header
+                    // and the list. `layout.stale_lines` reserved its row, so
+                    // it never pushes the frame past `rows`.
+                    if let Some(err) = &self.refresh_error {
+                        ui::render_stale_marker(w, &short_refresh_reason(err), cols);
                     }
                     ui::render_sidebar_list(
                         w,
@@ -2016,6 +2207,18 @@ impl ZellijPlugin for State {
                     Some(CMD_GIT_TOPLEVEL) => self.handle_git_toplevel(exit_code, &stdout, &stderr),
                     Some(CMD_LIST_WORKTREES) => {
                         self.handle_list_worktrees(exit_code, &stdout, &stderr, &context);
+                        // Lazily refresh the branch list only when the
+                        // worktree refresh actually succeeded (#219): the
+                        // branch picker is the sole consumer, and skipping
+                        // this on failure keeps the failing path down to one
+                        // spawn instead of two — no branch process piled onto
+                        // an already descriptor-starved environment. The side
+                        // effect lives in the shell (keyed on `exit_code`),
+                        // mirroring the spawn/remove invalidate-broadcast
+                        // pattern, so `handle_list_worktrees` stays pure.
+                        if exit_code == Some(0) {
+                            self.fire_git_branches();
+                        }
                         Action::None
                     }
                     Some(CMD_GIT_BRANCHES) => {
@@ -3777,6 +3980,166 @@ mod tests {
         // The next TabUpdate retries the Refresh.
         let action = s.handle_tab_update(vec![make_tab("feat-a", true)]);
         assert_eq!(action, Action::Refresh);
+    }
+
+    // --- #216: staleness state, backoff, in-flight guard, on-demand error ---
+
+    #[test]
+    fn failed_refresh_keeps_list_and_records_persistent_error() {
+        let mut s = state_with_worktrees();
+        // A refresh is in flight (guard stamped by fire_worktrees_refresh).
+        s.list_worktrees_started_at = Some(Instant::now());
+        let before = s.worktrees.clone();
+
+        s.handle_list_worktrees(Some(1), b"", b"Too many open files (os error 24)", &BTreeMap::new());
+
+        assert_eq!(s.worktrees, before, "the last known list must be kept on failure");
+        let err = s.refresh_error.expect("failure must record persistent error state");
+        assert!(err.contains("Too many open files"), "full error text is retained: {err}");
+        assert!(s.status_is_error, "the failure also shows transiently in the status line");
+        assert_eq!(
+            s.refresh_backoff_secs, REFRESH_BACKOFF_INITIAL_SECS,
+            "first failure arms the initial backoff window"
+        );
+        assert!(s.refresh_failed_at.is_some(), "backoff window start is stamped");
+        assert!(
+            s.list_worktrees_started_at.is_none(),
+            "the in-flight guard is cleared on the result (either exit code)"
+        );
+    }
+
+    #[test]
+    fn successful_refresh_clears_stale_state_and_resets_backoff() {
+        let mut s = state_with_worktrees();
+        // Simulate a prior failure.
+        s.refresh_error = Some("Failed to list worktrees: boom".into());
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = 8.0;
+        s.list_worktrees_started_at = Some(Instant::now());
+
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &BTreeMap::new());
+
+        assert!(s.refresh_error.is_none(), "success clears the staleness marker");
+        assert!(s.refresh_failed_at.is_none(), "success resets the backoff window");
+        assert_eq!(s.refresh_backoff_secs, 0.0, "success resets the backoff magnitude");
+        assert!(s.list_worktrees_started_at.is_none(), "the in-flight guard is cleared");
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        let mut s = state_with_worktrees();
+        let mut expected = REFRESH_BACKOFF_INITIAL_SECS;
+        for _ in 0..12 {
+            s.handle_list_worktrees(Some(1), b"", b"boom", &BTreeMap::new());
+            assert_eq!(s.refresh_backoff_secs, expected);
+            expected = (expected * 2.0).min(REFRESH_BACKOFF_MAX_SECS);
+        }
+        assert_eq!(
+            s.refresh_backoff_secs, REFRESH_BACKOFF_MAX_SECS,
+            "repeated failures cap the backoff instead of growing without bound"
+        );
+    }
+
+    #[test]
+    fn refresh_gate_closed_during_backoff_window_open_after() {
+        let mut s = State::default();
+        // Inside the window: failed just now, non-zero backoff.
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = REFRESH_BACKOFF_INITIAL_SECS;
+        assert!(!s.refresh_gate_open(), "auto-retry is suppressed inside the backoff window");
+
+        // Window elapsed (modelled by a zero-length window).
+        s.refresh_backoff_secs = 0.0;
+        assert!(s.refresh_gate_open(), "the gate reopens once the window has elapsed");
+    }
+
+    #[test]
+    fn refresh_gate_closed_while_in_flight_reopens_when_abandoned() {
+        let mut s = State::default();
+        s.list_worktrees_started_at = Some(Instant::now());
+        assert!(!s.refresh_gate_open(), "a fresh in-flight refresh blocks stacking");
+
+        // A refresh whose result never landed ages out of the guard window.
+        s.list_worktrees_started_at = Some(
+            Instant::now()
+                - std::time::Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS + 1.0),
+        );
+        assert!(
+            s.refresh_gate_open(),
+            "an abandoned (timed-out) in-flight refresh must not wedge future refreshes"
+        );
+    }
+
+    #[test]
+    fn manual_refresh_key_clears_backoff_and_returns_refresh() {
+        let mut s = state_with_sidebar();
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = 30.0;
+
+        let action = s.handle_key_browse(&key(BareKey::Char('r')));
+
+        assert_eq!(action, Action::Refresh);
+        assert!(s.refresh_failed_at.is_none(), "manual refresh clears the backoff window");
+        assert_eq!(s.refresh_backoff_secs, 0.0, "manual refresh resets the backoff magnitude");
+    }
+
+    #[test]
+    fn error_key_reshows_full_error_on_demand() {
+        let mut s = state_with_sidebar();
+        let full = "Failed to list worktrees: git: Too many open files (os error 24)";
+        s.refresh_error = Some(full.into());
+        // The transient status has long since expired.
+        s.status_message.clear();
+
+        let action = s.handle_key_browse(&key(BareKey::Char('e')));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.status_message, full, "e re-shows the complete error text");
+        assert!(s.status_is_error);
+    }
+
+    #[test]
+    fn error_key_is_a_noop_when_not_stale() {
+        let mut s = state_with_sidebar();
+        assert!(s.refresh_error.is_none());
+        s.status_message.clear();
+        s.handle_key_browse(&key(BareKey::Char('e')));
+        assert!(s.status_message.is_empty(), "e does nothing when the last refresh succeeded");
+    }
+
+    #[test]
+    fn invalidate_pipe_resets_backoff() {
+        let mut s = State::default();
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = 40.0;
+
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+
+        assert_eq!(action, Action::Refresh);
+        assert!(s.cache_dirty);
+        assert!(s.refresh_failed_at.is_none(), "a genuine invalidation retries at once");
+        assert_eq!(s.refresh_backoff_secs, 0.0);
+    }
+
+    #[test]
+    fn short_refresh_reason_maps_common_failures() {
+        assert_eq!(
+            short_refresh_reason("Failed to list worktrees: Too many open files (os error 24)"),
+            "too many open files"
+        );
+        assert_eq!(
+            short_refresh_reason("something (os error 24)"),
+            "too many open files"
+        );
+        assert_eq!(
+            short_refresh_reason("Failed to list worktrees: Permission denied (os error 13)"),
+            "permission denied"
+        );
+        // Unknown errors fall back to the first line, minus our own prefix.
+        assert_eq!(
+            short_refresh_reason("Failed to list worktrees: fatal: bad object\nsecond line"),
+            "fatal: bad object"
+        );
+        assert_eq!(short_refresh_reason("Failed to list worktrees:"), "refresh failed");
     }
 
     #[test]

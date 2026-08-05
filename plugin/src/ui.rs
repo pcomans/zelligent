@@ -38,6 +38,11 @@ pub struct SidebarLayout {
     /// Whether a blank separator line is drawn between the header (or the
     /// pane top, if the header itself was dropped) and the first item.
     pub show_separator: bool,
+    /// Physical rows the persistent `stale · retrying` marker occupies this
+    /// frame (issue #216): 1 when the worktree cache is flagged stale, else
+    /// 0. Drawn between the header and the separator, so it counts toward
+    /// `leading_lines()` and the mouse-click item offset.
+    pub stale_lines: usize,
     /// The scrollable item viewport: which items are visible, and where.
     pub viewport: SidebarViewport,
     /// Physical rows the status message will occupy this frame, including
@@ -53,7 +58,7 @@ impl SidebarLayout {
     /// blank separator). This is exactly the offset mouse-click line
     /// numbers need before dividing by 2 to find an item index.
     pub fn leading_lines(&self) -> usize {
-        self.show_header as usize + self.show_separator as usize
+        self.show_header as usize + self.stale_lines + self.show_separator as usize
     }
 }
 
@@ -104,11 +109,17 @@ pub fn sidebar_layout(
     item_count: usize,
     selected: usize,
     status_message: &str,
+    stale: bool,
 ) -> SidebarLayout {
     let footer_lines = if cols >= 55 { 3 } else { 4 };
     let status_lines = status_height(status_message, cols);
+    // The persistent stale marker (issue #216) is reserved up front, ahead
+    // of the header/separator degradation decision: staleness is more
+    // important to convey than the repo-name banner, so on a short pane the
+    // marker survives while the header/separator are sacrificed first.
+    let stale_lines = usize::from(stale);
 
-    let content_budget = rows.saturating_sub(status_lines + footer_lines);
+    let content_budget = rows.saturating_sub(status_lines + footer_lines + stale_lines);
     let (show_header, show_separator) = if content_budget >= MIN_ROWS_HEADER_AND_SEPARATOR {
         (true, true)
     } else if content_budget >= MIN_ROWS_HEADER_ONLY {
@@ -134,6 +145,7 @@ pub fn sidebar_layout(
     SidebarLayout {
         show_header,
         show_separator,
+        stale_lines,
         viewport,
         status_lines,
         footer_lines,
@@ -213,6 +225,26 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     };
     let pad = cols.saturating_sub(visible_width(&title));
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
+}
+
+/// Persistent `stale · retrying` marker (issue #216). Drawn between the
+/// header and the item list whenever the worktree cache is flagged stale by
+/// a failed refresh. Yellow (a warning, not the red alarm of a hard error),
+/// carries the short `reason` inline, and advertises the `e` key for the
+/// full error text. Exactly one physical line: the whole string is clipped
+/// to the pane width (prefix included) so it can never wrap and throw off
+/// the layout arithmetic. The `e: details` hint is dropped first when width
+/// is tight, so the reason survives on a narrow pane.
+pub fn render_stale_marker(w: &mut impl Write, reason: &str, cols: usize) {
+    let base = format!("⚠ stale · retrying — {reason}");
+    let with_hint = format!("{base} · e: details");
+    let content = if visible_width(&with_hint) + 2 <= cols {
+        with_hint
+    } else {
+        base
+    };
+    let clipped = clip_to_width(&content, cols.saturating_sub(2));
+    writeln!(w, "  {YELLOW}{clipped}{RESET}").unwrap();
 }
 
 pub fn render_empty_state(w: &mut impl Write) {

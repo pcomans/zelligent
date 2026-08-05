@@ -197,6 +197,28 @@ worktrees. See
 [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for the
 event-delivery model.
 
+**Failure handling (#216 / #219).** A refresh that fails — e.g. Zellij can't
+even spawn the command under EMFILE (`os error 24`) on a low `ulimit -n`
+with many worktrees — must not turn a transient failure into a permanent
+spin. Every refresh funnels through one guarded choke point
+(`fire_worktrees_refresh`) enforcing two gates: an **in-flight guard**
+(`list_worktrees_started_at`) so refreshes can't stack — a result lost to a
+hidden instance ages out after `REFRESH_IN_FLIGHT_TIMEOUT_SECS` so it can't
+wedge forever — and **exponential backoff** (`refresh_backoff_secs`, from
+`REFRESH_BACKOFF_INITIAL_SECS` doubling to `REFRESH_BACKOFF_MAX_SECS`) that
+suppresses the `cache_dirty`/tab-set auto-retries after a failure, so a
+persistent failure stops respawning a process on every `TabUpdate`. A
+manual `r` refresh and a genuine `zelligent-invalidate` both reset the
+backoff so real triggers still fire at once. Because the branch list is
+consumed only by the `n` picker, `list-branches` is fetched lazily — only
+alongside a *successful* worktree refresh — so the failing path spawns one
+doomed process per attempt, not two (#219). The failed refresh keeps the
+last known list on screen (usable-but-flagged beats blank) and records
+durable staleness state (`refresh_error`, distinct from the TTL'd
+`status_message`): a persistent yellow `stale · retrying` marker with a
+short reason, cleared only by a successful refresh, with the full error
+text recoverable on demand via the `e` key.
+
 ## Key files
 
 | File                                       | Purpose                                                       |
