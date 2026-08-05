@@ -173,6 +173,10 @@ contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains sidebar plugin" 'plugin location="file:'    "$out"
+# #218: the sidebar pane is borderless so Zellij draws no frame title above
+# the plugin's own in-pane header (that stacked pair was the "double header").
+contains "layout: sidebar pane is borderless (no frame title)" \
+  'name="zelligent" size=36 borderless=true' "$out"
 count_equals "L1: exactly one vertical split per tab (sidebar left)" 'split_direction="Vertical"' 1 "$out"
 excludes "layout omits tab-bar"           'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"

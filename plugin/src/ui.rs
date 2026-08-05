@@ -199,12 +199,16 @@ fn status_symbol(status: &AgentStatus) -> Option<&'static str> {
     }
 }
 
-// The header carries ONLY the repo name (#156): the pane frame title already
-// says "zelligent" (the lazygit convention — every pane's frame names its
-// tool), so a brand prefix here reads as a stutter directly under the frame.
-// The brand also lives in the footer next to the version. An empty repo name
-// (state not loaded yet; error arms pass their own label) falls back to the
-// tool name rather than an empty rule.
+// This in-pane header is the sidebar's ONLY title bar. The sidebar pane is
+// `borderless=true` in the layout (#218), so Zellij draws no pane frame and
+// hence no frame title — earlier there were TWO stacked title bars, the
+// "zelligent" frame title directly above this header (the "double header").
+// #156 tried to differentiate them by dropping this line's brand prefix (so
+// the frame said "zelligent" and this said the repo name), but two ruled
+// title bars stacked still read as doubled; #218 removes the frame instead.
+// The header carries the repo name; the brand lives in the footer next to
+// the version. An empty repo name (state not loaded yet; error arms pass
+// their own label) falls back to the brand so there is always a title.
 pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     let title = if repo_name.is_empty() {
         " zelligent ".to_string()
@@ -472,7 +476,8 @@ mod tests {
 
     #[test]
     fn header_shows_repo_name_only() {
-        // #156: no brand prefix — the pane frame title carries the tool name.
+        // #156/#218: no brand prefix — this is the sole (borderless) header,
+        // carrying the repo name; the brand lives in the footer.
         let h = header_string("my-service", 40);
         assert!(h.contains(" my-service "));
         assert!(!h.contains("zelligent"));

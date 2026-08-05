@@ -1,5 +1,5 @@
 pane split_direction="Vertical" {
-    pane name="zelligent" size=36 {
+    pane name="zelligent" size=36 borderless=true {
         {{zelligent_sidebar}}
     }
     {{zelligent_children}}
