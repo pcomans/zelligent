@@ -139,6 +139,38 @@ fn render_browse_empty_stale_tiny_pane_6_rows_no_overflow() {
     insta::assert_snapshot!(output);
 }
 
+/// #216 finding 5 (3rd pass): the empty-state body is budgeted in PHYSICAL
+/// rows at `cols`, so a wide instruction line wrapping to two rows at cols=40
+/// can't silently overflow. Parameterised rows 7–10 (where the old logical-line
+/// count overflowed and dropped the headline before the leading blank): each
+/// must fit `rows` exactly AND keep the "No managed worktrees yet." headline.
+#[test]
+fn render_browse_empty_body_narrow_pane_no_overflow_keeps_headline() {
+    for rows in [7usize, 8, 9, 10] {
+        let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        let output = render_to_string(&s, rows, 40);
+        assert_eq!(
+            physical_rows(&output, 40),
+            rows,
+            "empty-state body must fit rows={rows} at cols=40 without wrapping past it"
+        );
+        assert!(
+            output.contains("No managed worktrees yet."),
+            "the headline must survive at rows={rows} (never dropped before a blank)"
+        );
+    }
+}
+
+/// Snapshot of the rows=9 narrow empty state (the specific overflow case
+/// called out in review).
+#[test]
+fn render_browse_empty_body_narrow_pane_9_rows() {
+    let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    let output = render_to_string(&s, 9, 40);
+    assert_eq!(physical_rows(&output, 40), 9);
+    insta::assert_snapshot!(output);
+}
+
 /// #216 finding 4: an unsatisfied invalidation with no refresh in flight
 /// (`cache_dirty`, no `refresh_error`) shows the generic `changes pending`
 /// marker — no `e: details` hint, since there's no error text to recover.

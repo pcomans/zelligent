@@ -411,26 +411,36 @@ pub struct State {
     /// out of the pure lifecycle logic.
     pub refresh_timer_needs_arming: bool,
     /// Seconds the refresh retry wake-up should be armed for (issue #216).
-    /// Requested via `request_refresh_wakeup`, which keeps the EARLIEST
-    /// pending deadline when several are requested within one event.
+    /// Set by `schedule_refresh_wakeup`; consumed by `arm_pending_refresh_timer`.
     pub refresh_timer_arm_secs: f64,
-    /// Absolute time the currently-outstanding refresh wake-up is expected to
-    /// fire, or `None` when no wake-up is pending (issue #216 finding 1,
-    /// second pass). `set_timeout` arms an independent one-shot per call, and
-    /// `pump_refresh` runs on EVERY event — so without this,
-    /// N unrelated events during one in-flight/backoff window would arm N
-    /// timers. `request_refresh_wakeup` arms a new host timer only when no
-    /// wake-up is outstanding or a strictly earlier one is needed; a fired or
-    /// elapsed deadline is cleared in `pump_refresh` so the next window can
-    /// re-arm.
-    pub refresh_timer_deadline: Option<Instant>,
+    /// Absolute time the currently-armed refresh wake-up host timer will fire,
+    /// or `None` when none is armed (issue #216 finding 1/3, third pass). The
+    /// single-deadline scheduler: `schedule_refresh_wakeup` recomputes the
+    /// earliest wake-up needed (`next_refresh_deadline` — in-flight timeout,
+    /// backoff expiry, or grace expiry) and arms a host timer only when none
+    /// is armed or a STRICTLY EARLIER one is needed, so N unrelated events in
+    /// one window collapse to one timer. Because `set_timeout` arms an
+    /// untagged one-shot per call, EVERY delivered `Event::Timer` clears this
+    /// unconditionally and reschedules from current state — no tolerance-window
+    /// inference, so a host timer firing early can never leave a phantom
+    /// deadline that suppresses re-arming.
+    pub refresh_wakeup_at: Option<Instant>,
     /// When `cache_dirty` last transitioned false→true, or `None` while the
     /// cache is clean (issue #216 finding 4, second pass). Lets `is_stale`
     /// flag a known-but-unsatisfied invalidation that a hung/repeatedly-failing
     /// replacement refresh has failed to resolve within `STALE_GRACE_SECS`,
     /// without flickering the marker during the sub-second in-flight window of
-    /// a healthy refresh. Maintained by `set_cache_dirty`.
+    /// a healthy refresh. Maintained by `set_cache_dirty`; its `+
+    /// STALE_GRACE_SECS` instant is a scheduler deadline so the marker's
+    /// appearance actually triggers a render (finding B, third pass).
     pub cache_dirty_since: Option<Instant>,
+    /// Whether the last painted frame showed the `stale · retrying` marker
+    /// (issue #216 finding B, third pass). The timer/reveal paths compare
+    /// `is_stale()` against this to decide whether a wake-up must repaint —
+    /// e.g. the grace deadline firing flips staleness visible with no other
+    /// state change, and that transition must reach the screen. Updated by
+    /// `render`.
+    pub last_rendered_stale: bool,
 }
 
 /// Outcome of applying a `list-worktrees` result (issue #216 rework). The
@@ -751,56 +761,75 @@ impl State {
         })
     }
 
-    /// Request a future wake-up so a deferred refresh actually retries with no
-    /// external event (issue #216 finding 3), while arming AT MOST ONE host
-    /// timer per distinct deadline (finding 1, second pass). `set_timeout`
-    /// arms an independent one-shot per call and `pump_refresh` runs on every
-    /// event, so we track the outstanding wake-up's absolute deadline and arm
-    /// a new host timer only when none is pending or a STRICTLY EARLIER one is
-    /// needed. During a single in-flight/backoff window the requested deadline
-    /// is a constant absolute instant (`started + TIMEOUT` / `failed_at +
-    /// backoff`), so repeated per-event requests collapse to one timer.
-    fn request_refresh_wakeup(&mut self, secs: f64) {
-        let secs = secs.max(0.3);
-        let new_deadline = Instant::now() + Duration::from_secs_f64(secs);
-        // A wake-up already outstanding that fires at or before what we need
-        // (small slop for clock jitter) covers us — don't arm another.
-        if let Some(existing) = self.refresh_timer_deadline {
-            if existing <= new_deadline + Duration::from_millis(50) {
-                return;
+    /// The earliest future instant the refresh lifecycle needs a wake-up for,
+    /// derived purely from current state (issue #216 finding 1/3/B, third
+    /// pass). Candidates, minimised: the in-flight timeout (`started +
+    /// REFRESH_IN_FLIGHT_TIMEOUT_SECS`, to reap a result lost while hidden and
+    /// relaunch); the grace expiry (`cache_dirty_since + STALE_GRACE_SECS`,
+    /// while a replacement is in flight and the marker hasn't yet appeared, so
+    /// its appearance triggers a render — finding B); and the backoff expiry
+    /// (`failed_at + backoff`, while a refresh is still wanted, to retry).
+    /// `None` when no wake-up is needed (idle, or ready to launch right now).
+    fn next_refresh_deadline(&self) -> Option<Instant> {
+        let mut candidates: Vec<Instant> = Vec::new();
+        if let Some((_, started)) = self.refresh_inflight {
+            candidates.push(started + Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS));
+            if self.cache_dirty && !self.dirty_persisted_past_grace() {
+                if let Some(since) = self.cache_dirty_since {
+                    candidates.push(since + Duration::from_secs_f64(STALE_GRACE_SECS));
+                }
+            }
+        } else if self.wants_refresh() {
+            if let Some(failed_at) = self.refresh_failed_at {
+                candidates.push(failed_at + Duration::from_secs_f64(self.refresh_backoff_secs));
             }
         }
+        candidates.into_iter().min()
+    }
+
+    /// Recompute the earliest refresh wake-up from current state and arm a
+    /// host timer for it, but ONLY when none is armed or a strictly earlier
+    /// one is now needed (issue #216 finding 1/3, third pass). Called after
+    /// `pump_refresh` on every event: non-`Timer` events leave `refresh_wakeup_at`
+    /// set, so a whole window of unrelated events collapses to one timer; a
+    /// `Timer`/reveal clears `refresh_wakeup_at` first (its one-shot has fired
+    /// or may have been lost), so this re-arms fresh. The host `set_timeout`
+    /// itself is performed by `arm_pending_refresh_timer`.
+    fn schedule_refresh_wakeup(&mut self) {
+        let Some(deadline) = self.next_refresh_deadline() else {
+            return;
+        };
+        if let Some(armed) = self.refresh_wakeup_at {
+            if armed <= deadline {
+                return; // an earlier-or-equal wake-up is already armed
+            }
+        }
+        let secs = deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64()
+            .max(0.3);
         self.refresh_timer_needs_arming = true;
         self.refresh_timer_arm_secs = secs;
-        self.refresh_timer_deadline = Some(new_deadline);
+        self.refresh_wakeup_at = Some(deadline);
     }
 
     /// Note that a refresh is wanted, then advance the lifecycle. The entry
     /// point every explicit trigger routes through (via `Action::Refresh` /
     /// the execute arms). SHELL method: may launch a `list-worktrees`.
+    /// `schedule_refresh_wakeup` (run by the shell tail) arms the wake-up.
     fn request_refresh(&mut self) {
         self.refresh_pending = true;
         self.pump_refresh();
     }
 
-    /// Advance the refresh lifecycle exactly one step (issue #216 rework —
-    /// unifies the in-flight guard, backoff, deferred-request drain, timer
-    /// wake-ups, and lost-result recovery). Idempotent and safe to call on
-    /// ANY event, which is how findings 2 and 3 are covered: the shell pumps
-    /// after every event, on the retry timer, and on reveal. SHELL method.
+    /// Advance the refresh lifecycle one step (issue #216 rework — unifies the
+    /// in-flight guard, backoff, deferred-request drain, and lost-result
+    /// recovery). Pure state transitions plus the single `list-worktrees`
+    /// launch; timer arming is `schedule_refresh_wakeup`'s job, run by the
+    /// shell right after. Idempotent and safe on ANY event, which is how
+    /// findings 2 and 3 are covered: the shell pumps after every event, on the
+    /// retry timer, and on reveal. SHELL method (launch does a host call).
     fn pump_refresh(&mut self) {
-        // A wake-up whose deadline has passed has fired (or is about to);
-        // clear it so `request_refresh_wakeup` can arm the NEXT window's timer
-        // rather than dedup against a stale deadline (finding 1, second pass).
-        // The 100ms tolerance matches the host timer's observed early-fire slop
-        // (see `status_message_expired`): a timer firing marginally early must
-        // still clear its deadline, or the dedup would suppress the re-arm and
-        // stall the retry chain until an unrelated event.
-        if let Some(deadline) = self.refresh_timer_deadline {
-            if Instant::now() + Duration::from_millis(100) >= deadline {
-                self.refresh_timer_deadline = None;
-            }
-        }
         // Reap an abandoned in-flight request whose result never landed (lost
         // while the instance was hidden — hidden instances get no results):
         // re-desire the refresh so it relaunches.
@@ -810,21 +839,17 @@ impl State {
                 self.refresh_pending = true;
             }
         }
-        // A fresh in-flight request will drive the next step when its result
-        // lands; just keep a timeout wake-up armed as a lost-result safety net.
-        if let Some((_, started)) = self.refresh_inflight {
-            let remaining = REFRESH_IN_FLIGHT_TIMEOUT_SECS - started.elapsed().as_secs_f64();
-            self.request_refresh_wakeup(remaining);
+        // A fresh in-flight request drives the next step when its result lands.
+        if self.refresh_inflight.is_some() {
             return;
         }
         if !self.wants_refresh() {
             return;
         }
         // Nothing in flight, so only the backoff gate can block. If it does,
-        // stay deferred and arm a wake-up for when it lifts.
+        // stay deferred; `schedule_refresh_wakeup` arms the retry.
         if let Some(remaining) = self.backoff_remaining_secs() {
             if remaining > 0.0 {
-                self.request_refresh_wakeup(remaining);
                 return;
             }
         }
@@ -833,7 +858,6 @@ impl State {
         self.refresh_seq += 1;
         self.refresh_inflight = Some((self.refresh_seq, Instant::now()));
         self.fire_list_worktrees();
-        self.request_refresh_wakeup(REFRESH_IN_FLIGHT_TIMEOUT_SECS);
     }
 
     /// The single `list-worktrees` launch site (issues #216 / #219).
@@ -2205,11 +2229,14 @@ impl State {
             Mode::BrowseWorktrees => {
                 if self.should_render_empty_state() {
                     // Budget the empty state the same way as the populated
-                    // list (issue #216 finding 5, second pass) so a
+                    // list (issue #216 finding 5) so a
                     // first-refresh-failure-with-no-worktrees can't overflow a
                     // short pane: reserve status + marker + footer, collapse
                     // the footer to its version line when tight, then fit the
-                    // header and a truncated empty-state body into what remains.
+                    // header and the empty-state body into what remains. The
+                    // body is budgeted in PHYSICAL rows at `cols` (third pass),
+                    // so a wide instruction line wrapping to two rows can't
+                    // silently overflow.
                     let stale_reason = self.refresh_stale_reason();
                     let stale_lines = usize::from(stale_reason.is_some());
                     let status_lines = ui::status_height(&self.status_message, cols);
@@ -2232,7 +2259,7 @@ impl State {
                     if let Some(reason) = &stale_reason {
                         ui::render_stale_marker(w, reason, self.refresh_error.is_some(), cols);
                     }
-                    let body_lines = ui::render_empty_state(w, body_budget);
+                    let body_lines = ui::render_empty_state(w, body_budget, cols);
                     let used_lines = usize::from(show_header)
                         + stale_lines
                         + body_lines
@@ -2424,32 +2451,42 @@ impl ZellijPlugin for State {
         // message (its original timer can be lost while hidden), so the
         // arm step runs on this path too.
         if let Event::Visible(visible) = event {
+            let was_stale = self.last_rendered_stale;
             let rerender = self.handle_visible(visible);
             if visible {
-                // A reveal: any refresh that was in flight when we hid never
-                // delivered its result (hidden instances receive no Events),
-                // so abandon it and re-drive the lifecycle. Covers the
-                // "result lost while hidden leaves the sidebar frozen" case
-                // (issue #216 finding 3) without waiting out the 30s timeout.
+                // A reveal: any refresh in flight when we hid never delivered
+                // its result, and any wake-up armed while hidden may have been
+                // lost (hidden instances receive no Events). Abandon both and
+                // re-drive the lifecycle from scratch — covers the "result lost
+                // while hidden leaves the sidebar frozen" case (issue #216
+                // finding 3) without waiting out the 30s timeout.
+                self.refresh_wakeup_at = None;
                 if self.refresh_inflight.take().is_some() {
                     self.refresh_pending = true;
                 }
                 self.pump_refresh();
             }
+            self.schedule_refresh_wakeup();
             self.arm_pending_status_timer();
             self.arm_pending_refresh_timer();
-            return rerender;
+            // Repaint if the marker's visibility changed since the last frame.
+            return rerender || (self.is_stale() != was_stale);
         }
         if let Event::Timer(_) = event {
-            let rerender = self.handle_timer();
-            // Timers are untagged monotonic wake-ups (issue #216 finding 3):
-            // reevaluate the refresh lifecycle so a backoff/in-flight deadline
-            // that has now elapsed actually retries, then re-arm if more
-            // waiting remains.
+            // A delivered Timer means our (untagged) one-shot fired — forget
+            // the armed deadline unconditionally and reschedule from current
+            // state (issue #216 finding 1/3, third pass). No tolerance-window
+            // inference, so an early fire can't leave a phantom deadline.
+            self.refresh_wakeup_at = None;
+            let was_stale = self.last_rendered_stale;
+            let status_rerender = self.handle_timer();
             self.pump_refresh();
+            self.schedule_refresh_wakeup();
             self.arm_pending_status_timer(); // early-fire re-chain
             self.arm_pending_refresh_timer();
-            return rerender;
+            // Repaint on a status change OR when the stale marker's visibility
+            // flipped (e.g. the grace deadline just elapsed, finding B).
+            return status_rerender || (self.is_stale() != was_stale);
         }
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
@@ -2544,8 +2581,10 @@ impl ZellijPlugin for State {
         // findings 2 & 3): drains a deferred refresh the moment the gate
         // reopens, reaps a timed-out in-flight request, and re-arms the retry
         // wake-up — so a change is never dropped and a stale marker never
-        // stops retrying. Idempotent; a no-op when nothing is owed.
+        // stops retrying. `schedule_refresh_wakeup` dedups against the armed
+        // deadline, so a whole window of events collapses to one timer.
         self.pump_refresh();
+        self.schedule_refresh_wakeup();
         self.arm_pending_status_timer();
         self.arm_pending_refresh_timer();
         true
@@ -2570,6 +2609,7 @@ impl ZellijPlugin for State {
         // an invalidate pipe that arrives mid-refresh is deferred by
         // `pump_refresh`, not dropped, and drained when the gate reopens.
         self.pump_refresh();
+        self.schedule_refresh_wakeup();
         self.arm_pending_status_timer();
         self.arm_pending_refresh_timer();
         true
@@ -2578,6 +2618,10 @@ impl ZellijPlugin for State {
     fn render(&mut self, rows: usize, cols: usize) {
         self.last_rows = rows;
         self.last_cols = cols;
+        // Record what this frame shows so the timer/reveal paths can tell when
+        // the stale marker's visibility flips and force a repaint (issue #216
+        // finding B, third pass).
+        self.last_rendered_stale = self.is_stale();
         self.render_to(&mut std::io::stdout(), rows, cols);
     }
 }
@@ -4454,47 +4498,80 @@ mod tests {
     }
 
     // Finding 1 (2nd pass): a whole in-flight/backoff window arms ONE timer,
-    // not one per event. `pump_refresh` requests the wake-up for a CONSTANT
-    // absolute deadline each event (remaining shrinks exactly as time passes,
-    // so `now + remaining` is fixed at `started + window`); this exercises the
-    // dedup in the pure `request_refresh_wakeup` directly (calling
-    // `pump_refresh` in a unit test would pull in the host `run_command`
-    // shim and fail to link).
+    // not one per event. `schedule_refresh_wakeup` recomputes the same
+    // constant in-flight-timeout deadline each event and dedups against the
+    // armed one. (It is pure — calling `pump_refresh`/`update` in a unit test
+    // would pull in the host `run_command`/`set_timeout` shims and fail to
+    // link, which is why the whole suite tests pure handlers only.)
     #[test]
-    fn repeated_wakeups_for_one_window_request_a_single_timer() {
+    fn repeated_scheduling_in_one_window_arms_a_single_timer() {
         let mut s = State::default();
-        let started = Instant::now();
+        s.refresh_inflight = Some((1, Instant::now())); // one in-flight window
         let mut arms = 0;
         for _ in 0..100 {
-            let remaining = REFRESH_IN_FLIGHT_TIMEOUT_SECS - started.elapsed().as_secs_f64();
-            s.request_refresh_wakeup(remaining);
+            s.schedule_refresh_wakeup(); // the shell tail firing on 100 events
             if s.refresh_timer_needs_arming {
                 arms += 1;
                 s.refresh_timer_needs_arming = false; // the shell arms & consumes it
             }
         }
-        assert_eq!(arms, 1, "100 events in one window must request exactly one host timer");
+        assert_eq!(arms, 1, "100 events in one window must arm exactly one host timer");
     }
 
     #[test]
-    fn only_a_strictly_earlier_deadline_rearms_the_timer() {
+    fn timer_reschedules_and_only_an_earlier_deadline_rearms() {
         let mut s = State::default();
-        s.request_refresh_wakeup(30.0);
-        assert!(s.refresh_timer_needs_arming, "first request arms");
+        s.refresh_inflight = Some((1, Instant::now()));
+        s.schedule_refresh_wakeup();
+        assert!(s.refresh_timer_needs_arming, "first schedule arms the in-flight timeout");
         s.refresh_timer_needs_arming = false;
 
-        s.request_refresh_wakeup(40.0);
-        assert!(!s.refresh_timer_needs_arming, "a later deadline reuses the outstanding timer");
+        s.schedule_refresh_wakeup();
+        assert!(!s.refresh_timer_needs_arming, "an already-armed window does not re-arm");
 
-        s.request_refresh_wakeup(1.0);
-        assert!(s.refresh_timer_needs_arming, "a strictly earlier deadline arms a new timer");
+        // A newly-appearing EARLIER deadline (the grace boundary) pre-empts the
+        // armed 30s in-flight timeout.
+        s.set_cache_dirty(true);
+        s.schedule_refresh_wakeup();
+        assert!(s.refresh_timer_needs_arming, "an earlier grace deadline arms a new timer");
         s.refresh_timer_needs_arming = false;
 
-        // Once the outstanding timer has fired (pump_refresh clears the
-        // elapsed deadline), the next window arms afresh.
-        s.refresh_timer_deadline = None;
-        s.request_refresh_wakeup(30.0);
-        assert!(s.refresh_timer_needs_arming, "a new window after the timer fired re-arms");
+        // A delivered Timer clears the armed record unconditionally; the next
+        // schedule re-arms afresh — no phantom deadline can suppress it
+        // (finding 3, third pass).
+        s.refresh_wakeup_at = None;
+        s.schedule_refresh_wakeup();
+        assert!(s.refresh_timer_needs_arming, "after a timer fires, the next wake-up re-arms");
+    }
+
+    // Finding B (third pass): the grace boundary must (1) be a scheduled
+    // wake-up so a Timer actually fires there, and (2) flip staleness
+    // visibility so the timer path's `is_stale() != last_rendered_stale`
+    // decision repaints. (update() itself can't be unit-tested — it reaches
+    // the host `set_timeout` shim — so this asserts the two pure pieces the
+    // timer path composes.)
+    #[test]
+    fn grace_boundary_is_scheduled_and_flips_stale_visibility() {
+        let mut s = state_with_worktrees();
+        s.set_cache_dirty(true);
+        s.refresh_inflight = Some((1, Instant::now()));
+        s.last_rendered_stale = false; // the last frame (under grace) showed no marker
+
+        // The earliest wake-up is the grace boundary, not the 30s in-flight
+        // timeout — so a Timer fires when the marker should appear.
+        let deadline = s.next_refresh_deadline().expect("a wake-up is scheduled");
+        let grace_at = s.cache_dirty_since.unwrap() + Duration::from_secs_f64(STALE_GRACE_SECS);
+        assert_eq!(deadline, grace_at, "the earliest wake-up is the grace boundary");
+
+        // When that wake-up fires (grace elapsed), staleness flips visible,
+        // so the timer path repaints instead of silently reaping.
+        s.cache_dirty_since = Some(Instant::now() - Duration::from_secs_f64(STALE_GRACE_SECS + 0.5));
+        assert!(s.is_stale(), "past grace, the list is flagged stale even while in flight");
+        assert_ne!(
+            s.is_stale(),
+            s.last_rendered_stale,
+            "the timer path's repaint decision (is_stale != last_rendered_stale) is true here"
+        );
     }
 
     // Finding 4 (2nd pass): a known-stale list must stay flagged even while a

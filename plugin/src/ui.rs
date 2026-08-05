@@ -282,24 +282,64 @@ pub fn render_version_only(w: &mut impl Write, version: &str, cols: usize) {
     write!(w, "  {DIM}{version_line}{RESET}").unwrap();
 }
 
-/// Render up to `max_lines` of the six-line empty-state body, returning how
-/// many it actually wrote. Truncating from the full six lets an undersized
-/// pane (issue #216 finding 5, second pass) drop the body rather than overflow
-/// `rows`; a normally-sized pane passes a budget ≥ 6 and gets the whole thing.
-pub fn render_empty_state(w: &mut impl Write, max_lines: usize) -> usize {
-    let lines = [
-        String::new(),
-        format!("  {BOLD}No managed worktrees yet.{RESET}"),
-        format!("  {DIM}Pick a branch or type a new one to get started.{RESET}"),
-        String::new(),
-        format!("  {DIM}n{RESET}  pick an existing branch"),
-        format!("  {DIM}i{RESET}  type a new branch name"),
+/// Render the empty-state body within a `budget_rows` PHYSICAL-row budget at
+/// `cols` width, returning how many physical rows it actually wrote (issue
+/// #216 finding 5, third pass). Each line's physical height accounts for
+/// wrapping at `cols` (a wide instruction line is two rows at a narrow width),
+/// so the count the caller pads against equals what the terminal draws — the
+/// earlier logical-line count silently overflowed. When everything fits, the
+/// full six-line body (blank separators included) renders unchanged. When it
+/// doesn't, the blank separators are dropped first and the meaningful content
+/// lines are kept in visual order, each included only if its wrapped height
+/// still fits — so "No managed worktrees yet." never disappears while a blank
+/// survives (the non-monotonic bug), and the headline is preferred over the
+/// lower hints.
+pub fn render_empty_state(w: &mut impl Write, budget_rows: usize, cols: usize) -> usize {
+    // (visible text for width, styled line, is_blank) in visual order.
+    let items: [(&str, String, bool); 6] = [
+        ("", String::new(), true),
+        ("  No managed worktrees yet.", format!("  {BOLD}No managed worktrees yet.{RESET}"), false),
+        (
+            "  Pick a branch or type a new one to get started.",
+            format!("  {DIM}Pick a branch or type a new one to get started.{RESET}"),
+            false,
+        ),
+        ("", String::new(), true),
+        ("  n  pick an existing branch", format!("  {DIM}n{RESET}  pick an existing branch"), false),
+        ("  i  type a new branch name", format!("  {DIM}i{RESET}  type a new branch name"), false),
     ];
-    let n = max_lines.min(lines.len());
-    for line in &lines[..n] {
-        writeln!(w, "{line}").unwrap();
+    let height = |plain: &str| -> usize {
+        if cols == 0 {
+            1
+        } else {
+            visible_width(plain).max(1).div_ceil(cols)
+        }
+    };
+
+    let total: usize = items.iter().map(|(plain, _, _)| height(plain)).sum();
+    let mut written = 0;
+    if total <= budget_rows {
+        // Everything fits — render the full body verbatim.
+        for (plain, styled, _) in &items {
+            writeln!(w, "{styled}").unwrap();
+            written += height(plain);
+        }
+    } else {
+        // Tight: drop the blank separators, keep meaningful lines in visual
+        // order, each only if its wrapped height still fits the budget.
+        for (plain, styled, is_blank) in &items {
+            if *is_blank {
+                continue;
+            }
+            let h = height(plain);
+            if written + h > budget_rows {
+                continue;
+            }
+            writeln!(w, "{styled}").unwrap();
+            written += h;
+        }
     }
-    n
+    written
 }
 
 pub fn render_sidebar_list(

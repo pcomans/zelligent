@@ -3,7 +3,7 @@ source: tests/render_snapshots.rs
 expression: output
 ---
 [?1049h[H[2J  [33m⚠ stale · retrying — too many open fi…[0m
-
+  [1mNo managed worktrees yet.[0m
 
   [31mFailed to list worktrees: too many open files[0m
   [2mVERSION                     [0m

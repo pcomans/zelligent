@@ -220,15 +220,22 @@ pumped by the update/pipe shell after *every* event) unifies five concerns:
 - **Deferral, not drop.** A trigger that arrives while the gate is closed sets
   `refresh_pending` (drained the moment the gate reopens) instead of being
   lost — a tab-set change or invalidate mid-refresh always eventually runs.
-- **Timer wake-ups, deduplicated.** `pump_refresh` arms a `set_timeout` (via
-  `refresh_timer_needs_arming`, mirroring the status-timer split) for the
-  backoff/in-flight deadline, so a stale marker actually *retries* with no
-  external event and a lost result self-heals. Because `set_timeout` arms an
-  independent one-shot per call and `pump_refresh` runs on every event,
-  `request_refresh_wakeup` tracks the outstanding wake-up's absolute deadline
-  (`refresh_timer_deadline`) and arms a new host timer only when none is
-  pending or a strictly earlier one is needed — so a whole window of unrelated
-  events collapses to a single timer, not one per event.
+- **Single-deadline wake-up scheduler.** `set_timeout` arms an independent
+  one-shot per call and the lifecycle is pumped on every event, so a naive
+  arm-per-event would spawn N timers. `next_refresh_deadline` computes the
+  earliest instant a wake-up is needed (in-flight timeout, backoff expiry, or
+  the `cache_dirty_since + STALE_GRACE_SECS` grace boundary), and
+  `schedule_refresh_wakeup` arms a host timer only when none is armed
+  (`refresh_wakeup_at`) or a strictly earlier one is now needed — so a whole
+  window of unrelated events collapses to one timer. Because Timer events are
+  untagged, EVERY delivered `Event::Timer` clears `refresh_wakeup_at`
+  unconditionally and reschedules from current state; there is no
+  tolerance-window inference, so a host timer firing early can never leave a
+  phantom deadline that suppresses re-arming. A reveal likewise clears it
+  (a timer armed while hidden may have been lost). The grace boundary being a
+  scheduled deadline is what makes the stale marker *appear* with no other
+  event, and the Timer/reveal paths repaint when `is_stale()` differs from the
+  last painted frame (`last_rendered_stale`).
 
 Because the branch list is consumed only by the `n` picker, `list-branches`
 is fetched lazily — only alongside a *successful* worktree refresh — so the
@@ -246,7 +253,10 @@ so the marker persists until a *current-generation* success. The full error
 is recoverable on demand via the `e` key. The marker occupies one budgeted
 layout row; on an undersized pane both the populated and empty-state arms
 degrade through the same budget (footer collapses to its version line, header
-drops, body truncates, item viewport may reach zero) rather than overflow.
+drops, item viewport may reach zero) rather than overflow. The empty-state
+body is budgeted in *physical* rows at the pane width, so a wide instruction
+line wrapping to two rows can't silently overflow, and meaningful text is kept
+(headline first) while blank separators are dropped first.
 
 ## Key files
 
