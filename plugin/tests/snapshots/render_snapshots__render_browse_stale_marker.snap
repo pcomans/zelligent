@@ -1,0 +1,24 @@
+---
+source: tests/render_snapshots.rs
+expression: output
+---
+[?1049h[H[2J[1m[36m zelligent ─────────────────────────────────────────────────────────────────────[0m
+  [33m⚠ stale · retrying — too many open files · e: details[0m
+
+[36m▌[0m [1m[36mfeat-a                                                                      [0m  
+[36m▌[0m [2mbranch: feat-a                                                              [0m
+  feat-b                                                                        
+  [2mbranch: feat-b                                                              [0m
+  feat-c                                                                        
+  [2mbranch: feat-c                                                              [0m
+
+
+
+
+
+
+
+
+
+  [2m↑/k[0m up  [2m↓/j[0m down  [2mEnter[0m open  [2mn[0m branch  [2mi[0m new  [2md[0m remove  [2mr[0m refresh
+  [2mVERSION                                                             [0m

@@ -40,6 +40,11 @@ pub struct SidebarLayout {
     /// Whether a blank separator line is drawn between the header (or the
     /// pane top, if the header itself was dropped) and the first item.
     pub show_separator: bool,
+    /// Physical rows the persistent `stale · retrying` marker occupies this
+    /// frame (issue #216): 1 when the worktree cache is flagged stale, else
+    /// 0. Drawn between the header and the separator, so it counts toward
+    /// `leading_lines()` and the mouse-click item offset.
+    pub stale_lines: usize,
     /// The scrollable item viewport: which items are visible, and where.
     pub viewport: SidebarViewport,
     /// Physical rows the status message will occupy this frame, including
@@ -55,7 +60,7 @@ impl SidebarLayout {
     /// blank separator). This is exactly the offset mouse-click line
     /// numbers need before dividing by 2 to find an item index.
     pub fn leading_lines(&self) -> usize {
-        self.show_header as usize + self.show_separator as usize
+        self.show_header as usize + self.stale_lines + self.show_separator as usize
     }
 }
 
@@ -106,11 +111,31 @@ pub fn sidebar_layout(
     item_count: usize,
     selected: usize,
     status_message: &str,
+    stale: bool,
 ) -> SidebarLayout {
-    let footer_lines = if cols >= 55 { 3 } else { 4 };
     let status_lines = status_height(status_message, cols);
+    // The persistent stale marker (issue #216) is reserved up front, ahead
+    // of the header/separator degradation decision: staleness is more
+    // important to convey than the repo-name banner, so on a short pane the
+    // marker survives while the header/separator are sacrificed first.
+    let stale_lines = usize::from(stale);
 
-    let content_budget = rows.saturating_sub(status_lines + footer_lines);
+    // Footer degradation for undersized panes (issue #216 finding 5). The
+    // full footer (blank + hints + version) is 3–4 rows; on a pane too short
+    // to also fit the status, the marker, and at least one two-row item, it
+    // collapses to the single version line so those never overflow `rows`
+    // and force the header-swallowing scroll (#135/#136). One line is always
+    // kept as the terminal's bottom anchor (see `render_footer`), so the
+    // final write stays a newline-less `write!`.
+    let full_footer = if cols >= 55 { 3 } else { 4 };
+    let overhead = status_lines + stale_lines;
+    let footer_lines = if rows >= overhead + 2 + full_footer {
+        full_footer
+    } else {
+        1
+    };
+
+    let content_budget = rows.saturating_sub(overhead + footer_lines);
     let (show_header, show_separator) = if content_budget >= MIN_ROWS_HEADER_AND_SEPARATOR {
         (true, true)
     } else if content_budget >= MIN_ROWS_HEADER_ONLY {
@@ -121,7 +146,12 @@ pub fn sidebar_layout(
 
     let leading = show_header as usize + show_separator as usize;
     let item_rows_budget = content_budget.saturating_sub(leading);
-    let max_items = (item_rows_budget / 2).max(1);
+    // No `.max(1)` here (finding 5): on a truly tiny pane the item viewport
+    // may legitimately shrink to zero rather than overflow. The full-footer
+    // guard above still reserves room for one item on any normally-sized
+    // pane, so the frozen "an item row is never sacrificed" rule (#135/#136)
+    // holds for every case a user actually sees.
+    let max_items = item_rows_budget / 2;
     let start = if selected >= max_items {
         selected - max_items + 1
     } else {
@@ -136,6 +166,7 @@ pub fn sidebar_layout(
     SidebarLayout {
         show_header,
         show_separator,
+        stale_lines,
         viewport,
         status_lines,
         footer_lines,
@@ -221,17 +252,100 @@ pub fn render_header(w: &mut impl Write, repo_name: &str, cols: usize) {
     writeln!(w, "{BOLD}{CYAN}{title}{}{RESET}", "─".repeat(pad)).unwrap();
 }
 
-pub fn render_empty_state(w: &mut impl Write) {
-    writeln!(w).unwrap();
-    writeln!(w, "  {BOLD}No managed worktrees yet.{RESET}").unwrap();
-    writeln!(
-        w,
-        "  {DIM}Pick a branch or type a new one to get started.{RESET}"
-    )
-    .unwrap();
-    writeln!(w).unwrap();
-    writeln!(w, "  {DIM}n{RESET}  pick an existing branch").unwrap();
-    writeln!(w, "  {DIM}i{RESET}  type a new branch name").unwrap();
+/// Persistent `stale · retrying` marker (issue #216). Drawn between the
+/// header and the item list whenever `State::is_stale()` holds. Yellow (a
+/// warning, not the red alarm of a hard error) and carries the short `reason`
+/// inline. When `has_details` (a failed refresh has full error text
+/// recoverable via the `e` key) it advertises `e: details`; a bare
+/// unsatisfied-invalidation marker omits the hint since there's nothing extra
+/// to show. Exactly one physical line: the whole string is clipped to the
+/// pane width (prefix included) so it can never wrap and throw off the layout
+/// arithmetic. The hint is dropped first when width is tight, so the reason
+/// survives on a narrow pane.
+pub fn render_stale_marker(w: &mut impl Write, reason: &str, has_details: bool, cols: usize) {
+    let base = format!("⚠ stale · retrying — {reason}");
+    let content = if has_details {
+        let with_hint = format!("{base} · e: details");
+        if visible_width(&with_hint) + 2 <= cols {
+            with_hint
+        } else {
+            base
+        }
+    } else {
+        base
+    };
+    let clipped = clip_to_width(&content, cols.saturating_sub(2));
+    writeln!(w, "  {YELLOW}{clipped}{RESET}").unwrap();
+}
+
+/// The version-only footer for an undersized pane (issue #216 finding 5):
+/// the single bottom-anchor line `render_footer` always ends with, without
+/// the leading blank or the command hints there's no room for. Newline-less
+/// `write!` like `render_footer`, so a frame that fills `rows` exactly does
+/// not scroll (#135/#136).
+pub fn render_version_only(w: &mut impl Write, version: &str, cols: usize) {
+    let version_line = fit_text(version, cols.saturating_sub(2));
+    write!(w, "  {DIM}{version_line}{RESET}").unwrap();
+}
+
+/// Render the empty-state body within a `budget_rows` PHYSICAL-row budget at
+/// `cols` width, returning how many physical rows it actually wrote (issue
+/// #216 finding 5, third pass). Each line's physical height accounts for
+/// wrapping at `cols` (a wide instruction line is two rows at a narrow width),
+/// so the count the caller pads against equals what the terminal draws — the
+/// earlier logical-line count silently overflowed. When everything fits, the
+/// full six-line body (blank separators included) renders unchanged. When it
+/// doesn't, the blank separators are dropped first and the meaningful content
+/// lines are kept in visual order, each included only if its wrapped height
+/// still fits — so "No managed worktrees yet." never disappears while a blank
+/// survives (the non-monotonic bug), and the headline is preferred over the
+/// lower hints.
+pub fn render_empty_state(w: &mut impl Write, budget_rows: usize, cols: usize) -> usize {
+    // (visible text for width, styled line, is_blank) in visual order.
+    let items: [(&str, String, bool); 6] = [
+        ("", String::new(), true),
+        ("  No managed worktrees yet.", format!("  {BOLD}No managed worktrees yet.{RESET}"), false),
+        (
+            "  Pick a branch or type a new one to get started.",
+            format!("  {DIM}Pick a branch or type a new one to get started.{RESET}"),
+            false,
+        ),
+        ("", String::new(), true),
+        ("  n  pick an existing branch", format!("  {DIM}n{RESET}  pick an existing branch"), false),
+        ("  i  type a new branch name", format!("  {DIM}i{RESET}  type a new branch name"), false),
+    ];
+    let height = |plain: &str| -> usize {
+        if cols == 0 {
+            1
+        } else {
+            visible_width(plain).max(1).div_ceil(cols)
+        }
+    };
+
+    let total: usize = items.iter().map(|(plain, _, _)| height(plain)).sum();
+    let mut written = 0;
+    if total <= budget_rows {
+        // Everything fits — render the full body verbatim.
+        for (plain, styled, _) in &items {
+            writeln!(w, "{styled}").unwrap();
+            written += height(plain);
+        }
+    } else {
+        // Tight: drop the blank separators, keep meaningful lines in visual
+        // order, each only if its wrapped height still fits the budget.
+        for (plain, styled, is_blank) in &items {
+            if *is_blank {
+                continue;
+            }
+            let h = height(plain);
+            if written + h > budget_rows {
+                continue;
+            }
+            writeln!(w, "{styled}").unwrap();
+            written += h;
+        }
+    }
+    written
 }
 
 pub fn render_sidebar_list(

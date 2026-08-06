@@ -1,7 +1,7 @@
 pub mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::io::Write;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -45,6 +45,47 @@ pub const VERSION: &str = env!("ZELLIGENT_VERSION");
 /// subsequent actions). See `State::set_status` / `State::handle_timer`.
 pub const STATUS_MESSAGE_TTL_SECS: f64 = 8.0;
 
+/// In-flight guard timeout for a `list-worktrees` refresh (issue #216). A
+/// refresh whose `RunCommandResult` never lands — the instance went hidden
+/// before it completed, and hidden instances receive no Events — would
+/// otherwise pin `list_worktrees_started_at` forever and wedge every future
+/// refresh. Once a launched-but-unanswered refresh is this many seconds old
+/// it is treated as abandoned and a new one may start. Comfortably longer
+/// than any real `git worktree list` while still self-healing a lost result
+/// on the next `TabUpdate` after the window. Uses the WASI monotonic clock
+/// via `Instant`, exactly like `status_message_set_at`.
+pub const REFRESH_IN_FLIGHT_TIMEOUT_SECS: f64 = 30.0;
+
+/// First backoff window after a failed refresh (issue #216). The next
+/// auto-retry (a `cache_dirty`/tab-set-change `Action::Refresh` from
+/// `handle_tab_update`) is suppressed until this much time has passed since
+/// the failure, so a persistent failure — EMFILE at a low `ulimit -n` —
+/// can't respawn two processes on every single `TabUpdate`. This is the
+/// fix for the spin: without it a failed refresh stays `cache_dirty` and
+/// re-fires on the next tab change forever.
+pub const REFRESH_BACKOFF_INITIAL_SECS: f64 = 2.0;
+
+/// Ceiling for the exponential backoff. Each successive failure doubles the
+/// window from `REFRESH_BACKOFF_INITIAL_SECS` up to this cap; a success or a
+/// manual `r` refresh resets it to zero. See issue #216.
+pub const REFRESH_BACKOFF_MAX_SECS: f64 = 60.0;
+
+/// Grace period before an unsatisfied invalidation (`cache_dirty`) that is
+/// still being actively resolved (a refresh in flight) is flagged stale
+/// (issue #216 finding 4, second pass). A healthy spawn/remove clears
+/// `cache_dirty` well within this window, so the marker never flickers on the
+/// happy path — but a replacement refresh that hangs or repeatedly times out
+/// can't hide known-staleness indefinitely: once the dirtiness has persisted
+/// this long the marker shows regardless of in-flight status.
+pub const STALE_GRACE_SECS: f64 = 3.0;
+
+/// Minimum arm for a wake-up host timer (issue #216). A deadline nearer than
+/// this — or already due — is armed for `WAKEUP_FLOOR_SECS` instead of 0, so a
+/// timer always makes forward progress. `schedule_wakeup`'s coverage check
+/// uses the SAME floor as the recording, so a sub-floor deadline isn't seen as
+/// perpetually uncovered and re-armed every event (fifth-pass finding 3).
+pub const WAKEUP_FLOOR_SECS: f64 = 0.3;
+
 // Command context keys used to route RunCommandResult
 pub const CMD_GIT_TOPLEVEL: &str = "git_toplevel";
 pub const CMD_LIST_WORKTREES: &str = "list_worktrees";
@@ -68,6 +109,26 @@ pub const PIPE_INVALIDATE: &str = "zelligent-invalidate";
 /// `State::invalidate_generation` in `handle_list_worktrees` to guard
 /// against the stale-in-flight-refresh race. See #140.
 pub const CTX_GENERATION: &str = "generation";
+
+/// Context key carrying the monotonically increasing request id
+/// (`State::refresh_seq`) a `list-worktrees` refresh was launched under
+/// (issue #216 rework, finding 1). Stamped by `fire_list_worktrees`, echoed
+/// back in `Event::RunCommandResult`, and matched against
+/// `State::refresh_inflight` in `handle_list_worktrees` so a superseded or
+/// timed-out-then-relaunched result can be told apart from the current one
+/// and ignored. Distinct from `CTX_GENERATION`, which tracks invalidation
+/// freshness rather than request identity. A result carrying no request id
+/// (only ever the case in tests / legacy callers — production always stamps
+/// one) skips the identity gate and is accepted.
+pub const CTX_REQUEST_ID: &str = "request_id";
+
+/// Context key carrying the per-load epoch nonce (`State::load_epoch`) a
+/// `list-worktrees` refresh was launched under (issue #216 seventh pass).
+/// Guards request identity across a HOT RELOAD, where `refresh_seq` resets to
+/// 0 but the old instance's in-flight results survive and would ABA-match the
+/// new instance's ids. A result whose epoch != the current load's is Ignored
+/// (fail closed). Absent (tests/legacy) skips the epoch gate.
+pub const CTX_REQUEST_EPOCH: &str = "request_epoch";
 
 /// Pipe name for "reply with your known agent statuses". Broadcast once by
 /// a plugin instance when its RunCommands grant lands (`Event::
@@ -277,19 +338,24 @@ pub struct State {
     /// covers the other ordering, and is correct even against pre-hide
     /// `self.tabs` because the instance's own tab was active then too).
     pub resync_on_reveal: bool,
-    /// Whether this instance's pane is in the currently visible tab. Gates
-    /// the `PIPE_FOCUS` response: the pipe broadcasts to every instance,
-    /// and only the visible one may focus itself. Starts false and is set
-    /// by `Event::Visible` in both directions — but ALSO forced true by any
-    /// received `TabUpdate`, because zellij delivers Events only to
-    /// instances in the visible tab (live-verified, see
-    /// docs/references/zellij-plugin-api.md). The TabUpdate path covers
-    /// instances that never receive an initial `Visible(true)` (e.g.
-    /// resurrected background tabs never get one, and the active tab's
-    /// instance must not depend on event-vs-load ordering). A hidden
-    /// instance receives no Events at all, so nothing can wrongly flip
-    /// this to true while hidden.
-    pub is_visible: bool,
+    /// TRI-STATE visibility (issue #216 seventh pass): `None` = unknown since
+    /// this WASM instance loaded, `Some(true)` = visible, `Some(false)` =
+    /// explicitly hidden. Authoritative only from `Event::Visible(true/false)`
+    /// and genuine user input (`Key`/`Mouse`, which reach only a focused pane)
+    /// — NOT from `TabUpdate`/`PaneUpdate` or directed async results, which
+    /// zellij delivers to background instances too (zellij-server 0.44.3).
+    ///
+    /// The tri-state exists because a HOT PLUGIN RELOAD makes a fresh
+    /// `State::default` (`visibility = None`) with the same plugin id and sends
+    /// NO `Visible` transition. Treating `None` as "hidden" would wedge a
+    /// reloaded visible sidebar (its bootstrap refresh would be gated and
+    /// nothing repairs visibility). So `None` is treated as pump-ALLOWED
+    /// (`not_hidden`) — bootstrap semantics matching main's historical
+    /// behavior where every fresh instance fires its initial refresh — while
+    /// only an EXPLICIT `Some(false)` gates the refresh lifecycle hard. The
+    /// strict `is_visible()` (`Some(true)`) still gates the `PIPE_FOCUS`
+    /// self-focus, so an unknown/background instance never steals focus.
+    pub visibility: Option<bool>,
     /// When the currently displayed `status_message` was set (`None` when
     /// no message is showing). THE source of truth for expiry (#152):
     /// `handle_timer` and `handle_visible` clear the message iff it is at
@@ -305,21 +371,115 @@ pub struct State {
     /// `handle_visible`). Uses the WASI monotonic clock, available to the
     /// plugin sandbox.
     pub status_message_set_at: Option<Instant>,
-    /// Set by `set_status` when it arms a new timer; consumed by the
-    /// `ZellijPlugin::update`/`pipe` shell, which performs the actual
-    /// `zellij_tile::shim::set_timeout` host call and clears this flag.
-    /// Keeps the host call out of `set_status` (a pure, unit-tested state
-    /// mutation) — the same imperative-shell/pure-core split already used
-    /// for `Action`/`execute` and `fire_invalidate_broadcast`. Tests
-    /// observe this flag directly instead of a real timer being armed.
-    pub status_timer_needs_arming: bool,
-    /// Seconds the next wake-up should be armed for. `set_status` requests
-    /// the full TTL; `handle_visible`/`handle_timer` request only the
-    /// REMAINING TTL of the current message — arming a full TTL on reveal
-    /// would let a nearly-expired message live almost twice its lifetime,
-    /// and an early-firing timer must re-chain for what's left rather than
-    /// leave the message stranded until an unrelated event.
-    pub status_timer_arm_secs: f64,
+    /// Set by `schedule_wakeup` when the ONE consolidated wake-up timer needs
+    /// (re)arming; consumed by the `update`/`pipe` shell's `arm_pending_timer`,
+    /// which performs the actual `zellij_tile::shim::set_timeout` host call and
+    /// clears this flag. Keeps the host call out of the pure lifecycle logic —
+    /// the same imperative-shell/pure-core split used for `Action`/`execute`.
+    /// Tests observe this flag directly instead of a real timer being armed.
+    pub timer_needs_arming: bool,
+    /// Seconds the consolidated wake-up should be armed for — always the time
+    /// from now to the earliest live deadline (status expiry OR a refresh
+    /// deadline), computed by `schedule_wakeup`.
+    pub timer_arm_secs: f64,
+    /// Full text of the most recent FAILED refresh, or `None` when the last
+    /// attempt succeeded (issue #216). Unlike `status_message` this is STATE,
+    /// not a TTL'd event, and is recoverable in full on demand via the `e`
+    /// key (`handle_key_browse`). It is one of the two inputs to
+    /// `is_stale()`/`refresh_stale_reason()` (the other is `cache_dirty`),
+    /// which drive the persistent `stale · retrying` marker.
+    pub refresh_error: Option<String>,
+    /// The single in-flight `list-worktrees` request as `(request id,
+    /// launched at)`, or `None` when nothing is running (issue #216 rework,
+    /// finding 1). Every launch stamps a fresh `refresh_seq` id into the
+    /// command context; only a result whose id matches this may touch
+    /// refresh/backoff/error state or fire the follow-on branch fetch — a
+    /// superseded or timed-out-then-relaunched result is ignored, so a late
+    /// result can't clear a newer request's guard or overwrite its state.
+    /// The `Instant` drives `REFRESH_IN_FLIGHT_TIMEOUT_SECS` abandonment of a
+    /// result lost while the instance was hidden. WASI monotonic clock.
+    pub refresh_inflight: Option<(u64, Instant)>,
+    /// Ever-increasing refresh request counter (issue #216 rework). Bumped
+    /// once per launch and stamped into the context as `CTX_REQUEST_ID` so
+    /// the result can be matched back to `refresh_inflight`.
+    pub refresh_seq: u64,
+    /// A refresh was wanted but couldn't launch (gate closed) — so it is
+    /// DEFERRED, not dropped (issue #216 finding 2). Drained by `pump_refresh`
+    /// the moment the gate reopens (active result landing, timer wake-up, or
+    /// reveal), so a tab-set change or invalidate that arrives mid-refresh is
+    /// never silently lost. `wants_refresh()` = this OR `cache_dirty`.
+    pub refresh_pending: bool,
+    /// Start of the current backoff window, or `None` when not backing off
+    /// (issue #216). Auto-retries are suppressed while `elapsed() <
+    /// refresh_backoff_secs`. Reset by a success or a manual `r` refresh.
+    pub refresh_failed_at: Option<Instant>,
+    /// Current backoff window in seconds (issue #216): `0` when not backing
+    /// off, `REFRESH_BACKOFF_INITIAL_SECS` on the first failure, doubling to
+    /// `REFRESH_BACKOFF_MAX_SECS` on each subsequent failure. What stops the
+    /// spin: repeated failures widen the window instead of respawning on
+    /// every `TabUpdate`.
+    pub refresh_backoff_secs: f64,
+    /// Fire-times of the host wake-up one-shots currently outstanding (issue
+    /// #216 finding 1, fifth pass). `set_timeout` arms an UNCANCELLABLE untagged
+    /// one-shot per call, so when an earlier deadline preempts a later one the
+    /// old timer stays queued and later delivers — we must ACCOUNT for it, not
+    /// pretend it's gone. `schedule_wakeup` arms (and pushes here) only when no
+    /// outstanding arm already fires at-or-before the desired deadline; each
+    /// delivered `Event::Timer` retires the earliest arm (the one that fired).
+    /// So a stale late delivery retires its own arm and re-arms nothing (a
+    /// remaining arm already covers the future deadline) — no duplicate, and
+    /// the count is bounded by the number of in-flight preemptions (≈2). Fired
+    /// arms are purged (`retain(> now)`), which also drops any that fired-and-
+    /// were-lost while the instance was hidden. Invariant: a future desired
+    /// deadline is always covered by some outstanding arm — see
+    /// `schedule_wakeup`'s `debug_assert`.
+    pub outstanding_arms: Vec<Instant>,
+    /// When `cache_dirty` last transitioned false→true, or `None` while the
+    /// cache is clean (issue #216 finding 4, second pass). Lets `is_stale`
+    /// flag a known-but-unsatisfied invalidation that a hung/repeatedly-failing
+    /// replacement refresh has failed to resolve within `STALE_GRACE_SECS`,
+    /// without flickering the marker during the sub-second in-flight window of
+    /// a healthy refresh. Maintained by `set_cache_dirty`; its `+
+    /// STALE_GRACE_SECS` instant is a scheduler deadline so the marker's
+    /// appearance actually triggers a render (finding B, third pass).
+    pub cache_dirty_since: Option<Instant>,
+    /// Whether the last painted frame showed the `stale · retrying` marker
+    /// (issue #216 finding B, third pass). The timer/reveal paths compare
+    /// `is_stale()` against this to decide whether a wake-up must repaint —
+    /// e.g. the grace deadline firing flips staleness visible with no other
+    /// state change, and that transition must reach the screen. Updated by
+    /// `render`.
+    pub last_rendered_stale: bool,
+    /// Per-load epoch nonce guarding request identity across a HOT RELOAD
+    /// (issue #216 seventh pass). A reload makes a fresh `State` — resetting
+    /// `refresh_seq` to 0 — but the OLD instance's in-flight `run_command`
+    /// results survive and are delivered to the reused plugin id, so an old
+    /// `request_id = 1` would ABA-match the new instance's `request_id = 1`,
+    /// clear its in-flight guard, and get the genuine new result Ignored.
+    /// Every launch stamps this epoch into `CTX_REQUEST_EPOCH`; a result whose
+    /// epoch != the current load's — INCLUDING an absent epoch from a
+    /// pre-epoch binary in flight across the upgrade reload — is Ignored (fail
+    /// closed). Set once in `load` from a wall-clock nonce (always non-zero in
+    /// production). The `0` value is the enforce sentinel: it means "no epoch
+    /// yet" and only occurs in unit tests (`State::default`, no `load` call),
+    /// where the gate is skipped so legacy fixtures that stamp no epoch still
+    /// pass. See the epoch gate in `handle_list_worktrees`.
+    pub load_epoch: u64,
+}
+
+/// Outcome of applying a `list-worktrees` result (issue #216 rework). The
+/// pure `handle_list_worktrees` returns this so the shell can fire the
+/// follow-on branch fetch (`Succeeded` only, #219) and knows a superseded
+/// result changed nothing (`Ignored`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The result's request id didn't match the in-flight request — a
+    /// superseded/late/timed-out result. No state was touched.
+    Ignored,
+    /// The active refresh completed non-zero; error/backoff state was set.
+    Failed,
+    /// The active refresh succeeded; the list was applied.
+    Succeeded,
 }
 
 /// Sanitize a user-supplied string into a valid git branch name.
@@ -394,6 +554,33 @@ pub fn parse_branches(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Condense a full refresh error into a short, sidebar-width reason for the
+/// persistent `stale · retrying` marker (issue #216). The sidebar is far too
+/// narrow for the full text of errors like the EMFILE one that motivated
+/// this (or the enterprise-policy one in #212), so we map the common cases
+/// to a fixed human phrase and fall back to the first line of the error
+/// (stripped of our own `Failed to list worktrees:` prefix). The renderer
+/// clips the result to the pane width regardless.
+pub fn short_refresh_reason(full: &str) -> String {
+    let lower = full.to_lowercase();
+    if lower.contains("too many open files") || lower.contains("os error 24") {
+        return "too many open files".to_string();
+    }
+    if lower.contains("permission denied") || lower.contains("os error 13") {
+        return "permission denied".to_string();
+    }
+    let first = full.lines().next().unwrap_or(full).trim();
+    let stripped = first
+        .strip_prefix("Failed to list worktrees:")
+        .unwrap_or(first)
+        .trim();
+    if stripped.is_empty() {
+        "refresh failed".to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
 /// Wrapping navigation: move `current` by `delta` within `[0, len)`, wrapping around.
 pub fn wrap_navigate(current: usize, len: usize, delta: isize) -> usize {
     if len == 0 {
@@ -409,12 +596,12 @@ impl State {
     /// — every call site that used to assign the fields directly now goes
     /// through here, so a future call site can't forget the timer.
     ///
-    /// A non-empty `msg` stamps `status_message_set_at` and sets
-    /// `status_timer_needs_arming` so the imperative shell (`update`/
-    /// `pipe`) arms a wake-up timer right after this event finishes
-    /// processing. Re-setting within the TTL simply re-stamps — the age
-    /// check in `handle_timer` gives the newer message its own full TTL
-    /// no matter how many older timers are still in flight.
+    /// A non-empty `msg` stamps `status_message_set_at`; the shell's
+    /// `schedule_wakeup` (run after every event) then arms the single
+    /// consolidated wake-up timer for this message's expiry. Re-setting within
+    /// the TTL simply re-stamps — the age check in `handle_timer` gives the
+    /// newer message its own full TTL no matter how many older timers are
+    /// still in flight.
     ///
     /// An empty `msg` (clearing the status) resets the stamp AND any
     /// not-yet-performed arm request: there is nothing left to expire,
@@ -422,16 +609,16 @@ impl State {
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         let msg = msg.into();
         self.status_is_error = is_error;
-        if msg.is_empty() {
-            self.status_message = msg;
-            self.status_message_set_at = None;
-            self.status_timer_needs_arming = false;
-            return;
-        }
         self.status_message = msg;
-        self.status_message_set_at = Some(Instant::now());
-        self.status_timer_needs_arming = true;
-        self.status_timer_arm_secs = STATUS_MESSAGE_TTL_SECS;
+        // Stamp the age; the shell tail's `schedule_wakeup` arms (or re-arms
+        // earlier) the single consolidated timer for this message's expiry.
+        // An empty message just clears the stamp — no timer to retract, since
+        // the scheduler simply won't include a status deadline next time.
+        self.status_message_set_at = if self.status_message.is_empty() {
+            None
+        } else {
+            Some(Instant::now())
+        };
     }
 
     /// True when the currently displayed message has lived out its TTL.
@@ -444,24 +631,13 @@ impl State {
             .is_some_and(|t| t.elapsed().as_secs_f64() >= STATUS_MESSAGE_TTL_SECS - 0.25)
     }
 
-    /// Seconds of TTL the current message has left (floored at a small
-    /// positive wake-up so a nearly-expired message still gets a timer).
-    fn status_message_remaining_secs(&self) -> f64 {
-        self.status_message_set_at
-            .map(|t| (STATUS_MESSAGE_TTL_SECS - t.elapsed().as_secs_f64()).max(0.3))
-            .unwrap_or(STATUS_MESSAGE_TTL_SECS)
-    }
-
-    /// Handle `Event::Timer` — a `STATUS_MESSAGE_TTL_SECS` wake-up armed by
-    /// the shell after a `set_status`. Pure (no host calls) so it stays
-    /// unit-testable; the real `set_timeout` call lives in the
-    /// `update`/`pipe` shell.
-    ///
-    /// The timer is only a wake-up: the clear decision is the age check in
-    /// `status_message_expired` (see `status_message_set_at` for why any
-    /// arm/fire pairing scheme wedges on lost timers). A stale timer from
-    /// an already-replaced message finds the newer message too young and
-    /// leaves it to be cleared by its own wake-up.
+    /// Handle a delivered `Event::Timer` for the STATUS message: clear it iff
+    /// its TTL has elapsed. Pure (no host calls) so it stays unit-testable.
+    /// The re-arm on an early wake-up is no longer done here — the shell's
+    /// `schedule_wakeup` recomputes the status expiry deadline from
+    /// `status_message_set_at` and re-arms the single consolidated timer, so an
+    /// early/stale fire that finds the message too young leaves it and the
+    /// scheduler re-chains for the remainder.
     ///
     /// Returns `true` (re-render needed) only when a message was actually
     /// cleared.
@@ -475,13 +651,6 @@ impl State {
             self.status_message_set_at = None;
             true
         } else {
-            // Early wake-up (host timer fired ahead of our clock, or this
-            // was a stale timer from a replaced message): re-chain for the
-            // remaining TTL so the message never depends on an unrelated
-            // event to expire. Terminates — each fire either clears or
-            // re-arms exactly once for a strictly later deadline.
-            self.status_timer_needs_arming = true;
-            self.status_timer_arm_secs = self.status_message_remaining_secs();
             false
         }
     }
@@ -532,7 +701,7 @@ impl State {
     /// actually fires later: expiry is decided by age, and a redundant
     /// wake-up on a young message is a no-op.
     pub fn handle_visible(&mut self, visible: bool) -> bool {
-        self.is_visible = visible;
+        self.visibility = Some(visible);
         if !visible {
             return false;
         }
@@ -540,18 +709,15 @@ impl State {
         self.select_active_sidebar_item();
         self.resync_on_reveal = true;
         let mut status_changed = false;
-        if !self.status_message.is_empty() {
-            if self.status_message_expired() {
-                self.status_message.clear();
-                self.status_is_error = false;
-                self.status_message_set_at = None;
-                status_changed = true;
-            } else {
-                // Only the REMAINING TTL: a full re-arm here would extend a
-                // nearly-expired message to almost twice its lifetime.
-                self.status_timer_needs_arming = true;
-                self.status_timer_arm_secs = self.status_message_remaining_secs();
-            }
+        if !self.status_message.is_empty() && self.status_message_expired() {
+            // A message that expired while hidden (its wake-up may have been
+            // lost) clears lazily on reveal. A still-live message keeps its
+            // stamp; the shell's `schedule_wakeup` re-arms its expiry timer
+            // (only the REMAINING TTL, since the deadline is `set_at + TTL`).
+            self.status_message.clear();
+            self.status_is_error = false;
+            self.status_message_set_at = None;
+            status_changed = true;
         }
         self.selected_index != before || status_changed
     }
@@ -571,20 +737,231 @@ impl State {
         );
     }
 
+    /// Set/clear `cache_dirty`, maintaining `cache_dirty_since` on the
+    /// false→true edge and clearing it on true→false (issue #216 finding 4,
+    /// second pass). The single writer for the bit so the timestamp can't
+    /// drift from it.
+    fn set_cache_dirty(&mut self, dirty: bool) {
+        if dirty && !self.cache_dirty {
+            self.cache_dirty_since = Some(Instant::now());
+        } else if !dirty {
+            self.cache_dirty_since = None;
+        }
+        self.cache_dirty = dirty;
+    }
+
+    /// May this instance advance its refresh lifecycle (pump/launch/schedule
+    /// refresh wake-ups)? True unless it was EXPLICITLY told it's hidden
+    /// (`Some(false)`); an unknown (`None`, e.g. fresh after a hot reload) or
+    /// visible instance is allowed — bootstrap semantics (issue #216 seventh
+    /// pass). Only `Some(false)` — a real `Visible(false)` — gates the
+    /// lifecycle, which is where the hidden-relaunch protection matters.
+    fn not_hidden(&self) -> bool {
+        self.visibility != Some(false)
+    }
+
+    /// Is this instance DEFINITELY visible? Strict `Some(true)` — used for the
+    /// `PIPE_FOCUS` self-focus so an unknown/background instance never steals
+    /// focus (issue #216 seventh pass).
+    fn is_visible(&self) -> bool {
+        self.visibility == Some(true)
+    }
+
+    /// Is a refresh still owed? Either one was explicitly deferred, or a
+    /// known invalidation (`cache_dirty`) is unsatisfied. See finding 2.
+    fn wants_refresh(&self) -> bool {
+        self.refresh_pending || self.cache_dirty
+    }
+
+    /// Seconds until the backoff window elapses, or `None` when not backing
+    /// off. Used to arm the retry wake-up (finding 3).
+    fn backoff_remaining_secs(&self) -> Option<f64> {
+        self.refresh_failed_at.map(|failed_at| {
+            (self.refresh_backoff_secs - failed_at.elapsed().as_secs_f64()).max(0.0)
+        })
+    }
+
+    /// The earliest future instant ANYTHING needs a wake-up for, derived
+    /// purely from current state (issue #216 finding 1/2/3/B, fourth pass — the
+    /// ONE scheduler now covers status expiry AND the refresh deadlines).
+    /// Candidates, minimised: the status expiry (`status_message_set_at +
+    /// STATUS_MESSAGE_TTL_SECS`), considered always — even while hidden — so a
+    /// message clears on its own; and the refresh deadlines (the in-flight
+    /// timeout, the grace expiry `cache_dirty_since + STALE_GRACE_SECS` so the
+    /// marker's appearance triggers a render per finding B, and the backoff
+    /// expiry), considered ONLY while VISIBLE (finding 2) — a hidden instance
+    /// must not wake to reap and relaunch a lost-result refresh every 30s; the
+    /// owed refresh survives in `refresh_pending`/`cache_dirty` and reveal
+    /// drains it. `None` when no wake-up is needed.
+    fn next_wakeup_deadline(&self) -> Option<Instant> {
+        let mut candidates: Vec<Instant> = Vec::new();
+        if !self.status_message.is_empty() {
+            if let Some(set_at) = self.status_message_set_at {
+                candidates.push(set_at + Duration::from_secs_f64(STATUS_MESSAGE_TTL_SECS));
+            }
+        }
+        if self.not_hidden() {
+            if let Some((_, started)) = self.refresh_inflight {
+                candidates
+                    .push(started + Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS));
+                if self.cache_dirty && !self.dirty_persisted_past_grace() {
+                    if let Some(since) = self.cache_dirty_since {
+                        candidates.push(since + Duration::from_secs_f64(STALE_GRACE_SECS));
+                    }
+                }
+            } else if self.wants_refresh() {
+                if let Some(failed_at) = self.refresh_failed_at {
+                    candidates
+                        .push(failed_at + Duration::from_secs_f64(self.refresh_backoff_secs));
+                }
+            }
+        }
+        candidates.into_iter().min()
+    }
+
+    /// Retire the earliest outstanding host arm — called once per delivered
+    /// `Event::Timer` (issue #216 finding 1, fifth pass). A Timer delivery
+    /// means one one-shot fired; the earliest-deadline arm fires first, so the
+    /// min is the delivered one. Retiring by min (not by `> now`) is what makes
+    /// an early fire safe: the delivered arm is removed even if its recorded
+    /// fire-time is a hair in the future, so it can't linger as a phantom.
+    fn retire_earliest_arm(&mut self) {
+        if let Some((idx, _)) = self
+            .outstanding_arms
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cmp(b))
+        {
+            self.outstanding_arms.swap_remove(idx);
+        }
+    }
+
+    /// Recompute the earliest wake-up from current state and arm ONE more host
+    /// timer for it, but ONLY when no outstanding arm already fires at-or-before
+    /// that deadline (issue #216 finding 1). `set_timeout` can't be cancelled,
+    /// so a preempting earlier arm is ADDED while the old later one stays
+    /// queued; each delivered Timer retires exactly the earliest via
+    /// `retire_earliest_arm`.
+    ///
+    /// There is NO time-based purge (sixth-pass finding 2): zellij's
+    /// `set_timeout` ALWAYS delivers its `Event::Timer` — directed, even to a
+    /// hidden instance, never lost (verified in zellij-server 0.44.3). So every
+    /// pushed arm is retired by exactly one future delivery, and
+    /// `outstanding_arms` mirrors the queued host one-shots by construction. A
+    /// time-based `retain` would wrongly drop an arm whose (delayed) Timer is
+    /// still queued, whose later delivery would then misretire a different arm.
+    ///
+    /// The coverage check uses the same `WAKEUP_FLOOR_SECS` bound as the
+    /// recording (sixth-pass finding 3), so a sub-floor deadline armed at
+    /// `now + FLOOR` isn't seen as perpetually uncovered and re-armed.
+    /// The host `set_timeout` is performed by `arm_pending_timer`.
+    fn schedule_wakeup(&mut self) {
+        let Some(deadline) = self.next_wakeup_deadline() else {
+            return;
+        };
+        let now = Instant::now();
+        let floor = Duration::from_secs_f64(WAKEUP_FLOOR_SECS);
+        // The earliest instant a freshly-armed timer could actually fire: a
+        // deadline nearer than the floor is armed at `now + FLOOR`.
+        let effective = deadline.max(now + floor);
+        let covered = self
+            .outstanding_arms
+            .iter()
+            .any(|fire_at| *fire_at <= effective);
+        if !covered {
+            let secs = deadline
+                .saturating_duration_since(now)
+                .as_secs_f64()
+                .max(WAKEUP_FLOOR_SECS);
+            self.timer_needs_arming = true;
+            self.timer_arm_secs = secs;
+            self.outstanding_arms.push(now + Duration::from_secs_f64(secs));
+        }
+        // Invariant: a wake-up is never lost. For a deadline at or beyond the
+        // floor, coverage is EXACT (some arm fires at-or-before it); a sub-floor
+        // deadline is covered by an arm firing within the floor.
+        debug_assert!(
+            self.outstanding_arms.iter().any(|fire_at| *fire_at <= deadline)
+                || deadline < now + floor,
+            "a desired deadline must be covered by an outstanding arm — no lost wake-up"
+        );
+    }
+
+    /// Record that a refresh is wanted (via `Action::Refresh` / the execute
+    /// arms). Advances the lifecycle only while VISIBLE (issue #216 finding 2,
+    /// fifth pass): a HIDDEN instance — which still receives cross-instance
+    /// pipes (invalidate, status) — must only RECORD `refresh_pending`, never
+    /// pump/launch, or every broadcast pipe would reap-and-relaunch a
+    /// lost-result refresh once per timeout window. The reveal path drains the
+    /// owed refresh. A visible instance's shell tail pumps regardless; the
+    /// explicit pump here just makes the pipe/visible path immediate.
+    fn request_refresh(&mut self) {
+        self.refresh_pending = true;
+        if self.not_hidden() {
+            self.pump_refresh();
+        }
+    }
+
+    /// Advance the refresh lifecycle one step (issue #216 rework — unifies the
+    /// in-flight guard, backoff, deferred-request drain, and lost-result
+    /// recovery). Pure state transitions plus the single `list-worktrees`
+    /// launch; timer arming is `schedule_wakeup`'s job, run by the
+    /// shell right after. Idempotent and safe on ANY event, which is how
+    /// findings 2 and 3 are covered: the shell pumps after every event, on the
+    /// retry timer, and on reveal. SHELL method (launch does a host call).
+    fn pump_refresh(&mut self) {
+        // Reap an abandoned in-flight request whose result never landed (lost
+        // while the instance was hidden — hidden instances get no results):
+        // re-desire the refresh so it relaunches.
+        if let Some((_, started)) = self.refresh_inflight {
+            if started.elapsed().as_secs_f64() >= REFRESH_IN_FLIGHT_TIMEOUT_SECS {
+                self.refresh_inflight = None;
+                self.refresh_pending = true;
+            }
+        }
+        // A fresh in-flight request drives the next step when its result lands.
+        if self.refresh_inflight.is_some() {
+            return;
+        }
+        if !self.wants_refresh() {
+            return;
+        }
+        // Nothing in flight, so only the backoff gate can block. If it does,
+        // stay deferred; `schedule_wakeup` arms the retry.
+        if let Some(remaining) = self.backoff_remaining_secs() {
+            if remaining > 0.0 {
+                return;
+            }
+        }
+        // Launch. Stamp a fresh request id so the result can be matched back.
+        self.refresh_pending = false;
+        self.refresh_seq += 1;
+        self.refresh_inflight = Some((self.refresh_seq, Instant::now()));
+        self.fire_list_worktrees();
+    }
+
+    /// The single `list-worktrees` launch site (issues #216 / #219).
+    /// Deliberately fires ONLY `list-worktrees`, not `list-branches`: the
+    /// branch list is consumed only by the `n` picker, so it is fetched
+    /// lazily — alongside a *successful* refresh (the `CMD_LIST_WORKTREES`
+    /// shell arm). The failing path therefore spawns one doomed process per
+    /// attempt, not two (#219).
     fn fire_list_worktrees(&self) {
-        // Stamp the generation current at launch time (see
-        // `State::invalidate_generation`). This is the only launch site
-        // for `list-worktrees` — bootstrap, manual refresh, and
-        // invalidation-triggered refresh all funnel through here — so a
-        // single stamp covers every case. When there is no pending
-        // invalidation this just echoes the current (possibly stale from
-        // an already-cleared round) generation, which compares equal to
-        // itself and clears `cache_dirty` as a no-op.
+        // Stamp the generation current at launch time (freshness proof, see
+        // `State::invalidate_generation`) AND the request id (identity, see
+        // `CTX_REQUEST_ID` / `refresh_inflight`). Only `pump_refresh` calls
+        // this, and it has already bumped `refresh_seq` and set
+        // `refresh_inflight` to the same id.
         let mut ctx = Self::ctx(CMD_LIST_WORKTREES);
         ctx.insert(
             CTX_GENERATION.to_string(),
             self.invalidate_generation.to_string(),
         );
+        ctx.insert(CTX_REQUEST_ID.to_string(), self.refresh_seq.to_string());
+        // Per-load epoch (issue #216 seventh pass): tells a result from THIS
+        // instance apart from one launched by a previous load with the same
+        // reused plugin id (hot reload resets `refresh_seq`).
+        ctx.insert(CTX_REQUEST_EPOCH.to_string(), self.load_epoch.to_string());
         run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "list-worktrees"],
             BTreeMap::new(),
@@ -802,20 +1179,56 @@ impl State {
         );
     }
 
-    /// Imperative-shell counterpart to `set_status`'s
-    /// `status_timer_needs_arming` flag: performs the actual
-    /// `zellij_tile::shim::set_timeout` host call `set_status` requested
-    /// and clears the flag. Called from `update`/`pipe` after `execute`,
-    /// once per event, so a burst of `set_status` calls within a single
-    /// handler still only arms (at most) one timer per event.
-    fn arm_pending_status_timer(&mut self) {
-        if self.status_timer_needs_arming {
-            set_timeout(self.status_timer_arm_secs.max(0.3));
-            self.status_timer_needs_arming = false;
+    /// Imperative-shell counterpart to `schedule_wakeup`'s
+    /// `timer_needs_arming` flag: performs the actual
+    /// `zellij_tile::shim::set_timeout` host call the scheduler requested for
+    /// the single consolidated wake-up, and clears the flag. Called from
+    /// `update`/`pipe` after scheduling, once per event, so a whole event
+    /// arms at most one host timer.
+    fn arm_pending_timer(&mut self) {
+        if self.timer_needs_arming {
+            set_timeout(self.timer_arm_secs.max(0.3));
+            self.timer_needs_arming = false;
         }
     }
 
-    fn execute(&self, action: &Action) {
+    /// Whether the displayed worktree list should be flagged stale (issue
+    /// #216 finding 4). See `refresh_stale_reason` for the derivation.
+    fn is_stale(&self) -> bool {
+        self.refresh_stale_reason().is_some()
+    }
+
+    /// Whether an unsatisfied invalidation has now outlived the resolution
+    /// grace period (issue #216 finding 4, second pass). A healthy refresh
+    /// clears `cache_dirty` well within `STALE_GRACE_SECS`; a hung or
+    /// repeatedly-timing-out replacement does not — and must not hide
+    /// staleness indefinitely just because a request is nominally in flight.
+    fn dirty_persisted_past_grace(&self) -> bool {
+        self.cache_dirty_since
+            .is_some_and(|since| since.elapsed().as_secs_f64() >= STALE_GRACE_SECS)
+    }
+
+    /// The short inline reason for the `stale · retrying` marker, or `None`
+    /// when the list is not flagged stale. A failed refresh yields its
+    /// condensed reason (and a recoverable full error via `e`). An unsatisfied
+    /// invalidation (`cache_dirty`) yields a generic phrase — shown as soon as
+    /// no refresh is resolving it, OR, if one is, once the dirtiness has
+    /// persisted past the grace window (so a hung/looping replacement can't
+    /// leave a known-stale list unflagged; finding 4 second pass). The grace
+    /// window is what keeps a healthy spawn/remove from flickering the marker.
+    fn refresh_stale_reason(&self) -> Option<String> {
+        if let Some(err) = &self.refresh_error {
+            Some(short_refresh_reason(err))
+        } else if self.cache_dirty
+            && (self.refresh_inflight.is_none() || self.dirty_persisted_past_grace())
+        {
+            Some("changes pending".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn execute(&mut self, action: &Action) {
         match action {
             Action::None => {}
             Action::Close => close_self(),
@@ -850,8 +1263,7 @@ impl State {
                 if let Some(name) = return_to {
                     go_to_tab_name(name);
                 }
-                self.fire_list_worktrees();
-                self.fire_git_branches();
+                self.request_refresh();
             }
             Action::SwitchToTab(tab_name) => {
                 go_to_tab_name(tab_name);
@@ -862,13 +1274,14 @@ impl State {
                 show_self(false);
             }
             Action::Refresh => {
-                self.fire_list_worktrees();
-                self.fire_git_branches();
+                self.request_refresh();
             }
             Action::FetchToplevel => self.fire_git_toplevel(),
             Action::FetchWorktreesAndBranches => {
-                self.fire_list_worktrees();
-                self.fire_git_branches();
+                // Branches are no longer fired here: they follow lazily on a
+                // successful worktree refresh (#219, see the
+                // CMD_LIST_WORKTREES shell arm).
+                self.request_refresh();
             }
             Action::DumpLayout => {
                 dump_session_layout();
@@ -949,34 +1362,102 @@ impl State {
         stdout: &[u8],
         stderr: &[u8],
         context: &BTreeMap<String, String>,
-    ) {
-        if exit_code != Some(0) {
-            let err = String::from_utf8_lossy(stderr);
-            self.set_status(format!("Failed to list worktrees: {err}"), true);
-            return;
+    ) -> RefreshOutcome {
+        // Epoch gate (issue #216 seventh/eighth pass): a result launched by a
+        // PREVIOUS load of this reused plugin id carries the wrong (or, if it
+        // came from a pre-epoch binary in flight across the upgrade reload, NO)
+        // `CTX_REQUEST_EPOCH`, and must be Ignored — otherwise its reset-to-low
+        // request id could ABA-match this load's guard. Enforced FIRST and
+        // fails CLOSED on a mismatched, malformed, OR ABSENT epoch.
+        //
+        // Enforcement is gated on `load_epoch != 0`: `load` always sets a
+        // non-zero wall-clock nonce, so the gate is always live in production;
+        // the `0` sentinel is only the `State::default` of unit tests (which
+        // never call `load`), where legacy fixtures stamp no epoch and must
+        // still be accepted. The eighth-pass rollout gap (absent epoch bypasses
+        // the guard on the first upgrade reload) is closed because a reloaded
+        // instance's `load_epoch` is non-zero.
+        if self.load_epoch != 0
+            && context.get(CTX_REQUEST_EPOCH).and_then(|s| s.parse::<u64>().ok())
+                != Some(self.load_epoch)
+        {
+            return RefreshOutcome::Ignored;
         }
+        // Request-identity gate (issue #216 finding 1). A result may only
+        // touch refresh state if its stamped request id matches the current
+        // in-flight request. This defeats the timed-out-then-relaunched race:
+        // request A exceeds the in-flight timeout, `pump_refresh` reaps it and
+        // launches B (a new id), then A's late result arrives — A's id no
+        // longer matches, so it can't clear B's guard, overwrite B's state,
+        // or fire a redundant branch fetch. A result carrying NO id key (tests
+        // / legacy callers only — production always stamps one) skips the gate;
+        // but a PRESENT-but-unparseable id fails CLOSED (`Ignored`) as cheap
+        // defense-in-depth — production never emits a malformed id.
+        if let Some(raw_id) = context.get(CTX_REQUEST_ID) {
+            match raw_id.parse::<u64>() {
+                Ok(result_id) => {
+                    if !matches!(self.refresh_inflight, Some((id, _)) if id == result_id) {
+                        return RefreshOutcome::Ignored;
+                    }
+                }
+                Err(_) => return RefreshOutcome::Ignored,
+            }
+        }
+        // The active request completed: clear the in-flight guard.
+        self.refresh_inflight = None;
+        if exit_code != Some(0) {
+            let err = String::from_utf8_lossy(stderr).trim().to_string();
+            let full = format!("Failed to list worktrees: {err}");
+            // The error is an EVENT: show the full text transiently (#216).
+            self.set_status(full.clone(), true);
+            // Staleness is STATE: keep the last known list on screen and
+            // record the failure durably so the marker persists past the
+            // status TTL and the detail stays recoverable via `e`. The
+            // worktree list is deliberately NOT cleared.
+            self.refresh_error = Some(full);
+            // Grow the backoff so repeated failures stop respawning on every
+            // `TabUpdate` (the spin, #216).
+            self.refresh_backoff_secs = if self.refresh_backoff_secs <= 0.0 {
+                REFRESH_BACKOFF_INITIAL_SECS
+            } else {
+                (self.refresh_backoff_secs * 2.0).min(REFRESH_BACKOFF_MAX_SECS)
+            };
+            self.refresh_failed_at = Some(Instant::now());
+            // Keep wanting a refresh so the backoff wake-up (finding 3)
+            // retries this once the window elapses — "stale · retrying" is a
+            // promise the shell's `pump_refresh` now keeps.
+            self.refresh_pending = true;
+            return RefreshOutcome::Failed;
+        }
+        // Success: the refresh mechanism works. Clear the error and reset the
+        // backoff. `refresh_error` tracks "did the LAST attempt fail", so any
+        // success clears it; the still-stale case (below) is carried by
+        // `cache_dirty`, which `is_stale()` also honours (finding 4).
+        self.refresh_error = None;
+        self.refresh_failed_at = None;
+        self.refresh_backoff_secs = 0.0;
         let output = String::from_utf8_lossy(stdout);
         self.worktrees = parse_worktrees(&output);
         // The listing is applied unconditionally — even a refresh launched
         // before the latest invalidation is harmless to apply: it's either
-        // still accurate or gets superseded when the newer refresh lands.
+        // still accurate or superseded when the newer refresh lands.
         //
         // Clearing `cache_dirty`, however, is conditional. Success alone
         // isn't proof of freshness (see `invalidate_generation`): only a
-        // refresh stamped with the CURRENT generation — i.e. one launched
-        // at-or-after the latest invalidation — can prove the cache
-        // reflects that invalidation. A stale-generation result leaves the
-        // bit set so the next `TabUpdate` retries. The failure path above
-        // deliberately returns before this, without touching either field:
-        // a failed refresh proves nothing about generation OR freshness.
+        // refresh stamped with the CURRENT generation can prove the cache
+        // reflects the latest invalidation. A stale-generation success leaves
+        // the bit set, so `is_stale()` keeps flagging the list and
+        // `pump_refresh` relaunches to satisfy the current generation — the
+        // silent-staleness gap finding 4 warned about cannot open.
         let result_generation = context
             .get(CTX_GENERATION)
             .and_then(|g| g.parse::<u64>().ok())
             .unwrap_or(0);
         if result_generation == self.invalidate_generation {
-            self.cache_dirty = false;
+            self.set_cache_dirty(false);
         }
         self.recompute_sidebar_items();
+        RefreshOutcome::Succeeded
     }
 
     pub fn recompute_sidebar_items(&mut self) {
@@ -1059,9 +1540,12 @@ impl State {
     }
 
     pub fn handle_tab_update(&mut self, tab_info: Vec<TabInfo>) -> Action {
-        // Receiving any Event means this instance's pane is in the visible
-        // tab (hidden instances get no Events) — see `is_visible`.
-        self.is_visible = true;
+        // NOTE: a `TabUpdate` does NOT mark this instance visible (sixth-pass
+        // finding 1). Zellij delivers `TabUpdate`/`PaneUpdate` to the active
+        // tab's plugins PLUS every subscribed background plugin (verified in
+        // zellij-server 0.44.3 screen.rs), so receipt is not proof of
+        // visibility. `is_visible` is authoritative only from `Event::Visible`
+        // (and genuine `Key`/`Mouse` input) — see the `update` shell.
         let had_tabs = !self.tabs.is_empty();
         // Snapshot pending_close before the confirm loop below mutates it.
         // The disappeared-tab check further down needs to know which names
@@ -1384,6 +1868,7 @@ impl State {
             self.sidebar_items.len(),
             self.selected_index,
             &self.status_message,
+            self.is_stale(),
         );
         let leading = layout.leading_lines();
         if line < leading {
@@ -1466,8 +1951,25 @@ impl State {
                     }
                 }
                 BareKey::Char('r') => {
+                    // A manual refresh is an explicit user request: clear the
+                    // backoff window so the gate in `fire_worktrees_refresh`
+                    // lets it through even mid-backoff (issue #216). The
+                    // in-flight guard still applies — we won't stack onto a
+                    // refresh that's genuinely running.
+                    self.refresh_failed_at = None;
+                    self.refresh_backoff_secs = 0.0;
                     self.set_status("Refreshed", false);
                     return Action::Refresh;
+                }
+                BareKey::Char('e') => {
+                    // Recover the full refresh error on demand (issue #216).
+                    // The persistent `stale · retrying` marker only carries a
+                    // short reason; this re-shows the complete text in the
+                    // status line long after its original transient TTL
+                    // expired. No-op when the last refresh succeeded.
+                    if let Some(err) = self.refresh_error.clone() {
+                        self.set_status(err, true);
+                    }
                 }
                 BareKey::Char('q') | BareKey::Esc => {}
                 _ => {}
@@ -1595,8 +2097,16 @@ impl State {
         // `invalidate_generation`), so a refresh already in flight when we
         // get here can't consume this invalidation.
         if msg.name == PIPE_INVALIDATE {
-            self.cache_dirty = true;
+            self.set_cache_dirty(true);
             self.invalidate_generation += 1;
+            // A genuine spawn/remove happened somewhere — reset the backoff
+            // so this real state change retries at once rather than waiting
+            // out a window opened by earlier failures (issue #216). Invalidate
+            // pipes only arrive from actual worktree changes, so this can't
+            // reopen the spin (a persistent EMFILE produces no successful
+            // spawns/removes, hence no invalidates).
+            self.refresh_failed_at = None;
+            self.refresh_backoff_secs = 0.0;
             return Action::Refresh;
         }
         // "Focus the sidebar" (Alt+z keybind — see PIPE_FOCUS). The pipe
@@ -1606,7 +2116,7 @@ impl State {
         // sidebar pane (e.g. one created before doctor installed the
         // new-tab template), no instance is visible and the key is a no-op.
         if msg.name == PIPE_FOCUS {
-            if self.is_visible {
+            if self.is_visible() {
                 return Action::FocusSelf;
             }
             return Action::None;
@@ -1813,18 +2323,53 @@ impl State {
             }
             Mode::BrowseWorktrees => {
                 if self.should_render_empty_state() {
-                    ui::render_header(w, &self.repo_name, cols);
-                    ui::render_empty_state(w);
-                    let list_height = 6;
-                    let status_height = ui::status_height(&self.status_message, cols);
-                    let footer_height = if cols >= 55 { 3 } else { 4 };
-                    let used_lines = 1 + list_height + status_height + footer_height;
+                    // Budget the empty state the same way as the populated
+                    // list (issue #216 finding 5) so a
+                    // first-refresh-failure-with-no-worktrees can't overflow a
+                    // short pane: reserve status + marker + footer, collapse
+                    // the footer to its version line when tight, then fit the
+                    // header and the empty-state body into what remains. The
+                    // body is budgeted in PHYSICAL rows at `cols` (third pass),
+                    // so a wide instruction line wrapping to two rows can't
+                    // silently overflow.
+                    let stale_reason = self.refresh_stale_reason();
+                    let stale_lines = usize::from(stale_reason.is_some());
+                    let status_lines = ui::status_height(&self.status_message, cols);
+                    let full_footer = if cols >= 55 { 3 } else { 4 };
+                    let overhead = status_lines + stale_lines;
+                    let footer_lines = if rows >= overhead + 2 + full_footer {
+                        full_footer
+                    } else {
+                        1
+                    };
+                    let content_budget = rows.saturating_sub(overhead + footer_lines);
+                    let show_header = content_budget >= 2;
+                    let body_budget = content_budget.saturating_sub(usize::from(show_header));
+
+                    if show_header {
+                        ui::render_header(w, &self.repo_name, cols);
+                    }
+                    // Even with no worktrees to list (e.g. the first refresh
+                    // itself failed), surface staleness (#216).
+                    if let Some(reason) = &stale_reason {
+                        ui::render_stale_marker(w, reason, self.refresh_error.is_some(), cols);
+                    }
+                    let body_lines = ui::render_empty_state(w, body_budget, cols);
+                    let used_lines = usize::from(show_header)
+                        + stale_lines
+                        + body_lines
+                        + status_lines
+                        + footer_lines;
                     let padding = rows.saturating_sub(used_lines);
                     for _ in 0..padding {
                         writeln!(w).unwrap();
                     }
                     ui::render_status(w, &self.status_message, self.status_is_error);
-                    ui::render_footer(w, &self.mode, VERSION, cols);
+                    if footer_lines <= 1 {
+                        ui::render_version_only(w, VERSION, cols);
+                    } else {
+                        ui::render_footer(w, &self.mode, VERSION, cols);
+                    }
                 } else {
                     // `layout` is computed once here and is the ONLY thing
                     // that decides header/separator visibility and the item
@@ -1841,9 +2386,16 @@ impl State {
                         self.sidebar_items.len(),
                         self.selected_index,
                         &self.status_message,
+                        self.is_stale(),
                     );
                     if layout.show_header {
                         ui::render_header(w, &self.repo_name, cols);
+                    }
+                    // Persistent staleness marker (#216), between the header
+                    // and the list. `layout.stale_lines` reserved its row, so
+                    // it never pushes the frame past `rows`.
+                    if let Some(reason) = self.refresh_stale_reason() {
+                        ui::render_stale_marker(w, &reason, self.refresh_error.is_some(), cols);
                     }
                     ui::render_sidebar_list(
                         w,
@@ -1867,7 +2419,15 @@ impl State {
                         writeln!(w).unwrap();
                     }
                     ui::render_status(w, &self.status_message, self.status_is_error);
-                    ui::render_footer(w, &self.mode, VERSION, cols);
+                    // Compact (version-only) footer on an undersized pane
+                    // (finding 5); the full footer otherwise. `footer_lines`
+                    // is the single source of truth so the padding above and
+                    // this write always agree.
+                    if layout.footer_lines <= 1 {
+                        ui::render_version_only(w, VERSION, cols);
+                    } else {
+                        ui::render_footer(w, &self.mode, VERSION, cols);
+                    }
                 }
             }
             Mode::SelectBranch => {
@@ -1922,6 +2482,22 @@ impl State {
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        // Per-load epoch nonce (issue #216 seventh pass): a wall-clock
+        // nanosecond timestamp captured once at load, distinct across a hot
+        // reload (which reuses the plugin id but re-runs `load` later). Stamped
+        // into every refresh's `CTX_REQUEST_EPOCH` so a previous load's
+        // surviving in-flight result is Ignored instead of ABA-matching this
+        // load's request ids. NOTE: on this WASI target `SystemTime::now`
+        // delegates to `clock_gettime` and PANICS if the realtime clock is
+        // unavailable — it does NOT return an error. The `unwrap_or(0)` only
+        // handles the (impossible in practice) case of a clock reporting a time
+        // before the Unix epoch. So `load_epoch` is in practice always a large
+        // non-zero nonce, which the epoch gate relies on as its enforce sentinel.
+        self.load_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
         self.agent_cmd = configuration
             .get("agent_cmd")
             .cloned()
@@ -1986,15 +2562,58 @@ impl ZellijPlugin for State {
         // message (its original timer can be lost while hidden), so the
         // arm step runs on this path too.
         if let Event::Visible(visible) = event {
-            let rerender = self.handle_visible(visible);
-            self.arm_pending_status_timer();
-            return rerender;
+            self.handle_visible(visible);
+            if visible {
+                // A reveal: any refresh in flight when we hid never delivered
+                // its result. Abandon it and re-drive the lifecycle — covers the
+                // "result lost while hidden leaves the sidebar frozen" case
+                // (issue #216 finding 3) without waiting out the 30s timeout.
+                // The outstanding host arms are NOT cleared here (they can't be
+                // cancelled and will still deliver); `schedule_wakeup` purges
+                // any that already fired-and-were-lost while hidden.
+                if self.refresh_inflight.take().is_some() {
+                    self.refresh_pending = true;
+                }
+                self.pump_refresh();
+            }
+            self.schedule_wakeup();
+            self.arm_pending_timer();
+            // Always repaint on reveal: the pane needs a fresh frame anyway,
+            // and this also redraws a status message that was cleared while
+            // hidden but whose clearing frame was never painted (issue #216
+            // finding 3, fourth pass — the low staleness/status-after-reveal bug).
+            return visible || self.is_stale() != self.last_rendered_stale;
         }
         if let Event::Timer(_) = event {
-            let rerender = self.handle_timer();
-            self.arm_pending_status_timer(); // early-fire re-chain
-            return rerender;
+            // A delivered Timer means one outstanding (untagged) one-shot fired.
+            // Retire exactly that arm (the earliest) — NOT all of them — so a
+            // stale late delivery can't clear a newer arm's accounting and
+            // cause a duplicate re-arm (issue #216 finding 1, fifth pass).
+            self.retire_earliest_arm();
+            let was_stale = self.last_rendered_stale;
+            let status_rerender = self.handle_timer();
+            // Only a VISIBLE instance advances the refresh lifecycle on a timer
+            // (issue #216 finding 2): a hidden instance whose results are lost
+            // must not reap-and-relaunch `list-worktrees` every 30s. The owed
+            // refresh survives in `refresh_pending`/`cache_dirty` and the reveal
+            // path drains it. (`next_wakeup_deadline` likewise omits refresh
+            // deadlines while hidden, so nothing re-arms a refresh wake-up.)
+            if self.not_hidden() {
+                self.pump_refresh();
+            }
+            self.schedule_wakeup();
+            self.arm_pending_timer();
+            // Repaint on a status change OR when the stale marker's visibility
+            // flipped (e.g. the grace deadline just elapsed, finding B).
+            return status_rerender || (self.is_stale() != was_stale);
         }
+        // `is_visible` is NOT set here (sixth-pass finding 1): a directed
+        // `RunCommandResult`/`PermissionRequestResult` reaches a HIDDEN instance
+        // too (verified in zellij-server 0.44.3), so treating any delivered
+        // Event as proof of visibility would un-hide the instance and reopen the
+        // refresh pumps while hidden. Visibility is authoritative only from
+        // `Event::Visible` and from genuine user input (`Key`/`Mouse`, which can
+        // only reach a focused/visible pane — set in those arms below).
         let action = match event {
             Event::PermissionRequestResult(PermissionStatus::Granted) => {
                 // First moment run_command is actually allowed. Ask any
@@ -2015,7 +2634,20 @@ impl ZellijPlugin for State {
                 match context.get("cmd_type").map(|s| s.as_str()) {
                     Some(CMD_GIT_TOPLEVEL) => self.handle_git_toplevel(exit_code, &stdout, &stderr),
                     Some(CMD_LIST_WORKTREES) => {
-                        self.handle_list_worktrees(exit_code, &stdout, &stderr, &context);
+                        // Lazily refresh the branch list only when the ACCEPTED
+                        // worktree refresh actually succeeded (#219 + finding
+                        // 1): the picker is the sole consumer, skipping it on
+                        // failure keeps the failing path to one spawn, and
+                        // keying on the outcome (not a bare `exit_code`) means
+                        // a superseded/stale result fires no redundant branch
+                        // spawn. The side effect lives in the shell so
+                        // `handle_list_worktrees` stays pure; the tail
+                        // `pump_refresh` drains any refresh still owed.
+                        if self.handle_list_worktrees(exit_code, &stdout, &stderr, &context)
+                            == RefreshOutcome::Succeeded
+                        {
+                            self.fire_git_branches();
+                        }
                         Action::None
                     }
                     Some(CMD_GIT_BRANCHES) => {
@@ -2056,22 +2688,44 @@ impl ZellijPlugin for State {
                 }
             }
             Event::TabUpdate(tab_info) => self.handle_tab_update(tab_info),
-            Event::Key(key) => match self.mode {
-                Mode::Loading => Action::None,
-                Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
-                Mode::BrowseWorktrees => self.handle_key_browse(&key),
-                Mode::SelectBranch => self.handle_key_select_branch(&key),
-                Mode::InputBranch => self.handle_key_input_branch(&key),
-                Mode::Confirming => self.handle_key_confirming(&key),
-            },
-            Event::Mouse(mouse) => match self.mode {
-                Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
-                _ => Action::None,
-            },
+            Event::Key(key) => {
+                // User keystrokes reach only a focused (hence visible) pane —
+                // authoritative visibility (sixth-pass finding 1). This is what
+                // keeps the `r`-key refresh working even if no `Event::Visible`
+                // arrived yet.
+                self.visibility = Some(true);
+                match self.mode {
+                    Mode::Loading => Action::None,
+                    Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
+                    Mode::BrowseWorktrees => self.handle_key_browse(&key),
+                    Mode::SelectBranch => self.handle_key_select_branch(&key),
+                    Mode::InputBranch => self.handle_key_input_branch(&key),
+                    Mode::Confirming => self.handle_key_confirming(&key),
+                }
+            }
+            Event::Mouse(mouse) => {
+                // A mouse event likewise reaches only the focused/visible pane.
+                self.visibility = Some(true);
+                match self.mode {
+                    Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
+                    _ => Action::None,
+                }
+            }
             _ => return false,
         };
         self.execute(&action);
-        self.arm_pending_status_timer();
+        // Advance the refresh lifecycle after every event (issue #216
+        // findings 2 & 3) — but only while VISIBLE (sixth-pass finding 1): a
+        // directed `RunCommandResult`/`TabUpdate` can reach a hidden instance,
+        // which must not pump/relaunch. A visible instance drains any deferred
+        // refresh, reaps a timed-out in-flight request, and re-arms the retry
+        // wake-up. `schedule_wakeup` (run regardless — while hidden it yields
+        // only the process-free status wake-up) dedups against outstanding arms.
+        if self.not_hidden() {
+            self.pump_refresh();
+        }
+        self.schedule_wakeup();
+        self.arm_pending_timer();
         true
     }
 
@@ -2090,13 +2744,29 @@ impl ZellijPlugin for State {
         }
         let action = self.handle_pipe(&pipe_message);
         self.execute(&action);
-        self.arm_pending_status_timer();
+        // Pipes reach HIDDEN instances too, so — unlike the update tail — the
+        // refresh lifecycle only advances while visible (issue #216 finding 2,
+        // fifth pass). A hidden instance records the invalidate (cache_dirty /
+        // refresh_pending set by `handle_pipe`/`request_refresh`) but never
+        // pumps or launches; the reveal path drains it. A visible instance
+        // pumps immediately. The wake-up scheduling runs regardless — while
+        // hidden `next_wakeup_deadline` yields only the status expiry (no
+        // process), so no refresh timer is armed.
+        if self.not_hidden() {
+            self.pump_refresh();
+        }
+        self.schedule_wakeup();
+        self.arm_pending_timer();
         true
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
         self.last_rows = rows;
         self.last_cols = cols;
+        // Record what this frame shows so the timer/reveal paths can tell when
+        // the stale marker's visibility flips and force a repaint (issue #216
+        // finding B, third pass).
+        self.last_rendered_stale = self.is_stale();
         self.render_to(&mut std::io::stdout(), rows, cols);
     }
 }
@@ -3779,6 +4449,698 @@ mod tests {
         assert_eq!(action, Action::Refresh);
     }
 
+    // --- #216 (reworked): request identity, backoff, deferral, staleness ---
+
+    /// Set up an accepted-request context: a fresh in-flight request whose
+    /// id and generation the returned context echoes back, so
+    /// `handle_list_worktrees` treats the result as the active one.
+    fn accept_ctx(s: &mut State, generation: u64) -> BTreeMap<String, String> {
+        s.refresh_seq += 1;
+        s.refresh_inflight = Some((s.refresh_seq, Instant::now()));
+        let mut c = BTreeMap::new();
+        c.insert(CTX_REQUEST_ID.to_string(), s.refresh_seq.to_string());
+        c.insert(CTX_GENERATION.to_string(), generation.to_string());
+        c
+    }
+
+    #[test]
+    fn failed_refresh_keeps_list_records_error_and_wants_retry() {
+        let mut s = state_with_worktrees();
+        let ctx = accept_ctx(&mut s, 0);
+        let before = s.worktrees.clone();
+
+        let outcome =
+            s.handle_list_worktrees(Some(1), b"", b"Too many open files (os error 24)", &ctx);
+
+        assert_eq!(outcome, RefreshOutcome::Failed);
+        assert_eq!(s.worktrees, before, "the last known list must be kept on failure");
+        let err = s.refresh_error.clone().expect("failure records persistent error state");
+        assert!(err.contains("Too many open files"), "full error retained: {err}");
+        assert!(s.status_is_error, "the failure also shows transiently in the status line");
+        assert_eq!(s.refresh_backoff_secs, REFRESH_BACKOFF_INITIAL_SECS, "first backoff window");
+        assert!(s.refresh_failed_at.is_some(), "backoff window start stamped");
+        assert!(s.refresh_inflight.is_none(), "the in-flight guard is cleared on the result");
+        assert!(s.refresh_pending, "a failure keeps wanting a refresh so the timer retries it");
+        assert!(s.is_stale(), "the list is flagged stale while the error stands");
+    }
+
+    #[test]
+    fn successful_refresh_clears_stale_state_and_resets_backoff() {
+        let mut s = state_with_worktrees();
+        s.refresh_error = Some("Failed to list worktrees: boom".into());
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = 8.0;
+        let ctx = accept_ctx(&mut s, 0);
+
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_error.is_none(), "success clears the error");
+        assert!(s.refresh_failed_at.is_none(), "success resets the backoff window");
+        assert_eq!(s.refresh_backoff_secs, 0.0, "success resets the backoff magnitude");
+        assert!(s.refresh_inflight.is_none(), "the in-flight guard is cleared");
+        assert!(!s.is_stale(), "a clean success is not stale");
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        let mut s = state_with_worktrees();
+        let mut expected = REFRESH_BACKOFF_INITIAL_SECS;
+        for _ in 0..12 {
+            let ctx = accept_ctx(&mut s, 0);
+            s.handle_list_worktrees(Some(1), b"", b"boom", &ctx);
+            assert_eq!(s.refresh_backoff_secs, expected);
+            expected = (expected * 2.0).min(REFRESH_BACKOFF_MAX_SECS);
+        }
+        assert_eq!(
+            s.refresh_backoff_secs, REFRESH_BACKOFF_MAX_SECS,
+            "repeated failures cap the backoff instead of growing without bound"
+        );
+    }
+
+    #[test]
+    fn superseded_result_is_ignored_and_leaves_active_request_intact() {
+        // Finding 1: request A times out, B (a new id) is launched, then A's
+        // late result arrives. A must not clear B's guard or set error state.
+        let mut s = state_with_worktrees();
+        // B is the current in-flight request, id = 5.
+        s.refresh_seq = 5;
+        s.refresh_inflight = Some((5, Instant::now()));
+
+        let mut a_ctx = BTreeMap::new();
+        a_ctx.insert(CTX_REQUEST_ID.to_string(), "4".to_string()); // A, older id
+        let outcome = s.handle_list_worktrees(Some(1), b"", b"stale boom", &a_ctx);
+
+        assert_eq!(outcome, RefreshOutcome::Ignored, "a superseded result is ignored");
+        assert_eq!(s.refresh_inflight, Some((5, s.refresh_inflight.unwrap().1)));
+        assert!(s.refresh_error.is_none(), "A must not set error state over B");
+        assert_eq!(s.refresh_backoff_secs, 0.0, "A must not arm backoff over B");
+
+        // B's own result (matching id) is accepted.
+        let mut b_ctx = BTreeMap::new();
+        b_ctx.insert(CTX_REQUEST_ID.to_string(), "5".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &b_ctx);
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_inflight.is_none());
+    }
+
+    #[test]
+    fn stale_generation_success_keeps_the_list_flagged_stale() {
+        // Finding 4: an old-generation refresh succeeds while a newer
+        // invalidation is unsatisfied. The error clears, but cache_dirty (and
+        // hence the marker) must persist — no silent staleness.
+        let mut s = state_with_worktrees();
+        s.invalidate_generation = 1;
+        s.cache_dirty = true; // a newer invalidation is outstanding
+        // A refresh launched at the OLD generation (0) succeeds.
+        let ctx = accept_ctx(&mut s, 0);
+
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_error.is_none(), "the refresh itself succeeded, so no error");
+        assert!(s.cache_dirty, "a stale-generation success cannot clear cache_dirty");
+        assert!(s.is_stale(), "staleness persists via cache_dirty (finding 4)");
+        assert_eq!(s.refresh_stale_reason().as_deref(), Some("changes pending"));
+    }
+
+    #[test]
+    fn is_stale_derives_from_error_and_cache_dirty() {
+        // Finding 4: staleness = a failed refresh OR an unsatisfied
+        // invalidation we're not actively resolving.
+        let mut s = State::default();
+        assert!(!s.is_stale(), "fresh state is not stale");
+
+        s.refresh_error = Some("Failed to list worktrees: boom".into());
+        assert!(s.is_stale(), "a failed refresh is stale");
+        s.refresh_error = None;
+
+        s.cache_dirty = true;
+        assert!(s.is_stale(), "an unsatisfied invalidation with no refresh in flight is stale");
+        // While a refresh is actively resolving it, don't flicker the marker.
+        s.refresh_inflight = Some((1, Instant::now()));
+        assert!(!s.is_stale(), "cache_dirty while a refresh is in flight is not flagged");
+    }
+
+    #[test]
+    fn manual_refresh_key_clears_backoff_and_returns_refresh() {
+        let mut s = state_with_sidebar();
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = 30.0;
+
+        let action = s.handle_key_browse(&key(BareKey::Char('r')));
+
+        assert_eq!(action, Action::Refresh);
+        assert!(s.refresh_failed_at.is_none(), "manual refresh clears the backoff window");
+        assert_eq!(s.refresh_backoff_secs, 0.0, "manual refresh resets the backoff magnitude");
+    }
+
+    #[test]
+    fn error_key_reshows_full_error_on_demand() {
+        let mut s = state_with_sidebar();
+        let full = "Failed to list worktrees: git: Too many open files (os error 24)";
+        s.refresh_error = Some(full.into());
+        s.status_message.clear(); // the transient status has long since expired
+
+        let action = s.handle_key_browse(&key(BareKey::Char('e')));
+        assert_eq!(action, Action::None);
+        assert_eq!(s.status_message, full, "e re-shows the complete error text");
+        assert!(s.status_is_error);
+    }
+
+    #[test]
+    fn error_key_is_a_noop_when_not_stale() {
+        let mut s = state_with_sidebar();
+        assert!(s.refresh_error.is_none());
+        s.status_message.clear();
+        s.handle_key_browse(&key(BareKey::Char('e')));
+        assert!(s.status_message.is_empty(), "e does nothing when the last refresh succeeded");
+    }
+
+    #[test]
+    fn invalidate_pipe_resets_backoff() {
+        let mut s = State::default();
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = 40.0;
+
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+
+        assert_eq!(action, Action::Refresh);
+        assert!(s.cache_dirty);
+        assert!(s.wants_refresh(), "an invalidation means a refresh is owed");
+        assert!(s.refresh_failed_at.is_none(), "a genuine invalidation retries at once");
+        assert_eq!(s.refresh_backoff_secs, 0.0);
+    }
+
+    #[test]
+    fn backoff_remaining_reports_the_open_window() {
+        let mut s = State::default();
+        assert!(s.backoff_remaining_secs().is_none(), "no window when not backing off");
+        s.refresh_failed_at = Some(Instant::now());
+        s.refresh_backoff_secs = REFRESH_BACKOFF_INITIAL_SECS;
+        let remaining = s.backoff_remaining_secs().expect("a window is open");
+        assert!(remaining > 0.0 && remaining <= REFRESH_BACKOFF_INITIAL_SECS);
+    }
+
+    // Finding 1: a whole in-flight/backoff window arms ONE timer,
+    // not one per event. `schedule_wakeup` recomputes the same
+    // constant in-flight-timeout deadline each event and dedups against the
+    // armed one. (It is pure — calling `pump_refresh`/`update` in a unit test
+    // would pull in the host `run_command`/`set_timeout` shims and fail to
+    // link, which is why the whole suite tests pure handlers only.)
+    #[test]
+    fn repeated_scheduling_in_one_window_arms_a_single_timer() {
+        let mut s = State::default();
+        s.visibility = Some(true); // refresh deadlines only count while visible (finding 2)
+        s.refresh_inflight = Some((1, Instant::now())); // one in-flight window
+        let mut arms = 0;
+        for _ in 0..100 {
+            s.schedule_wakeup(); // the shell tail firing on 100 events
+            if s.timer_needs_arming {
+                arms += 1;
+                s.timer_needs_arming = false; // the shell arms & consumes it
+            }
+        }
+        assert_eq!(arms, 1, "100 events in one window must arm exactly one host timer");
+    }
+
+    #[test]
+    fn timer_reschedules_and_only_an_earlier_deadline_rearms() {
+        let mut s = State::default();
+        s.visibility = Some(true);
+        s.refresh_inflight = Some((1, Instant::now()));
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming, "first schedule arms the in-flight timeout");
+        s.timer_needs_arming = false;
+
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "an already-armed window does not re-arm");
+
+        // A newly-appearing EARLIER deadline (the grace boundary) pre-empts the
+        // armed 30s in-flight timeout.
+        s.set_cache_dirty(true);
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming, "an earlier grace deadline arms a new timer");
+        s.timer_needs_arming = false;
+
+        // A delivered Timer retires the earliest arm (the grace one); the next
+        // schedule re-arms the grace deadline afresh (the queued in-flight arm
+        // is later, so it doesn't cover it).
+        s.retire_earliest_arm();
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming, "after a timer fires, the next wake-up re-arms");
+    }
+
+    // Finding 1 (fourth pass): status and refresh now share ONE wake-up
+    // record, so a status timer firing can no longer clear a separate refresh
+    // record and duplicate its timer. Interleaving: status expiry (~8s) is
+    // earlier than the in-flight timeout (~30s), so it is armed first; when it
+    // fires, the reschedule arms exactly ONE timer for the next deadline.
+    #[test]
+    fn status_and_refresh_share_one_timer_no_duplicate_across_a_fire() {
+        let mut s = State::default();
+        s.visibility = Some(true);
+        s.refresh_inflight = Some((1, Instant::now())); // deadline ~30s
+        s.set_status("working", false); // deadline ~8s (earlier)
+
+        let mut arms = 0;
+        // Several unrelated events while both deadlines pend: only the first arms.
+        for _ in 0..5 {
+            s.schedule_wakeup();
+            if s.timer_needs_arming {
+                arms += 1;
+                s.timer_needs_arming = false;
+            }
+        }
+        assert_eq!(arms, 1, "one shared timer for the earliest (status) deadline");
+        assert!(
+            s.timer_arm_secs <= STATUS_MESSAGE_TTL_SECS + 0.1,
+            "the earliest deadline is the status expiry, got {}",
+            s.timer_arm_secs
+        );
+
+        // The (single) status timer fires: retire the delivered arm,
+        // handle_timer leaves the young message, reschedule arms exactly one
+        // timer for the next deadline — no duplicate.
+        s.retire_earliest_arm();
+        let _ = s.handle_timer();
+        s.schedule_wakeup();
+        if s.timer_needs_arming {
+            arms += 1;
+            s.timer_needs_arming = false;
+        }
+        assert_eq!(arms, 2, "the fire re-armed exactly once — no duplicate timer");
+    }
+
+    // Finding 1 (fifth pass, Codex test a): an earlier deadline preempts an
+    // already-armed later one. The old host one-shot can't be cancelled, so a
+    // SECOND arm is accounted; when BOTH eventually deliver, retiring each in
+    // turn leaves no duplicate and the count stays bounded — and no wake-up is
+    // ever lost (the schedule debug_assert enforces coverage every call).
+    #[test]
+    fn preemption_keeps_arms_bounded_and_loses_no_wakeup() {
+        let mut s = State::default();
+        s.visibility = Some(true);
+        s.refresh_inflight = Some((1, Instant::now())); // in-flight timeout ~30s
+        s.schedule_wakeup();
+        s.timer_needs_arming = false;
+        assert_eq!(s.outstanding_arms.len(), 1);
+
+        // A status message preempts with an earlier (~8s) deadline.
+        s.set_status("working", false);
+        s.schedule_wakeup();
+        s.timer_needs_arming = false;
+        assert_eq!(
+            s.outstanding_arms.len(),
+            2,
+            "preemption adds an arm; the uncancellable old one stays queued"
+        );
+
+        // The status timer (earliest) delivers with its message expired: retire
+        // it, clear the message, reschedule. The queued in-flight arm still
+        // covers the 30s deadline → NO duplicate.
+        backdate_status(&mut s, STATUS_MESSAGE_TTL_SECS as u64 + 1);
+        s.retire_earliest_arm();
+        assert!(s.handle_timer(), "the expired status clears");
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "the queued in-flight arm already covers — no duplicate");
+        assert_eq!(s.outstanding_arms.len(), 1, "bounded: back to one outstanding arm");
+
+        // The in-flight timer eventually delivers too: retire it, reschedule.
+        s.retire_earliest_arm();
+        s.schedule_wakeup();
+        assert!(
+            s.next_wakeup_deadline().is_none() || !s.outstanding_arms.is_empty(),
+            "no lost wake-up: a desired deadline always leaves an outstanding arm"
+        );
+        assert!(s.outstanding_arms.len() <= 2, "no unbounded growth");
+    }
+
+    // Finding 1 (fifth pass, Codex test b): a queued arm from before a
+    // hide/reveal covers the current deadline, so reveal arms NO duplicate;
+    // when that stale arm finally delivers, exactly one real arm is scheduled.
+    #[test]
+    fn a_queued_arm_covers_the_deadline_and_delivering_it_makes_no_duplicate() {
+        let mut s = State::default();
+        s.visibility = Some(true);
+        s.refresh_inflight = Some((1, Instant::now())); // desired ~now+30
+        // A pre-existing queued arm (armed before the hide) that fires sooner.
+        s.outstanding_arms.push(Instant::now() + Duration::from_secs_f64(1.0));
+
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "a queued earlier arm covers the desired deadline");
+        assert_eq!(s.outstanding_arms.len(), 1);
+
+        // That queued arm delivers: retire it, then the real deadline arms once.
+        s.retire_earliest_arm();
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming, "after the stale arm retires, the real deadline arms once");
+        assert_eq!(s.outstanding_arms.len(), 1, "exactly one arm — no duplicate");
+    }
+
+    // Finding 2 (sixth pass, Codex test a): a delayed delivery. An arm whose
+    // fire-time has passed but whose (directed) Timer is still queued must NOT
+    // be purged by a schedule — zellij always delivers it. Purging it would let
+    // that later delivery misretire a DIFFERENT arm and desync the vec from the
+    // real host one-shots. Delivering the arm's Timer retires exactly it,
+    // leaving the other entry intact.
+    #[test]
+    fn delayed_delivery_arm_is_not_purged_and_retires_correctly() {
+        let mut s = State::default();
+        s.visibility = Some(true);
+        // A (status-ish) arm already past its fire-time but not yet delivered,
+        // and B (refresh-ish) still in the future.
+        let a = Instant::now() - Duration::from_secs_f64(0.5);
+        let b = Instant::now() + Duration::from_secs_f64(30.0);
+        s.outstanding_arms.push(a);
+        s.outstanding_arms.push(b);
+
+        // A schedule (e.g. from an unrelated event) must NOT drop A.
+        s.set_status("note", false);
+        s.schedule_wakeup();
+        assert!(
+            s.outstanding_arms.contains(&a),
+            "a past-but-undelivered arm must not be purged — its Timer is still queued"
+        );
+
+        // A's delayed Timer finally delivers: retire the earliest (A). B stays.
+        s.retire_earliest_arm();
+        assert!(!s.outstanding_arms.contains(&a), "the delivered arm is retired");
+        assert!(s.outstanding_arms.contains(&b), "B's entry is intact");
+    }
+
+    // Finding 3 (sixth pass, Codex test b): a sub-floor deadline (nearer than
+    // WAKEUP_FLOOR_SECS) is armed at `now + FLOOR`; the coverage check uses the
+    // same floor, so repeated scheduling across events arms exactly ONE timer,
+    // not one per event.
+    #[test]
+    fn sub_floor_deadline_scheduled_repeatedly_arms_once() {
+        let mut s = State::default();
+        s.set_status("x", false);
+        // Age the message to ~its full TTL so its expiry deadline is essentially
+        // now — well within the floor.
+        backdate_status(&mut s, STATUS_MESSAGE_TTL_SECS as u64);
+
+        let mut arms = 0;
+        for _ in 0..10 {
+            s.schedule_wakeup();
+            if s.timer_needs_arming {
+                arms += 1;
+                s.timer_needs_arming = false;
+            }
+        }
+        assert_eq!(arms, 1, "a sub-floor deadline arms exactly one timer, not one per event");
+        assert_eq!(s.outstanding_arms.len(), 1);
+    }
+
+    // Finding 1 (sixth pass, Codex test c): a directed RunCommandResult reaches
+    // a HIDDEN instance (zellij-server 0.44.3), so applying one must not flip
+    // is_visible — otherwise the next pipe/timer would pump while hidden.
+    #[test]
+    fn applying_a_refresh_result_does_not_mark_instance_visible() {
+        let mut s = state_with_worktrees();
+        s.visibility = Some(false);
+        let ctx = accept_ctx(&mut s, 0);
+        s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+        assert!(!s.is_visible(), "a directed result must not un-hide the instance");
+    }
+
+    // Finding 1 (seventh pass): tri-state visibility. Only an EXPLICIT
+    // Some(false) gates the refresh lifecycle; unknown (None — e.g. fresh after
+    // a hot reload) is treated as pump-allowed so a reloaded visible sidebar
+    // bootstraps without user input.
+    #[test]
+    fn tri_state_visibility_gates_refresh_only_when_explicitly_hidden() {
+        let mut s = State::default();
+        s.refresh_inflight = Some((1, Instant::now()));
+
+        // Unknown (fresh/reloaded): pump-allowed, refresh wake-ups scheduled.
+        assert_eq!(s.visibility, None);
+        assert!(s.not_hidden(), "unknown visibility is pump-allowed (bootstrap)");
+        assert!(!s.is_visible(), "…but not DEFINITELY visible (no focus-pipe answer)");
+        assert!(s.next_wakeup_deadline().is_some(), "unknown: refresh wake-up scheduled");
+
+        // Explicitly hidden: gated hard.
+        s.handle_visible(false);
+        assert_eq!(s.visibility, Some(false));
+        assert!(!s.not_hidden());
+        assert!(s.next_wakeup_deadline().is_none(), "explicitly hidden: no refresh wake-up");
+
+        // Visible: allowed again, and definitely visible.
+        s.handle_visible(true);
+        assert!(s.not_hidden() && s.is_visible());
+        assert!(s.next_wakeup_deadline().is_some());
+    }
+
+    // Finding 1 (seventh pass): a TabUpdate must not resolve visibility either
+    // way — unknown stays pump-allowed (bootstrap), and an explicitly-hidden
+    // instance stays gated across TabUpdates (no un-hide).
+    #[test]
+    fn tab_update_does_not_change_visibility_gating() {
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.visibility, None, "TabUpdate must not resolve visibility");
+        assert!(s.not_hidden(), "unknown-visibility instance may still bootstrap-pump");
+
+        s.handle_visible(false);
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.visibility, Some(false), "TabUpdate must not un-hide");
+        assert!(!s.not_hidden(), "an explicitly hidden instance stays gated across TabUpdates");
+    }
+
+    // Finding 2 (seventh pass): request-id ABA across a hot reload. A result
+    // from a PREVIOUS load (whose reset refresh_seq gave it the same id) carries
+    // a stale epoch and must be Ignored — it must NOT clear this load's guard,
+    // and this load's own (matching-epoch) result is still accepted.
+    #[test]
+    fn stale_epoch_result_is_ignored_and_preserves_the_guard() {
+        let mut s = state_with_worktrees();
+        s.load_epoch = 100;
+        s.refresh_seq = 1;
+        s.refresh_inflight = Some((1, Instant::now())); // this load's in-flight request
+
+        let mut stale = BTreeMap::new();
+        stale.insert(CTX_REQUEST_ID.to_string(), "1".to_string()); // ABA-matching id
+        stale.insert(CTX_REQUEST_EPOCH.to_string(), "99".to_string()); // previous load
+        let outcome = s.handle_list_worktrees(Some(0), b"old\told\n", b"", &stale);
+        assert_eq!(outcome, RefreshOutcome::Ignored, "a stale-epoch result must be Ignored");
+        assert_eq!(
+            s.refresh_inflight.map(|(id, _)| id),
+            Some(1),
+            "the stale result must NOT clear this load's in-flight guard"
+        );
+
+        // This load's own result (matching epoch) is accepted.
+        let mut fresh = BTreeMap::new();
+        fresh.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
+        fresh.insert(CTX_REQUEST_EPOCH.to_string(), "100".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &fresh);
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_inflight.is_none());
+    }
+
+    #[test]
+    fn malformed_epoch_fails_closed() {
+        let mut s = state_with_worktrees();
+        s.load_epoch = 100; // an initialized epoch → the gate is live
+        s.refresh_inflight = Some((1, Instant::now()));
+        let mut ctx = BTreeMap::new();
+        ctx.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
+        ctx.insert(CTX_REQUEST_EPOCH.to_string(), "not-a-number".to_string());
+        assert_eq!(
+            s.handle_list_worktrees(Some(0), b"x\tx\n", b"", &ctx),
+            RefreshOutcome::Ignored,
+            "a malformed epoch fails closed"
+        );
+        assert!(s.refresh_inflight.is_some());
+    }
+
+    // Finding 1 (eighth pass): the rollout gap. A pre-epoch binary's in-flight
+    // result (carrying NO epoch key) survives the upgrade hot reload and reaches
+    // the new epoch-aware instance; it must fail CLOSED (Ignored) rather than
+    // ABA-match the reset request id and clear the new guard.
+    #[test]
+    fn absent_epoch_is_ignored_once_epoch_initialized() {
+        let mut s = state_with_worktrees();
+        s.load_epoch = 100; // reloaded (epoch-aware) instance
+        s.refresh_inflight = Some((1, Instant::now())); // this load's request
+
+        // A pre-epoch result: matching request id, but NO epoch key.
+        let mut legacy = BTreeMap::new();
+        legacy.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"old\told\n", b"", &legacy);
+
+        assert_eq!(outcome, RefreshOutcome::Ignored, "an absent epoch fails closed");
+        assert_eq!(
+            s.refresh_inflight.map(|(id, _)| id),
+            Some(1),
+            "it must NOT clear this load's in-flight guard"
+        );
+    }
+
+    // Finding 2 (fourth pass): a hidden instance schedules NO refresh wake-up,
+    // so a lost-result refresh does not relaunch every 30s; the owed refresh
+    // survives for the reveal path to drain.
+    #[test]
+    fn hidden_instance_schedules_no_refresh_wakeup_but_keeps_the_owed_refresh() {
+        let mut s = State::default();
+        s.visibility = Some(false);
+        s.refresh_inflight = Some((1, Instant::now()));
+        s.set_cache_dirty(true);
+
+        assert!(
+            s.next_wakeup_deadline().is_none(),
+            "hidden: no refresh wake-up is scheduled"
+        );
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "hidden: nothing to arm");
+        assert!(s.wants_refresh(), "the owed refresh survives for reveal to drain");
+
+        // A status message DOES still schedule its expiry, even while hidden.
+        s.set_status("note", false);
+        assert!(s.next_wakeup_deadline().is_some(), "status expiry is scheduled while hidden");
+
+        // Once visible, the refresh deadline reappears.
+        s.set_status("", false);
+        s.visibility = Some(true);
+        assert!(
+            s.next_wakeup_deadline().is_some(),
+            "visible: the refresh in-flight/grace wake-up is scheduled again"
+        );
+    }
+
+    // Finding 2 (fifth pass): a broadcast PIPE reaching a HIDDEN dirty instance
+    // with an expired in-flight refresh RECORDS staleness but schedules no
+    // refresh — so it does not reap-and-relaunch every timeout window. (The
+    // shell's pipe path gates its pump/launch on `is_visible`; that guard isn't
+    // unit-callable — `pump_refresh`/`request_refresh` reach the host
+    // `run_command` shim — so this asserts the pure pieces: the pipe records,
+    // and while hidden `next_wakeup_deadline` schedules no refresh wake-up.)
+    #[test]
+    fn hidden_instance_pipe_records_staleness_without_scheduling_a_refresh() {
+        let mut s = state_with_worktrees();
+        s.visibility = Some(false);
+        // An in-flight refresh whose result was lost while hidden, already past
+        // the timeout — a visible pump WOULD reap and relaunch it.
+        s.refresh_inflight = Some((
+            7,
+            Instant::now() - Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS + 1.0),
+        ));
+
+        // A broadcast invalidate pipe reaches this hidden instance.
+        let action = s.handle_pipe(&pipe_msg("zelligent-invalidate", &[]));
+        assert_eq!(action, Action::Refresh, "the pipe requests a refresh");
+        assert!(s.cache_dirty, "…which is RECORDED durably");
+
+        // But while hidden nothing schedules a refresh wake-up, so the expired
+        // in-flight is not reaped and relaunched.
+        assert!(
+            s.next_wakeup_deadline().is_none(),
+            "hidden: no refresh wake-up despite the expired in-flight"
+        );
+        assert_eq!(
+            s.refresh_inflight.map(|(id, _)| id),
+            Some(7),
+            "hidden: the stale in-flight is untouched"
+        );
+        assert!(s.wants_refresh(), "the owed refresh survives for reveal to drain");
+    }
+
+    // Finding B (third pass): the grace boundary must (1) be a scheduled
+    // wake-up so a Timer actually fires there, and (2) flip staleness
+    // visibility so the timer path's `is_stale() != last_rendered_stale`
+    // decision repaints. (update() itself can't be unit-tested — it reaches
+    // the host `set_timeout` shim — so this asserts the two pure pieces the
+    // timer path composes.)
+    #[test]
+    fn grace_boundary_is_scheduled_and_flips_stale_visibility() {
+        let mut s = state_with_worktrees();
+        s.visibility = Some(true);
+        s.set_cache_dirty(true);
+        s.refresh_inflight = Some((1, Instant::now()));
+        s.last_rendered_stale = false; // the last frame (under grace) showed no marker
+
+        // The earliest wake-up is the grace boundary, not the 30s in-flight
+        // timeout — so a Timer fires when the marker should appear.
+        let deadline = s.next_wakeup_deadline().expect("a wake-up is scheduled");
+        let grace_at = s.cache_dirty_since.unwrap() + Duration::from_secs_f64(STALE_GRACE_SECS);
+        assert_eq!(deadline, grace_at, "the earliest wake-up is the grace boundary");
+
+        // When that wake-up fires (grace elapsed), staleness flips visible,
+        // so the timer path repaints instead of silently reaping.
+        s.cache_dirty_since = Some(Instant::now() - Duration::from_secs_f64(STALE_GRACE_SECS + 0.5));
+        assert!(s.is_stale(), "past grace, the list is flagged stale even while in flight");
+        assert_ne!(
+            s.is_stale(),
+            s.last_rendered_stale,
+            "the timer path's repaint decision (is_stale != last_rendered_stale) is true here"
+        );
+    }
+
+    // Finding 4 (2nd pass): a known-stale list must stay flagged even while a
+    // replacement is nominally in flight, once it has dragged past the grace
+    // window — but a healthy sub-grace in-flight refresh must NOT flicker it.
+    #[test]
+    fn dirty_past_grace_stays_flagged_even_while_in_flight() {
+        let mut s = state_with_worktrees();
+        s.invalidate_generation = 1;
+        s.cache_dirty = true;
+        s.cache_dirty_since =
+            Some(Instant::now() - Duration::from_secs_f64(STALE_GRACE_SECS + 1.0));
+        s.refresh_inflight = Some((7, Instant::now())); // a replacement is running
+        assert!(
+            s.is_stale(),
+            "an invalidation unresolved past the grace window stays flagged despite in-flight"
+        );
+        assert_eq!(s.refresh_stale_reason().as_deref(), Some("changes pending"));
+    }
+
+    #[test]
+    fn healthy_in_flight_under_grace_does_not_flicker_the_marker() {
+        let mut s = state_with_worktrees();
+        s.set_cache_dirty(true); // stamps cache_dirty_since = now
+        s.refresh_inflight = Some((1, Instant::now()));
+        assert!(
+            !s.is_stale(),
+            "cache_dirty briefly true while its refresh is in flight (under grace) is not flagged"
+        );
+    }
+
+    // Defense-in-depth: a present-but-unparseable request id fails closed.
+    #[test]
+    fn malformed_request_id_is_ignored() {
+        let mut s = state_with_worktrees();
+        s.refresh_inflight = Some((3, Instant::now()));
+        let mut ctx = BTreeMap::new();
+        ctx.insert(CTX_REQUEST_ID.to_string(), "not-a-number".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
+        assert_eq!(outcome, RefreshOutcome::Ignored, "a malformed id is ignored, not applied");
+        assert!(s.refresh_inflight.is_some(), "the active request's guard is untouched");
+        assert!(s.refresh_error.is_none());
+    }
+
+    #[test]
+    fn short_refresh_reason_maps_common_failures() {
+        assert_eq!(
+            short_refresh_reason("Failed to list worktrees: Too many open files (os error 24)"),
+            "too many open files"
+        );
+        assert_eq!(
+            short_refresh_reason("something (os error 24)"),
+            "too many open files"
+        );
+        assert_eq!(
+            short_refresh_reason("Failed to list worktrees: Permission denied (os error 13)"),
+            "permission denied"
+        );
+        // Unknown errors fall back to the first line, minus our own prefix.
+        assert_eq!(
+            short_refresh_reason("Failed to list worktrees: fatal: bad object\nsecond line"),
+            "fatal: bad object"
+        );
+        assert_eq!(short_refresh_reason("Failed to list worktrees:"), "refresh failed");
+    }
+
     #[test]
     fn stale_in_flight_refresh_cannot_clear_a_newer_invalidation() {
         // The Codex-diagnosed #140 race: refresh A is launched, THEN an
@@ -4323,12 +5685,19 @@ mod tests {
     }
 
     #[test]
-    fn tab_update_marks_instance_visible_for_focus_pipe() {
-        // An instance that never saw Visible(true) but receives a TabUpdate
-        // is visible by definition (hidden instances get no Events) and
-        // must answer the focus pipe.
+    fn tab_update_alone_does_not_mark_instance_visible() {
+        // A TabUpdate reaches subscribed BACKGROUND plugins too (zellij-server
+        // 0.44.3 screen.rs), so it is NOT proof of visibility and must not
+        // answer the focus pipe (sixth-pass finding 1). Only Event::Visible(true)
+        // — or genuine user input — makes an instance visible.
         let mut s = State::default();
         s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert!(!s.is_visible(), "a TabUpdate must not un-hide the instance");
+        assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::None);
+
+        // Once Visible(true) arrives, it is authoritative and the focus pipe
+        // is answered.
+        s.handle_visible(true);
         assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::FocusSelf);
     }
 
@@ -5206,13 +6575,14 @@ mod tests {
 
     // --- Status message TTL (#152) ---
     //
-    // set_status/handle_timer/handle_visible are pure (no host calls), so —
-    // like every other handler in this module — they're exercised directly.
-    // The real `zellij_tile::shim::set_timeout` call lives in
-    // `arm_pending_status_timer` (called from `update`/`pipe`, never from
-    // unit tests, same as `execute`/`fire_*`); `status_timer_needs_arming`
-    // is the indirection these tests observe. Expiry is age-based: tests
-    // backdate `status_message_set_at` instead of sleeping.
+    // set_status/handle_timer/handle_visible/schedule_wakeup are pure (no host
+    // calls), so — like every other handler in this module — they're exercised
+    // directly. The real `zellij_tile::shim::set_timeout` call lives in
+    // `arm_pending_timer` (called from `update`/`pipe`, never from unit tests,
+    // same as `execute`/`fire_*`); `timer_needs_arming` is the indirection
+    // these tests observe. Arming is now the scheduler's job (set_status only
+    // stamps the age), so the tests call `schedule_wakeup` to arm. Expiry is
+    // age-based: tests backdate `status_message_set_at` instead of sleeping.
 
     fn backdate_status(s: &mut State, secs: u64) {
         s.status_message_set_at = s
@@ -5221,20 +6591,23 @@ mod tests {
     }
 
     #[test]
-    fn set_status_stamps_age_and_requests_wakeup() {
+    fn set_status_stamps_age_and_scheduler_arms_full_ttl() {
         let mut s = State::default();
         assert!(s.status_message_set_at.is_none());
-        assert!(!s.status_timer_needs_arming);
+        assert!(!s.timer_needs_arming);
 
         s.set_status("Spawned 'feature-c'", false);
 
         assert_eq!(s.status_message, "Spawned 'feature-c'");
         assert!(!s.status_is_error);
         assert!(s.status_message_set_at.is_some());
-        assert!(s.status_timer_needs_arming, "set_status must request a wake-up");
-        assert_eq!(
-            s.status_timer_arm_secs, STATUS_MESSAGE_TTL_SECS,
-            "a fresh message gets its full TTL"
+        // Arming is the scheduler's job now (the shell runs it each event).
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming, "the scheduler arms a wake-up for the message");
+        assert!(
+            s.timer_arm_secs > STATUS_MESSAGE_TTL_SECS - 0.5 && s.timer_arm_secs <= STATUS_MESSAGE_TTL_SECS,
+            "a fresh message gets ~its full TTL, got {}",
+            s.timer_arm_secs
         );
     }
 
@@ -5246,38 +6619,43 @@ mod tests {
     }
 
     #[test]
-    fn set_status_empty_message_clears_stamp_and_pending_arm() {
-        // Clearing in the same event that set a message must also retract
-        // the not-yet-performed arm request — arming a wake-up for an
-        // already-cleared message is noise (Codex review finding).
+    fn set_status_empty_message_clears_stamp_and_schedules_no_wakeup() {
+        // Clearing a message leaves nothing to expire, so the scheduler arms
+        // no status wake-up for it.
         let mut s = State::default();
         s.set_status("Refreshed", false);
-        assert!(s.status_timer_needs_arming);
+        s.schedule_wakeup();
+        assert!(s.timer_needs_arming);
+        s.timer_needs_arming = false; // shell consumed it
 
         s.set_status("", false);
 
         assert!(s.status_message.is_empty());
         assert!(s.status_message_set_at.is_none());
-        assert!(!s.status_timer_needs_arming);
+        s.schedule_wakeup();
+        assert!(!s.timer_needs_arming, "an empty message schedules no status wake-up");
     }
 
     #[test]
-    fn timer_before_ttl_does_not_clear_and_rechains_for_the_remainder() {
+    fn timer_before_ttl_does_not_clear_and_scheduler_rechains_for_the_remainder() {
         let mut s = State::default();
         s.set_status("Spawned 'feature-c'", false);
         backdate_status(&mut s, 5);
-        s.status_timer_needs_arming = false; // shell armed the original
+        // Simulate the wake-up firing: the shell retires the delivered arm,
+        // calls handle_timer (no clear — too young), then reschedules.
+        s.retire_earliest_arm();
 
         assert!(!s.handle_timer(), "a fresh message must survive an early wake-up");
         assert_eq!(s.status_message, "Spawned 'feature-c'");
+        s.schedule_wakeup();
         assert!(
-            s.status_timer_needs_arming,
-            "an early wake-up must re-chain — the message must never depend on an unrelated event to expire"
+            s.timer_needs_arming,
+            "the scheduler must re-chain — the message must never depend on an unrelated event to expire"
         );
         assert!(
-            s.status_timer_arm_secs > 2.0 && s.status_timer_arm_secs <= 3.2,
+            s.timer_arm_secs > 2.0 && s.timer_arm_secs <= 3.2,
             "re-chain must be for the REMAINING TTL (~3s at age 5), got {}",
-            s.status_timer_arm_secs
+            s.timer_arm_secs
         );
     }
 
@@ -5319,7 +6697,6 @@ mod tests {
         let mut s = State::default();
         s.handle_tab_update(vec![make_tab("feat-a", true)]);
         s.set_status("Spawned 'feat-b'", false);
-        s.status_timer_needs_arming = false; // shell armed it (then lost)
         backdate_status(&mut s, 20);
 
         assert!(s.handle_visible(true), "reveal must clear and re-render");
@@ -5330,22 +6707,22 @@ mod tests {
     #[test]
     fn reveal_rearms_wakeup_for_a_still_live_message() {
         // A young message whose timer may have been lost while hidden gets
-        // a fresh wake-up on reveal; a redundant wake-up is harmless (the
-        // age check just declines to clear).
+        // a fresh wake-up on reveal (via the scheduler); a redundant wake-up
+        // is harmless (the age check just declines to clear).
         let mut s = State::default();
         s.handle_tab_update(vec![make_tab("feat-a", true)]);
         s.set_status("Spawned 'feat-b'", false);
-        s.status_timer_needs_arming = false; // shell armed it (then lost)
 
         backdate_status(&mut s, 5);
         s.handle_visible(true);
+        s.schedule_wakeup();
 
         assert_eq!(s.status_message, "Spawned 'feat-b'");
-        assert!(s.status_timer_needs_arming, "reveal must request a fresh wake-up");
+        assert!(s.timer_needs_arming, "reveal re-arms a fresh wake-up");
         assert!(
-            s.status_timer_arm_secs > 2.0 && s.status_timer_arm_secs <= 3.2,
+            s.timer_arm_secs > 2.0 && s.timer_arm_secs <= 3.2,
             "reveal must arm only the REMAINING TTL (~3s at age 5), not a full one, got {}",
-            s.status_timer_arm_secs
+            s.timer_arm_secs
         );
     }
 

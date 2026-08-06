@@ -80,6 +80,7 @@ The plugin is embedded as a persistent left sidebar in every zelligent-managed t
 | `i` | Type a new branch name |
 | `d` then `y` | Remove the selected worktree |
 | `r` | Refresh |
+| `e` | Show the full error when a refresh is failing (a `stale · retrying` marker flags it) |
 
 When you remove a worktree through the plugin, it also closes the corresponding tab.
 

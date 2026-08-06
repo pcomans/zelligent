@@ -197,6 +197,110 @@ worktrees. See
 [references/zellij-plugin-api.md](references/zellij-plugin-api.md) for the
 event-delivery model.
 
+**Failure handling (#216 / #219).** A refresh that fails — e.g. Zellij can't
+even spawn the command under EMFILE (`os error 24`) on a low `ulimit -n`
+with many worktrees — must not turn a transient failure into a permanent
+spin. A single lifecycle (`pump_refresh`, driven via `Action::Refresh` and
+pumped by the update/pipe shell after *every* event) unifies five concerns:
+
+- **Request identity (+ reload epoch).** Each launch bumps `refresh_seq` and
+  stamps it into the context as `CTX_REQUEST_ID`; the in-flight request is
+  `refresh_inflight = (id, launched_at)`. Only a result whose id matches the
+  current in-flight request may touch state or fire the follow-on branch fetch
+  — so a timed-out-then-relaunched request's late result can't clear the newer
+  request's guard, overwrite its state, or double-spawn branches. A HOT RELOAD
+  makes a fresh `State` (resetting `refresh_seq` to 0) with the SAME plugin id
+  while the old instance's in-flight results still arrive, so an old `id = 1`
+  would ABA-match the new `id = 1`. Each launch therefore ALSO stamps a
+  per-load `CTX_REQUEST_EPOCH` (`load_epoch`, a wall-clock nonce set once in
+  `load`, always non-zero in production); a result whose epoch ≠ this load's —
+  including an ABSENT epoch from a pre-epoch binary in flight across the
+  upgrade reload, or a malformed one — is Ignored (fail closed). Enforcement is
+  keyed off the non-zero `load_epoch`; the `0` sentinel (unit tests only, no
+  `load` call) skips the gate so legacy fixtures still pass.
+- **In-flight guard + timeout.** Refreshes can't stack; a result lost to a
+  hidden instance ages out after `REFRESH_IN_FLIGHT_TIMEOUT_SECS`, and
+  `pump_refresh` reaps it (and reveal abandons any in-flight request, whose
+  result was lost while hidden) so nothing wedges.
+- **Exponential backoff** (`refresh_backoff_secs`, `REFRESH_BACKOFF_INITIAL_SECS`
+  doubling to `REFRESH_BACKOFF_MAX_SECS`) suppresses auto-retries after a
+  failure, so a persistent failure stops respawning on every `TabUpdate`. A
+  manual `r` and a genuine `zelligent-invalidate` reset it.
+- **Deferral, not drop.** A trigger that arrives while the gate is closed sets
+  `refresh_pending` (drained the moment the gate reopens) instead of being
+  lost — a tab-set change or invalidate mid-refresh always eventually runs.
+- **One consolidated wake-up scheduler, accounting for uncancellable timers.**
+  `next_wakeup_deadline` computes the single earliest instant *anything* needs
+  a wake-up for: the status-message TTL expiry, the refresh in-flight timeout,
+  the backoff expiry, or the `cache_dirty_since + STALE_GRACE_SECS` grace
+  boundary. But `set_timeout` arms an untagged one-shot that CANNOT be
+  cancelled, so when an earlier deadline preempts an already-armed later one,
+  the old timer stays queued and still delivers. Crucially, zellij *always*
+  delivers a `set_timeout` timer — it is directed and reaches even a hidden
+  instance, never lost (verified in zellij-server 0.44.3). So the scheduler
+  simply *accounts* for outstanding arms: `outstanding_arms` holds the
+  fire-times of the queued one-shots, and it mirrors the real host timers by
+  construction — every push is retired by exactly one future delivery.
+  `schedule_wakeup` arms ONE more host timer only when no remaining arm already
+  fires at-or-before the desired deadline (using the same `WAKEUP_FLOOR_SECS`
+  floor for the coverage check as for the arm, so a sub-floor deadline isn't
+  re-armed every event) — a whole window of events collapses to one timer, and
+  a preempting earlier deadline adds at most one. Each delivered `Event::Timer`
+  retires the earliest arm via `retire_earliest_arm` — nothing else removes
+  entries (there is deliberately NO time-based purge: it could drop an arm
+  whose delayed Timer is still queued, whose delivery would then misretire a
+  different arm). A stale late delivery therefore retires its own arm and
+  re-arms nothing — no duplicate, and the count is bounded by the number of
+  in-flight preemptions (≈2). Invariant (debug-asserted every schedule): a
+  desired deadline is covered by an outstanding arm, so a wake-up is never lost.
+  The grace boundary being a scheduled deadline is what makes the stale marker
+  *appear* with no other event; the Timer/reveal paths repaint when `is_stale()`
+  differs from the last painted frame (`last_rendered_stale`), and a reveal
+  always repaints (so a status message cleared while hidden is redrawn away).
+- **Explicitly-hidden instances don't spin the refresh lifecycle.** Visibility
+  is TRI-STATE (`visibility: Option<bool>`): `None` = unknown since load,
+  `Some(true)` = visible, `Some(false)` = explicitly hidden. It is authoritative
+  ONLY from `Event::Visible(true/false)` and from genuine user input
+  (`Key`/`Mouse`, which reach only a focused pane) — NOT from a
+  `TabUpdate`/`PaneUpdate` or a directed `RunCommandResult`/
+  `PermissionRequestResult`, all of which zellij delivers to background
+  instances too (zellij-server 0.44.3), so treating them as proof of visibility
+  would un-hide a hidden instance and reopen its pumps. The refresh lifecycle is
+  gated by `not_hidden()` (`visibility != Some(false)`): only an EXPLICITLY
+  hidden instance has `next_wakeup_deadline` omit the refresh deadlines, the
+  Timer/tail paths skip `pump_refresh`, and `request_refresh` merely RECORD
+  `refresh_pending`/`cache_dirty` — so it never wakes to reap-and-relaunch
+  `list-worktrees`, and a broadcast invalidate/status pipe can't drive one
+  either. The reveal path (which abandons any in-flight request and pumps)
+  drains the owed refresh. An UNKNOWN (`None`) instance is treated as
+  pump-allowed (bootstrap semantics): this is what un-wedges a HOT RELOAD — a
+  reloaded visible sidebar starts `None` and gets NO `Visible` transition, yet
+  must populate without user input, matching main's "every fresh instance fires
+  its initial refresh". Only the strict `is_visible()` (`Some(true)`) answers
+  the `PIPE_FOCUS` self-focus, so an unknown/background instance never steals
+  focus. Status expiry is scheduled regardless (it spawns no process).
+
+Because the branch list is consumed only by the `n` picker, `list-branches`
+is fetched lazily — only alongside a *successful* worktree refresh — so the
+failing path spawns one doomed process per attempt, not two (#219). The
+failed refresh keeps the last known list on screen (usable-but-flagged beats
+blank). Staleness is displayed by `is_stale()`, which derives from BOTH a
+failed refresh (`refresh_error`, distinct from the TTL'd `status_message`)
+AND an unsatisfied invalidation (`cache_dirty`): the marker shows as soon as
+no refresh is resolving the invalidation, or — if one is — once the dirtiness
+has outlived `STALE_GRACE_SECS` (`cache_dirty_since`), so a hung or
+repeatedly-timing-out replacement can't leave a known-stale list unflagged,
+while a healthy sub-grace refresh never flickers the marker. `refresh_error`
+clears on any success but a stale-generation success keeps `cache_dirty` set,
+so the marker persists until a *current-generation* success. The full error
+is recoverable on demand via the `e` key. The marker occupies one budgeted
+layout row; on an undersized pane both the populated and empty-state arms
+degrade through the same budget (footer collapses to its version line, header
+drops, item viewport may reach zero) rather than overflow. The empty-state
+body is budgeted in *physical* rows at the pane width, so a wide instruction
+line wrapping to two rows can't silently overflow, and meaningful text is kept
+(headline first) while blank separators are dropped first.
+
 ## Key files
 
 | File                                       | Purpose                                                       |

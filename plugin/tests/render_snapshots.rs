@@ -62,6 +62,162 @@ fn render_browse_with_error_message() {
     insta::assert_snapshot!(render_to_string(&s, 20, 80));
 }
 
+/// #216: a failed refresh keeps the last known worktree list on screen and
+/// adds a persistent `stale · retrying` marker with a short reason plus the
+/// `e: details` on-demand hint. The marker occupies exactly one budgeted
+/// row, so the frame still fits `rows` (no #135/#136 scroll).
+#[test]
+fn render_browse_stale_marker() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    let output = render_to_string(&s, 20, 80);
+    assert_eq!(
+        physical_rows(&output, 80),
+        20,
+        "the stale marker must be budgeted, not overflow the frame"
+    );
+    assert!(output.contains("stale"), "persistent staleness marker is shown");
+    assert!(output.contains("too many open files"), "short reason is inline");
+    assert!(output.contains("e: details"), "wide pane advertises the on-demand full error");
+    assert!(output.contains("feat-a"), "the last known list stays visible");
+    insta::assert_snapshot!(output);
+}
+
+/// #216: on a narrow pane the marker drops the `e: details` hint first so the
+/// reason survives, and still fits `rows` exactly.
+#[test]
+fn render_browse_stale_marker_narrow_drops_hint() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    let output = render_to_string(&s, 20, 30);
+    assert_eq!(physical_rows(&output, 30), 20, "narrow marker must not wrap past `rows`");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
+/// #216: even with no worktrees to list (the first refresh itself failed),
+/// the empty state still surfaces the staleness marker.
+#[test]
+fn render_browse_empty_with_stale_marker() {
+    let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    s.refresh_error = Some("Failed to list worktrees: boom".into());
+    let output = render_to_string(&s, 20, 80);
+    assert_eq!(physical_rows(&output, 80), 20, "empty-state stale marker must be budgeted");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5 (2nd pass): the EMPTY-STATE arm (first refresh failed, no
+/// worktrees) must also degrade on a short pane — collapse the footer, drop
+/// the header, truncate the empty-state body — rather than overflow `rows`.
+#[test]
+fn render_browse_empty_stale_tiny_pane_5_rows_no_overflow() {
+    let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 5, 40);
+    assert_eq!(physical_rows(&output, 40), 5, "empty-state rows=5 with error must not overflow");
+    assert!(output.contains("stale"), "the marker survives even in the empty state at rows=5");
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5 (2nd pass): rows=6 empty-state boundary.
+#[test]
+fn render_browse_empty_stale_tiny_pane_6_rows_no_overflow() {
+    let mut s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 6, 40);
+    assert_eq!(physical_rows(&output, 40), 6, "empty-state rows=6 with error must not overflow");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5 (3rd pass): the empty-state body is budgeted in PHYSICAL
+/// rows at `cols`, so a wide instruction line wrapping to two rows at cols=40
+/// can't silently overflow. Parameterised rows 7–10 (where the old logical-line
+/// count overflowed and dropped the headline before the leading blank): each
+/// must fit `rows` exactly AND keep the "No managed worktrees yet." headline.
+#[test]
+fn render_browse_empty_body_narrow_pane_no_overflow_keeps_headline() {
+    for rows in [7usize, 8, 9, 10] {
+        let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+        let output = render_to_string(&s, rows, 40);
+        assert_eq!(
+            physical_rows(&output, 40),
+            rows,
+            "empty-state body must fit rows={rows} at cols=40 without wrapping past it"
+        );
+        assert!(
+            output.contains("No managed worktrees yet."),
+            "the headline must survive at rows={rows} (never dropped before a blank)"
+        );
+    }
+}
+
+/// Snapshot of the rows=9 narrow empty state (the specific overflow case
+/// called out in review).
+#[test]
+fn render_browse_empty_body_narrow_pane_9_rows() {
+    let s = State { mode: Mode::BrowseWorktrees, ..Default::default() };
+    let output = render_to_string(&s, 9, 40);
+    assert_eq!(physical_rows(&output, 40), 9);
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 4: an unsatisfied invalidation with no refresh in flight
+/// (`cache_dirty`, no `refresh_error`) shows the generic `changes pending`
+/// marker — no `e: details` hint, since there's no error text to recover.
+#[test]
+fn render_browse_stale_marker_cache_dirty_generic() {
+    let mut s = state_with_worktrees();
+    s.cache_dirty = true; // known-but-unsatisfied invalidation, not in flight
+    let output = render_to_string(&s, 20, 80);
+    assert_eq!(physical_rows(&output, 80), 20);
+    assert!(output.contains("stale"), "cache_dirty alone flags staleness");
+    assert!(output.contains("changes pending"), "generic reason for a bare invalidation");
+    assert!(!output.contains("e: details"), "no on-demand error when there's no error text");
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5: an undersized pane (rows=5) carrying BOTH a persistent
+/// stale marker AND an active wrapped error status must degrade (footer
+/// collapses to the version line, item viewport may shrink to zero) rather
+/// than overflow `rows` and scroll the frame (#135/#136).
+#[test]
+fn render_browse_stale_marker_tiny_pane_5_rows_no_overflow() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 5, 40);
+    assert_eq!(physical_rows(&output, 40), 5, "rows=5 with wrapped error must not overflow");
+    assert!(output.contains("stale"), "the marker survives even at rows=5");
+    insta::assert_snapshot!(output);
+}
+
+/// #216 finding 5: rows=6 boundary — one more row than the tightest case,
+/// so a single item can reappear while still not overflowing.
+#[test]
+fn render_browse_stale_marker_tiny_pane_6_rows_no_overflow() {
+    let mut s = state_with_worktrees();
+    s.refresh_error =
+        Some("Failed to list worktrees: git: Too many open files (os error 24)".into());
+    s.status_message = "Failed to list worktrees: too many open files".into();
+    s.status_is_error = true;
+    let output = render_to_string(&s, 6, 40);
+    assert_eq!(physical_rows(&output, 40), 6, "rows=6 with wrapped error must not overflow");
+    assert!(output.contains("stale"));
+    insta::assert_snapshot!(output);
+}
+
 #[test]
 fn render_select_branch() {
     let s = state_with_branches();
