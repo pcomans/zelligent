@@ -39,7 +39,7 @@ A Bash script installed as `zelligent`. Subcommands:
 | `zelligent`       | Create or attach to a session named after the repo. The initial repo tab uses the sidebar layout (sidebar is a pane, not a separate tab). |
 | `spawn`           | Create a git worktree at `~/.zelligent/worktrees/<repo>/<raw-branch>`, open a new tab named after the sanitized branch. |
 | `remove`          | Delete the worktree and (when running inside Zellij) close its tab.                         |
-| `doctor`          | One-shot setup: Zellij plugin permissions, default user layout, Claude Code hook plugin.    |
+| `doctor`          | One-shot setup: Zellij plugin permissions, default user layout, Claude Code hook plugin. Also prints an **advisory** (never fails the run) when `ulimit -n` is low relative to the worktree count — see [design-docs/worktree-lifecycle.md](design-docs/worktree-lifecycle.md#open-file-descriptor-advisory-217). |
 | `nuke`            | Force-kill the session, server, and resurrection cache. For "nothing else works" recovery. |
 | `list-worktrees`  | Internal — emits a TSV the plugin parses via `RunCommand`.                                  |
 | `list-branches`   | Internal — same idea, for the branch-picker UI.                                             |

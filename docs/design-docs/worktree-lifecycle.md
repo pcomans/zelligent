@@ -25,6 +25,18 @@
 5. **Close the tab when running inside Zellij** — `zelligent` checks `$ZELLIJ`; if set, records the current tab via `zellij action current-tab-info`, switches to the worktree's tab via `zellij action go-to-tab-name <sanitized-branch>`, runs `zellij action close-tab`, then returns to the original tab. This stops the sidebar from showing the stale row as an orphaned "user tab". When invoked outside Zellij, prints a hint to close the tab manually instead.
 6. **Note the branch is preserved** — `git worktree remove` does not delete the local branch.
 
+## Open file descriptor advisory (#217)
+
+`zelligent doctor` compares the shell's soft `ulimit -n` against the worktree count and prints an advisory when they are on a collision course. Zellij holds several descriptors per pane (PTY master/slave, session sockets); a few dozen sidebar tabs plus Zellij's own sockets approach the macOS 256 default before a spawn, and each sidebar refresh opens more for two child processes and their pipes. When they run out the sidebar shows `Failed to list worktrees: … Too many open files (os error 24)` — a wall you can see coming.
+
+**Threshold:** warn when `ulimit -n < worktrees * 8 + 128`. The factor 8 budgets the descriptors a worktree pane holds plus the transient pair each refresh opens; 128 is headroom for Zellij's own sockets and the base shell. A fresh repo (3 worktrees → needs 152) stays quiet on the 256 default; 50 worktrees (→ 528) trips it. The suggested raise target is a generous round `4096` (or the computed minimum when that is higher), and the message points at `ulimit -Hn` for the ceiling.
+
+**Advisory only.** The check never adds to `ERRORS` and never changes the exit code — a soft descriptor limit is something a user may reasonably choose not to change, and #212 is the standing lesson that making `doctor` permanently red for an unfixable-by-intent condition is how `doctor` stops being read. It also never masks a *real* failure: when an independent check fails, `doctor` still prints the advisory and still exits 1. The message states that `ulimit -n` reflects the shell running `doctor`, not necessarily the shell that launched Zellij.
+
+**Edge cases.** The measured value goes through a `case`: `unlimited` is reported as fine; a numeric value is compared against the threshold (equality does *not* warn); an empty or non-numeric reading (a `ulimit` that failed) is reported as `open file limit: unknown` rather than dressed up as `ok` or fed to `[ -lt ]` (which would error and silently fall through). Run outside a git repo (0 worktrees), the check stays silent entirely.
+
+**Testing.** `ZELLIGENT_DOCTOR_FD_LIMIT` is a test-only seam: when set it overrides the measured limit, letting the suite exercise the unlimited / non-numeric / boundary branches deterministically without depending on the host's real descriptor ceiling. It is unset in normal use; one test still lowers the *real* `ulimit -Sn` to prove the live measurement path works.
+
 ## Nuke (`zelligent nuke`)
 
 Destroys the entire Zellij session for the repo:
