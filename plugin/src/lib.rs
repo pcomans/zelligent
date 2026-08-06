@@ -457,8 +457,13 @@ pub struct State {
     /// `request_id = 1` would ABA-match the new instance's `request_id = 1`,
     /// clear its in-flight guard, and get the genuine new result Ignored.
     /// Every launch stamps this epoch into `CTX_REQUEST_EPOCH`; a result whose
-    /// epoch != the current load's is Ignored (fail closed). Set once in
-    /// `load` from a wall-clock nonce; `0` in unit tests (which never reload).
+    /// epoch != the current load's — INCLUDING an absent epoch from a
+    /// pre-epoch binary in flight across the upgrade reload — is Ignored (fail
+    /// closed). Set once in `load` from a wall-clock nonce (always non-zero in
+    /// production). The `0` value is the enforce sentinel: it means "no epoch
+    /// yet" and only occurs in unit tests (`State::default`, no `load` call),
+    /// where the gate is skipped so legacy fixtures that stamp no epoch still
+    /// pass. See the epoch gate in `handle_list_worktrees`.
     pub load_epoch: u64,
 }
 
@@ -1358,15 +1363,25 @@ impl State {
         stderr: &[u8],
         context: &BTreeMap<String, String>,
     ) -> RefreshOutcome {
-        // Epoch gate (issue #216 seventh pass): a result launched by a PREVIOUS
-        // load of this reused plugin id carries a stale `CTX_REQUEST_EPOCH` and
-        // must be Ignored — otherwise its (reset-to-low) request id could
-        // ABA-match this load's guard. Checked FIRST, and fails closed on a
-        // mismatch or a malformed epoch. Absent (tests/legacy) skips the gate.
-        if let Some(raw_epoch) = context.get(CTX_REQUEST_EPOCH) {
-            if raw_epoch.parse::<u64>() != Ok(self.load_epoch) {
-                return RefreshOutcome::Ignored;
-            }
+        // Epoch gate (issue #216 seventh/eighth pass): a result launched by a
+        // PREVIOUS load of this reused plugin id carries the wrong (or, if it
+        // came from a pre-epoch binary in flight across the upgrade reload, NO)
+        // `CTX_REQUEST_EPOCH`, and must be Ignored — otherwise its reset-to-low
+        // request id could ABA-match this load's guard. Enforced FIRST and
+        // fails CLOSED on a mismatched, malformed, OR ABSENT epoch.
+        //
+        // Enforcement is gated on `load_epoch != 0`: `load` always sets a
+        // non-zero wall-clock nonce, so the gate is always live in production;
+        // the `0` sentinel is only the `State::default` of unit tests (which
+        // never call `load`), where legacy fixtures stamp no epoch and must
+        // still be accepted. The eighth-pass rollout gap (absent epoch bypasses
+        // the guard on the first upgrade reload) is closed because a reloaded
+        // instance's `load_epoch` is non-zero.
+        if self.load_epoch != 0
+            && context.get(CTX_REQUEST_EPOCH).and_then(|s| s.parse::<u64>().ok())
+                != Some(self.load_epoch)
+        {
+            return RefreshOutcome::Ignored;
         }
         // Request-identity gate (issue #216 finding 1). A result may only
         // touch refresh state if its stamped request id matches the current
@@ -2467,13 +2482,17 @@ impl State {
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        // Per-load epoch nonce (issue #216 seventh pass): a wall-clock timestamp
-        // captured once at load, distinct across a hot reload (which reuses the
-        // plugin id but re-runs `load` later). Stamped into every refresh's
-        // `CTX_REQUEST_EPOCH` so a previous load's surviving in-flight result is
-        // Ignored instead of ABA-matching this load's request ids. WASI exposes
-        // the realtime clock; if it's somehow unavailable the epoch is 0 (the
-        // ABA guard degrades to the request-id gate alone, never worse).
+        // Per-load epoch nonce (issue #216 seventh pass): a wall-clock
+        // nanosecond timestamp captured once at load, distinct across a hot
+        // reload (which reuses the plugin id but re-runs `load` later). Stamped
+        // into every refresh's `CTX_REQUEST_EPOCH` so a previous load's
+        // surviving in-flight result is Ignored instead of ABA-matching this
+        // load's request ids. NOTE: on this WASI target `SystemTime::now`
+        // delegates to `clock_gettime` and PANICS if the realtime clock is
+        // unavailable — it does NOT return an error. The `unwrap_or(0)` only
+        // handles the (impossible in practice) case of a clock reporting a time
+        // before the Unix epoch. So `load_epoch` is in practice always a large
+        // non-zero nonce, which the epoch gate relies on as its enforce sentinel.
         self.load_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -4923,6 +4942,7 @@ mod tests {
     #[test]
     fn malformed_epoch_fails_closed() {
         let mut s = state_with_worktrees();
+        s.load_epoch = 100; // an initialized epoch → the gate is live
         s.refresh_inflight = Some((1, Instant::now()));
         let mut ctx = BTreeMap::new();
         ctx.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
@@ -4933,6 +4953,29 @@ mod tests {
             "a malformed epoch fails closed"
         );
         assert!(s.refresh_inflight.is_some());
+    }
+
+    // Finding 1 (eighth pass): the rollout gap. A pre-epoch binary's in-flight
+    // result (carrying NO epoch key) survives the upgrade hot reload and reaches
+    // the new epoch-aware instance; it must fail CLOSED (Ignored) rather than
+    // ABA-match the reset request id and clear the new guard.
+    #[test]
+    fn absent_epoch_is_ignored_once_epoch_initialized() {
+        let mut s = state_with_worktrees();
+        s.load_epoch = 100; // reloaded (epoch-aware) instance
+        s.refresh_inflight = Some((1, Instant::now())); // this load's request
+
+        // A pre-epoch result: matching request id, but NO epoch key.
+        let mut legacy = BTreeMap::new();
+        legacy.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"old\told\n", b"", &legacy);
+
+        assert_eq!(outcome, RefreshOutcome::Ignored, "an absent epoch fails closed");
+        assert_eq!(
+            s.refresh_inflight.map(|(id, _)| id),
+            Some(1),
+            "it must NOT clear this load's in-flight guard"
+        );
     }
 
     // Finding 2 (fourth pass): a hidden instance schedules NO refresh wake-up,

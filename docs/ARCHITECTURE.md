@@ -213,7 +213,11 @@ pumped by the update/pipe shell after *every* event) unifies five concerns:
   while the old instance's in-flight results still arrive, so an old `id = 1`
   would ABA-match the new `id = 1`. Each launch therefore ALSO stamps a
   per-load `CTX_REQUEST_EPOCH` (`load_epoch`, a wall-clock nonce set once in
-  `load`); a result whose epoch ≠ this load's is Ignored (fail closed).
+  `load`, always non-zero in production); a result whose epoch ≠ this load's —
+  including an ABSENT epoch from a pre-epoch binary in flight across the
+  upgrade reload, or a malformed one — is Ignored (fail closed). Enforcement is
+  keyed off the non-zero `load_epoch`; the `0` sentinel (unit tests only, no
+  `load` call) skips the gate so legacy fixtures still pass.
 - **In-flight guard + timeout.** Refreshes can't stack; a result lost to a
   hidden instance ages out after `REFRESH_IN_FLIGHT_TIMEOUT_SECS`, and
   `pump_refresh` reaps it (and reveal abandons any in-flight request, whose
