@@ -8,7 +8,8 @@ session_name: zelligent-test-repo
 
 Exhaustive check of click/wheel semantics on the persistent sidebar with the
 seeded 3-worktree fixture. Hunts: click-activates-wrong-row (offset bugs),
-selection/active-highlight desync, two-click contract violations.
+selection/active-highlight desync, single-click select+activate landing on the
+wrong row, and clicks leaking through the focus-claim guard.
 
 Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 220 -y 60 -c /tmp/zelligent-test-repo`
 
@@ -35,7 +36,17 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 - Each item = 2 lines. Title line: `▌ name` (cyan bar + space) when the cursor is on it, else two spaces + name. Subtitle line (dim): `branch: X` for worktrees, `current repo` for local, `user tab` for manual tabs.
 - The Zellij-active tab's row title is BOLD CYAN — independent axis from the ▌ cursor.
 - Footer (36 cols = narrow variant): `↑/k up  ↓/j down  Enter open` / `n branch  i new  d del  r ↻` / version line.
-- Two-click contract: first click on a non-selected row moves ▌ only; second click on the already-selected row activates (switch if tab exists, spawn if detached). Blank/header/footer clicks: no-op. Wheel: ▌ moves one row, wraps at both ends. Right-click: no-op.
+- Single-click select+activate contract (#135/#137, reaffirmed PR #211): a real click on a non-active row immediately SELECTS and ACTIVATES it (switch if its tab is open, spawn if detached) — there is NO separate select click. The one caveat is the focus-claim click (see Harness corrections): the first click after every cross-tab landing is swallowed with zero state change, so it takes one focus-claim click plus one real click to activate from a freshly-landed sidebar. Blank/header/footer clicks: no-op. Wheel and `j`/`k`: cursor-only, ▌ moves one row and wraps at both ends, no activation; `Enter` activates the ▌ row. Right-click: no-op.
+
+## Harness corrections (READ FIRST — these reflect the current contract)
+
+1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls (`\033[<0;C;RM` then `\033[<0;C;Rm`). Wheel events need no setup.
+2. SINGLE-CLICK SELECT+ACTIVATE (#135/#137, reaffirmed PR #211): a real click on a non-active row immediately SELECTS and ACTIVATES it — spawn if detached, switch if open. There is NO two-click select-then-activate contract. Wheel and `j`/`k` are cursor-only (move ▌ without activating); `Enter` activates the ▌ row.
+3. FOCUS-CLAIM CLICK: a sidebar pane that is not click-focused eats exactly one click with zero state change, and this recurs after EVERY cross-tab landing (a spawn/switch moves keyboard+click focus to the new tab's main pane). So the FIRST click after each landing is swallowed; the next real click is the one that activates. Count clicks from the first one the plugin actually receives.
+4. SUBTITLE-OFFSET BUG FIXED: clicks map to their OWN item at ZERO offset, scrolled or not (reverified in the 2026-08-05 run at viewport starts 1, 2, 3). Clicking a row's subtitle line selects/activates THAT row, not the next one. The blank line above `local` and the header/footer lines are true no-ops (not an item-0 offset).
+5. IN-PANE HEADER RENDERS: post-#218 the sidebar is borderless and the repo-name header (` zelligent-test-repo `) renders as the SOLE title line — it is no longer "missing." KNOWN (BUG-2): a cold-start blank header can still occur and, on large fixtures, persist for the whole session; note it once, do not re-diagnose.
+6. The ▌ gutter renders on BOTH lines of the selected item — correct behavior, not a finding.
+7. KNOWN OPEN OBSERVATION: `Action CliPipe did not complete within 1s timeout` fires in bursts (10–34/session) correlated with every spawn/remove/pipe-invalidate. Record the count and continue; see the README "Known open observations."
 
 ## Test 1: Startup render is exactly as specified
 - Action: launch, wait ~8s, capture.
@@ -61,50 +72,42 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 - Action: wheel-up once.
 - Expected: ▌ on `feature-c`.
 
-## Test 7: First click on a non-selected row selects EXACTLY that row
-- Action: capture, find the line containing `feature-b` (title line), left-click COL=10 on that line.
-- Expected: ▌ moves to `feature-b` — NOT feature-a, NOT feature-c (off-by-one hunt). Active tab still `zelligent-test-repo`; NO spawn message; tab bar unchanged.
+## Test 7: The first click is the focus-claim — it is swallowed
+- Action: after the wheel steps the sidebar pane is not click-focused. Capture; find the `feature-b` title line; left-click COL=10 on that line; capture.
+- Expected: ZERO change — ▌ stays where the wheel left it, no activation, no `Spawning` message, active tab still `zelligent-test-repo`. Zellij's click-to-focus ate this click (it recurs after every cross-tab landing, not just startup). Count real clicks from the NEXT one.
 
-## Test 8: Clicking a SUBTITLE line maps to the same item
-- Action: click the `branch: feature-a` subtitle line.
-- Expected: ▌ moves to `feature-a` (title+subtitle map to one item). No activation (feature-a was not selected).
+## Test 8: A real click select+activates EXACTLY that detached row (zero-offset spawn)
+- Action: the sidebar is now click-focused. Left-click the `feature-b` title line.
+- Expected: single-click select+activate — ▌ moves to `feature-b` AND it activates. `feature-b` is detached, so status shows `Spawning 'feature-b'...` (green); after ~8s a tab named `feature-b` exists and is active; `feature-b` row title now BOLD CYAN; subtitle still `branch: feature-b`. It must be `feature-b` — NOT feature-a, NOT feature-c (zero-offset mapping, the off-by-one hunt). Still exactly 4 rows; no duplicate `feature-b` row, no stray `user tab` row (self-heal check).
 
-## Test 9: Click on header line is a no-op
-- Action: click the ` zelligent-test-repo ` header line.
-- Expected: ▌ stays on `feature-a`; no activation, no spawn message. If ▌ jumps to `local` or any activation fires, that is an offset-mapping bug — FAIL and write repro.
+## Test 9: Subtitle click maps to its OWN item (subtitle-offset bug FIXED)
+- Action: you just landed in the `feature-b` tab, so its sidebar is not click-focused. Left-click the `branch: feature-a` SUBTITLE line once (focus-claim — expect no change), then left-click the same subtitle line again.
+- Expected: the second (real) click moves ▌ to `feature-a` and activates it (spawns — feature-a is detached). The subtitle maps to `feature-a` at ZERO offset — the historical "clicking a SUBTITLE selects the NEXT item" deviation is FIXED (#135/#137). It must NOT land on feature-b or local.
 
-## Test 10: Click on the blank separator line (between header and first row) is a no-op
-- Action: click the blank line directly above the `local` title line.
-- Expected: no selection change, no activation.
+## Test 10: Click on the header line is a no-op (no item-0 offset)
+- Action: you landed in the feature-a tab. Left-click the ` zelligent-test-repo ` header line once (focus-claim — no change), then click the header line again.
+- Expected: the second header click does nothing — ▌ unchanged, no activation, no spawn message. If ▌ jumps to `local` or any activation fires, that is an offset-mapping bug — FAIL and write repro.
 
-## Test 11: Click on a blank line below the list is a no-op
-- Action: click a blank line 2–3 lines below `branch: feature-c`.
-- Expected: no change.
+## Test 11: Blank and footer clicks are no-ops
+- Action: the sidebar is now click-focused. Click the blank separator line directly above the `local` title; capture. Click a blank line 2–3 lines below `branch: feature-c`; capture. Click the `n branch  i new  d del  r ↻` footer line; capture.
+- Expected: none of these change selection or activate anything.
 
-## Test 12: Click on footer keybind line is a no-op
-- Action: click the `n branch  i new  d del  r ↻` line.
-- Expected: no change.
-
-## Test 13: Right-click is a no-op
+## Test 12: Right-click is a no-op
 - Action: right-click the `feature-c` title line.
-- Expected: ▌ still on `feature-a`; nothing activates.
+- Expected: no selection change; nothing activates.
 
-## Test 14: Second click on selected detached row spawns THAT branch
-- Action: click `feature-a` title line (already selected → second click).
-- Expected: status area shows `Spawning 'feature-a'...` (green); after ~8s a tab named `feature-a` exists in the tab bar and is active; sidebar still visible in the new tab; `feature-a` row title now BOLD CYAN; subtitle still `branch: feature-a`; still exactly 4 rows — no duplicate feature-a row, no stray `user tab` row (self-heal check).
+## Test 13: Click on an OPEN worktree row switches (does not spawn)
+- Action: `feature-a` and `feature-b` tabs are open now. Ensure the sidebar is click-focused (spend a focus-claim click on a title line you intend to land on anyway if it is not). Click the `feature-b` title line.
+- Expected: no `Spawning` message; active tab switches to `feature-b` (bold cyan + main-pane frame title agree); NO new tab created (tab count unchanged).
 
-## Test 15: Switch back to repo tab via two clicks on `local`
-- Action: click `local` title line (selects), capture, click again (activates).
-- Expected: after first click ▌ on `local` while `feature-a` keeps bold cyan; after second click active tab = `zelligent-test-repo`, `local` bold cyan, `feature-a` plain.
+## Test 14: Click `local` switches back to the repo tab
+- Action: sidebar focused; click the `local` title line.
+- Expected: active tab = `zelligent-test-repo`; `local` BOLD CYAN; feature titles plain. One real click (after focus is claimed) both selects and switches — there is no separate select step.
 
-## Test 16: Two-click on an OPEN worktree row switches (not spawns)
-- Action: click `feature-a` row, capture, click again.
-- Expected: no `Spawning` message; active tab becomes `feature-a` (tab bar + bold cyan agree); no new tab created (tab count unchanged).
+## Test 15: Keyboard parity — j/k are cursor-only, Enter activates
+- Action: sidebar focused; press `k`, capture; press `k`, capture; press Enter.
+- Expected: each `k` moves ▌ up one row with wrap semantics identical to the wheel and WITHOUT activating anything (keyboard navigation is cursor-only); Enter then activates the ▌ row (switch if its tab is open, spawn if detached) exactly as a real click would.
 
-## Test 17: Keyboard parity — j/k/Enter agree with mouse
-- Action: (sidebar pane has focus from prior clicks) press `k`, capture; press `k`, capture; press Enter.
-- Expected: each `k` moves ▌ up one row with wrap semantics identical to wheel; Enter on `local` switches to the repo tab exactly as the second click did.
-
-## Test 18: Full-screen anomaly sweep
+## Test 16: Full-screen anomaly sweep
 - Action: capture both windows' full output once more.
-- Expected: no garbled lines, no SCROLL: N/N counter, no duplicated sidebar frames, no orphan tabs in tab bar. List anything odd.
+- Expected: no garbled lines, no SCROLL: N/N counter, no duplicated sidebar frames, no orphan tabs. List anything odd. Expect a burst of `Action CliPipe did not complete within 1s timeout` lines correlated with the spawns/switches above (known open observation — see the README); record the count, do not re-diagnose.

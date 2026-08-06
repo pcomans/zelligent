@@ -21,7 +21,7 @@ Same as ui-audit-01, with `ARCHIVE=/tmp/zelligent-ui-run/03-scroll`. Plain+ANSI 
 
 Mouse encoding: left click `\033[<0;COL;ROWM\033[<0;COL;ROWm`, wheel `\033[<64/65;COL;ROWM`, COL=10, via `tmux send-keys -l "$(printf ...)"`.
 
-Expected item list (11 items, in order): `local`, `wt-01`…`wt-08`, `agent-mouse-test`, `feature-very-long-branch-name-for-truncation-check`.
+Expected item list (11 items, in order): `local`, then the worktrees sorted alphabetically by DIRECTORY name — `agent-mouse-test`, `feature-very-long-branch-name-for-truncation-check`, `wt-01`…`wt-08`. So the LAST item is `wt-08` (not the long-name row, which sits at index 2). (Confirmed empirically 2026-08-05; the fixture CREATES them in a different order — creation order is not display order.)
 
 Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane's height; the selected item is ALWAYS within the visible window; `start = selected - max_items + 1` once selected ≥ max_items.
 
@@ -29,8 +29,8 @@ Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Verify "a tab named X is active" via the MAIN pane's frame title and the sidebar's bold-cyan row; corroborate via ctrl window `zellij --session zelligent-test-repo action query-tab-names` (read-only only).
-3. KNOWN BUG (confirmed in run 01, in the UNSCROLLED state): clicking a SUBTITLE line selects the NEXT item; clicking the blank line under the header selects item 0; the in-pane header line is missing entirely (content starts with a blank line). For THIS plan: Tests 7/8/9 measure the mapping in the SCROLLED state — run them exactly as written and report the exact delta between clicked row and selected row (we need to know whether the offset is the same one line, or compounds with viewport start).
-4. The ▌ gutter renders on BOTH lines of the selected item — correct behavior, not a finding.
+3. SINGLE-CLICK SELECT+ACTIVATE (#135/#137, reaffirmed PR #211): a real click select+activates its row — spawn if detached, switch if open — after the focus-claim click (the first click following any cross-tab landing is swallowed with zero state change). Wheel and `j`/`k` are cursor-only. SUBTITLE-OFFSET BUG FIXED (reverified 2026-08-05 at viewport starts 1, 2, 3): clicks map to their OWN item at ZERO offset whether scrolled or not; clicking a subtitle line hits that same row, and the blank line above `local` plus the header/footer are true no-ops. Tests 7/8/9 now CONFIRM zero-offset mapping in the SCROLLED state — a nonzero delta between clicked row and selected/activated row is a regression, not the expected finding.
+4. IN-PANE HEADER RENDERS: post-#218 the sidebar is borderless and the repo-name header renders as the SOLE title line (no longer "missing"). KNOWN (BUG-2): on this large scroll fixture especially, a cold-start blank header can persist the WHOLE session — note it once, do not re-diagnose. The ▌ gutter renders on BOTH lines of the selected item — correct behavior, not a finding.
 
 ## Test 1: Startup — partial list, no corruption
 - Action: launch, wait ~8s, capture.
@@ -54,7 +54,7 @@ Viewport rule (from code): `max_items = max(1, (rows-5)/2)` for the sidebar pane
 
 ## Test 6: Wrap-around at top jumps viewport to bottom
 - Action: wheel-up once from `local`.
-- Expected: ▌ on the long-name item (last), viewport shows the tail of the list.
+- Expected: ▌ on `wt-08` (the LAST item in display order), viewport shows the tail of the list.
 
 ## Test 7: CLICK MAPPING WITH SCROLLED VIEWPORT — the critical check
 - Action: viewport is now scrolled (start > 0 from Test 6). Capture; pick a visible row in the MIDDLE of the window that is NOT selected, e.g. `wt-06` (use whatever is visible); left-click its TITLE line.
