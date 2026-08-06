@@ -203,12 +203,17 @@ with many worktrees — must not turn a transient failure into a permanent
 spin. A single lifecycle (`pump_refresh`, driven via `Action::Refresh` and
 pumped by the update/pipe shell after *every* event) unifies five concerns:
 
-- **Request identity.** Each launch bumps `refresh_seq` and stamps it into
-  the context as `CTX_REQUEST_ID`; the in-flight request is `refresh_inflight
-  = (id, launched_at)`. Only a result whose id matches the current in-flight
-  request may touch state or fire the follow-on branch fetch — so a
-  timed-out-then-relaunched request's late result can't clear the newer
-  request's guard, overwrite its state, or double-spawn branches.
+- **Request identity (+ reload epoch).** Each launch bumps `refresh_seq` and
+  stamps it into the context as `CTX_REQUEST_ID`; the in-flight request is
+  `refresh_inflight = (id, launched_at)`. Only a result whose id matches the
+  current in-flight request may touch state or fire the follow-on branch fetch
+  — so a timed-out-then-relaunched request's late result can't clear the newer
+  request's guard, overwrite its state, or double-spawn branches. A HOT RELOAD
+  makes a fresh `State` (resetting `refresh_seq` to 0) with the SAME plugin id
+  while the old instance's in-flight results still arrive, so an old `id = 1`
+  would ABA-match the new `id = 1`. Each launch therefore ALSO stamps a
+  per-load `CTX_REQUEST_EPOCH` (`load_epoch`, a wall-clock nonce set once in
+  `load`); a result whose epoch ≠ this load's is Ignored (fail closed).
 - **In-flight guard + timeout.** Refreshes can't stack; a result lost to a
   hidden instance ages out after `REFRESH_IN_FLIGHT_TIMEOUT_SECS`, and
   `pump_refresh` reaps it (and reveal abandons any in-flight request, whose
@@ -248,23 +253,28 @@ pumped by the update/pipe shell after *every* event) unifies five concerns:
   *appear* with no other event; the Timer/reveal paths repaint when `is_stale()`
   differs from the last painted frame (`last_rendered_stale`), and a reveal
   always repaints (so a status message cleared while hidden is redrawn away).
-- **Hidden instances don't spin the refresh lifecycle.** While `!is_visible`,
-  `next_wakeup_deadline` omits the refresh deadlines, the Timer path and the
-  `update`/`pipe` tails skip `pump_refresh`, and `request_refresh` only RECORDS
-  `refresh_pending`/`cache_dirty`. So a hidden instance never wakes to
-  reap-and-relaunch `list-worktrees`, and a broadcast invalidate/status pipe
-  (which reaches hidden instances) can't drive one either. `is_visible` is
-  authoritative ONLY from `Event::Visible(true/false)` and from genuine user
-  input (`Key`/`Mouse`, which reach only a focused pane) — NOT from a
+- **Explicitly-hidden instances don't spin the refresh lifecycle.** Visibility
+  is TRI-STATE (`visibility: Option<bool>`): `None` = unknown since load,
+  `Some(true)` = visible, `Some(false)` = explicitly hidden. It is authoritative
+  ONLY from `Event::Visible(true/false)` and from genuine user input
+  (`Key`/`Mouse`, which reach only a focused pane) — NOT from a
   `TabUpdate`/`PaneUpdate` or a directed `RunCommandResult`/
   `PermissionRequestResult`, all of which zellij delivers to background
-  instances too (verified in zellij-server 0.44.3), so treating them as proof
-  of visibility would un-hide a hidden instance and reopen its pumps. Bootstrap
-  and the `r`-key refresh still work: the active sidebar gets `Visible(true)`,
-  and a keystroke marks visibility directly. The owed refresh survives in
-  `refresh_pending`/`cache_dirty`, and the reveal path (which abandons any
-  in-flight request and pumps) drains it. Status expiry is still scheduled
-  while hidden — it spawns no process — so a message can clear on its own.
+  instances too (zellij-server 0.44.3), so treating them as proof of visibility
+  would un-hide a hidden instance and reopen its pumps. The refresh lifecycle is
+  gated by `not_hidden()` (`visibility != Some(false)`): only an EXPLICITLY
+  hidden instance has `next_wakeup_deadline` omit the refresh deadlines, the
+  Timer/tail paths skip `pump_refresh`, and `request_refresh` merely RECORD
+  `refresh_pending`/`cache_dirty` — so it never wakes to reap-and-relaunch
+  `list-worktrees`, and a broadcast invalidate/status pipe can't drive one
+  either. The reveal path (which abandons any in-flight request and pumps)
+  drains the owed refresh. An UNKNOWN (`None`) instance is treated as
+  pump-allowed (bootstrap semantics): this is what un-wedges a HOT RELOAD — a
+  reloaded visible sidebar starts `None` and gets NO `Visible` transition, yet
+  must populate without user input, matching main's "every fresh instance fires
+  its initial refresh". Only the strict `is_visible()` (`Some(true)`) answers
+  the `PIPE_FOCUS` self-focus, so an unknown/background instance never steals
+  focus. Status expiry is scheduled regardless (it spawns no process).
 
 Because the branch list is consumed only by the `n` picker, `list-branches`
 is fetched lazily — only alongside a *successful* worktree refresh — so the

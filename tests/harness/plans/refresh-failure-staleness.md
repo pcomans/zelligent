@@ -67,10 +67,11 @@ same `io::Error` path the reported EMFILE (`os error 24`) took.
   (Equivalently, restore the exact `$Z.disabled` path recorded in Test 3.)
 - Expected: The installed `zelligent` binary exists again at its original path.
 
-## Test 9: Timer-driven retry clears the marker (no keypress) — finding 3
-- Action: WITHOUT pressing any key in the view window, wait up to ~25s (the backoff may have grown to several seconds over the repeated failures), capturing plain + ANSI every ~5s in batched shell calls.
+## Test 9: Timer-driven retry clears the marker (no keypress)
+- Action: WITHOUT pressing any key in the view window, wait up to ~35s, capturing plain + ANSI every ~5s in batched shell calls.
 - Expected: On one of the backoff wake-ups the refresh now succeeds; the yellow `stale · retrying` marker DISAPPEARS on its own and the list re-renders cleanly. (This proves the retry is timer-driven, not dependent on a `TabUpdate` or a manual refresh.)
-- Fallback (only if the marker has not cleared within the window): re-click the sidebar to focus and press `r`; the marker must then clear immediately. Note in the report whether the timer path or the manual fallback cleared it.
+- Timing note: the retry cadence is the EXPONENTIAL backoff that started at the Test 4 `r` press (2s, then 4s, 8s, 16s, … capped at 60s). Only `r` resets the backoff — the `e`/`j`/`k` presses in Tests 6–7 do NOT — so by restore time the window may be ~16–30s; hence the generous wait. The next wake-up after the CLI is restored succeeds.
+- Fallback (only if the marker has not cleared within the window): re-click the sidebar to focus and press `r` (which resets the backoff and retries immediately); the marker must then clear at once. Note in the report whether the timer path or the manual fallback cleared it.
 
 ## Test 10: Clean final state
 - Action: Capture plain + ANSI one more time.

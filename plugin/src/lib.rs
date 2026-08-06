@@ -122,6 +122,14 @@ pub const CTX_GENERATION: &str = "generation";
 /// one) skips the identity gate and is accepted.
 pub const CTX_REQUEST_ID: &str = "request_id";
 
+/// Context key carrying the per-load epoch nonce (`State::load_epoch`) a
+/// `list-worktrees` refresh was launched under (issue #216 seventh pass).
+/// Guards request identity across a HOT RELOAD, where `refresh_seq` resets to
+/// 0 but the old instance's in-flight results survive and would ABA-match the
+/// new instance's ids. A result whose epoch != the current load's is Ignored
+/// (fail closed). Absent (tests/legacy) skips the epoch gate.
+pub const CTX_REQUEST_EPOCH: &str = "request_epoch";
+
 /// Pipe name for "reply with your known agent statuses". Broadcast once by
 /// a plugin instance when its RunCommands grant lands (`Event::
 /// PermissionRequestResult(Granted)` — never from `load()`, where
@@ -330,19 +338,24 @@ pub struct State {
     /// covers the other ordering, and is correct even against pre-hide
     /// `self.tabs` because the instance's own tab was active then too).
     pub resync_on_reveal: bool,
-    /// Whether this instance's pane is in the currently visible tab. Gates
-    /// the `PIPE_FOCUS` response: the pipe broadcasts to every instance,
-    /// and only the visible one may focus itself. Starts false and is set
-    /// by `Event::Visible` in both directions — but ALSO forced true by any
-    /// received `TabUpdate`, because zellij delivers Events only to
-    /// instances in the visible tab (live-verified, see
-    /// docs/references/zellij-plugin-api.md). The TabUpdate path covers
-    /// instances that never receive an initial `Visible(true)` (e.g.
-    /// resurrected background tabs never get one, and the active tab's
-    /// instance must not depend on event-vs-load ordering). A hidden
-    /// instance receives no Events at all, so nothing can wrongly flip
-    /// this to true while hidden.
-    pub is_visible: bool,
+    /// TRI-STATE visibility (issue #216 seventh pass): `None` = unknown since
+    /// this WASM instance loaded, `Some(true)` = visible, `Some(false)` =
+    /// explicitly hidden. Authoritative only from `Event::Visible(true/false)`
+    /// and genuine user input (`Key`/`Mouse`, which reach only a focused pane)
+    /// — NOT from `TabUpdate`/`PaneUpdate` or directed async results, which
+    /// zellij delivers to background instances too (zellij-server 0.44.3).
+    ///
+    /// The tri-state exists because a HOT PLUGIN RELOAD makes a fresh
+    /// `State::default` (`visibility = None`) with the same plugin id and sends
+    /// NO `Visible` transition. Treating `None` as "hidden" would wedge a
+    /// reloaded visible sidebar (its bootstrap refresh would be gated and
+    /// nothing repairs visibility). So `None` is treated as pump-ALLOWED
+    /// (`not_hidden`) — bootstrap semantics matching main's historical
+    /// behavior where every fresh instance fires its initial refresh — while
+    /// only an EXPLICIT `Some(false)` gates the refresh lifecycle hard. The
+    /// strict `is_visible()` (`Some(true)`) still gates the `PIPE_FOCUS`
+    /// self-focus, so an unknown/background instance never steals focus.
+    pub visibility: Option<bool>,
     /// When the currently displayed `status_message` was set (`None` when
     /// no message is showing). THE source of truth for expiry (#152):
     /// `handle_timer` and `handle_visible` clear the message iff it is at
@@ -437,6 +450,16 @@ pub struct State {
     /// state change, and that transition must reach the screen. Updated by
     /// `render`.
     pub last_rendered_stale: bool,
+    /// Per-load epoch nonce guarding request identity across a HOT RELOAD
+    /// (issue #216 seventh pass). A reload makes a fresh `State` — resetting
+    /// `refresh_seq` to 0 — but the OLD instance's in-flight `run_command`
+    /// results survive and are delivered to the reused plugin id, so an old
+    /// `request_id = 1` would ABA-match the new instance's `request_id = 1`,
+    /// clear its in-flight guard, and get the genuine new result Ignored.
+    /// Every launch stamps this epoch into `CTX_REQUEST_EPOCH`; a result whose
+    /// epoch != the current load's is Ignored (fail closed). Set once in
+    /// `load` from a wall-clock nonce; `0` in unit tests (which never reload).
+    pub load_epoch: u64,
 }
 
 /// Outcome of applying a `list-worktrees` result (issue #216 rework). The
@@ -673,7 +696,7 @@ impl State {
     /// actually fires later: expiry is decided by age, and a redundant
     /// wake-up on a young message is a no-op.
     pub fn handle_visible(&mut self, visible: bool) -> bool {
-        self.is_visible = visible;
+        self.visibility = Some(visible);
         if !visible {
             return false;
         }
@@ -722,6 +745,23 @@ impl State {
         self.cache_dirty = dirty;
     }
 
+    /// May this instance advance its refresh lifecycle (pump/launch/schedule
+    /// refresh wake-ups)? True unless it was EXPLICITLY told it's hidden
+    /// (`Some(false)`); an unknown (`None`, e.g. fresh after a hot reload) or
+    /// visible instance is allowed — bootstrap semantics (issue #216 seventh
+    /// pass). Only `Some(false)` — a real `Visible(false)` — gates the
+    /// lifecycle, which is where the hidden-relaunch protection matters.
+    fn not_hidden(&self) -> bool {
+        self.visibility != Some(false)
+    }
+
+    /// Is this instance DEFINITELY visible? Strict `Some(true)` — used for the
+    /// `PIPE_FOCUS` self-focus so an unknown/background instance never steals
+    /// focus (issue #216 seventh pass).
+    fn is_visible(&self) -> bool {
+        self.visibility == Some(true)
+    }
+
     /// Is a refresh still owed? Either one was explicitly deferred, or a
     /// known invalidation (`cache_dirty`) is unsatisfied. See finding 2.
     fn wants_refresh(&self) -> bool {
@@ -755,7 +795,7 @@ impl State {
                 candidates.push(set_at + Duration::from_secs_f64(STATUS_MESSAGE_TTL_SECS));
             }
         }
-        if self.is_visible {
+        if self.not_hidden() {
             if let Some((_, started)) = self.refresh_inflight {
                 candidates
                     .push(started + Duration::from_secs_f64(REFRESH_IN_FLIGHT_TIMEOUT_SECS));
@@ -852,7 +892,7 @@ impl State {
     /// explicit pump here just makes the pipe/visible path immediate.
     fn request_refresh(&mut self) {
         self.refresh_pending = true;
-        if self.is_visible {
+        if self.not_hidden() {
             self.pump_refresh();
         }
     }
@@ -913,6 +953,10 @@ impl State {
             self.invalidate_generation.to_string(),
         );
         ctx.insert(CTX_REQUEST_ID.to_string(), self.refresh_seq.to_string());
+        // Per-load epoch (issue #216 seventh pass): tells a result from THIS
+        // instance apart from one launched by a previous load with the same
+        // reused plugin id (hot reload resets `refresh_seq`).
+        ctx.insert(CTX_REQUEST_EPOCH.to_string(), self.load_epoch.to_string());
         run_command_with_env_variables_and_cwd(
             &[&self.zelligent_path, "list-worktrees"],
             BTreeMap::new(),
@@ -1314,6 +1358,16 @@ impl State {
         stderr: &[u8],
         context: &BTreeMap<String, String>,
     ) -> RefreshOutcome {
+        // Epoch gate (issue #216 seventh pass): a result launched by a PREVIOUS
+        // load of this reused plugin id carries a stale `CTX_REQUEST_EPOCH` and
+        // must be Ignored — otherwise its (reset-to-low) request id could
+        // ABA-match this load's guard. Checked FIRST, and fails closed on a
+        // mismatch or a malformed epoch. Absent (tests/legacy) skips the gate.
+        if let Some(raw_epoch) = context.get(CTX_REQUEST_EPOCH) {
+            if raw_epoch.parse::<u64>() != Ok(self.load_epoch) {
+                return RefreshOutcome::Ignored;
+            }
+        }
         // Request-identity gate (issue #216 finding 1). A result may only
         // touch refresh state if its stamped request id matches the current
         // in-flight request. This defeats the timed-out-then-relaunched race:
@@ -2047,7 +2101,7 @@ impl State {
         // sidebar pane (e.g. one created before doctor installed the
         // new-tab template), no instance is visible and the key is a no-op.
         if msg.name == PIPE_FOCUS {
-            if self.is_visible {
+            if self.is_visible() {
                 return Action::FocusSelf;
             }
             return Action::None;
@@ -2413,6 +2467,18 @@ impl State {
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        // Per-load epoch nonce (issue #216 seventh pass): a wall-clock timestamp
+        // captured once at load, distinct across a hot reload (which reuses the
+        // plugin id but re-runs `load` later). Stamped into every refresh's
+        // `CTX_REQUEST_EPOCH` so a previous load's surviving in-flight result is
+        // Ignored instead of ABA-matching this load's request ids. WASI exposes
+        // the realtime clock; if it's somehow unavailable the epoch is 0 (the
+        // ABA guard degrades to the request-id gate alone, never worse).
+        self.load_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
         self.agent_cmd = configuration
             .get("agent_cmd")
             .cloned()
@@ -2513,7 +2579,7 @@ impl ZellijPlugin for State {
             // refresh survives in `refresh_pending`/`cache_dirty` and the reveal
             // path drains it. (`next_wakeup_deadline` likewise omits refresh
             // deadlines while hidden, so nothing re-arms a refresh wake-up.)
-            if self.is_visible {
+            if self.not_hidden() {
                 self.pump_refresh();
             }
             self.schedule_wakeup();
@@ -2608,7 +2674,7 @@ impl ZellijPlugin for State {
                 // authoritative visibility (sixth-pass finding 1). This is what
                 // keeps the `r`-key refresh working even if no `Event::Visible`
                 // arrived yet.
-                self.is_visible = true;
+                self.visibility = Some(true);
                 match self.mode {
                     Mode::Loading => Action::None,
                     Mode::NotGitRepo => self.handle_key_not_git_repo(&key),
@@ -2620,7 +2686,7 @@ impl ZellijPlugin for State {
             }
             Event::Mouse(mouse) => {
                 // A mouse event likewise reaches only the focused/visible pane.
-                self.is_visible = true;
+                self.visibility = Some(true);
                 match self.mode {
                     Mode::BrowseWorktrees => self.handle_mouse_browse(&mouse),
                     _ => Action::None,
@@ -2636,7 +2702,7 @@ impl ZellijPlugin for State {
         // refresh, reaps a timed-out in-flight request, and re-arms the retry
         // wake-up. `schedule_wakeup` (run regardless — while hidden it yields
         // only the process-free status wake-up) dedups against outstanding arms.
-        if self.is_visible {
+        if self.not_hidden() {
             self.pump_refresh();
         }
         self.schedule_wakeup();
@@ -2667,7 +2733,7 @@ impl ZellijPlugin for State {
         // pumps immediately. The wake-up scheduling runs regardless — while
         // hidden `next_wakeup_deadline` yields only the status expiry (no
         // process), so no refresh timer is armed.
-        if self.is_visible {
+        if self.not_hidden() {
             self.pump_refresh();
         }
         self.schedule_wakeup();
@@ -4566,7 +4632,7 @@ mod tests {
     #[test]
     fn repeated_scheduling_in_one_window_arms_a_single_timer() {
         let mut s = State::default();
-        s.is_visible = true; // refresh deadlines only count while visible (finding 2)
+        s.visibility = Some(true); // refresh deadlines only count while visible (finding 2)
         s.refresh_inflight = Some((1, Instant::now())); // one in-flight window
         let mut arms = 0;
         for _ in 0..100 {
@@ -4582,7 +4648,7 @@ mod tests {
     #[test]
     fn timer_reschedules_and_only_an_earlier_deadline_rearms() {
         let mut s = State::default();
-        s.is_visible = true;
+        s.visibility = Some(true);
         s.refresh_inflight = Some((1, Instant::now()));
         s.schedule_wakeup();
         assert!(s.timer_needs_arming, "first schedule arms the in-flight timeout");
@@ -4614,7 +4680,7 @@ mod tests {
     #[test]
     fn status_and_refresh_share_one_timer_no_duplicate_across_a_fire() {
         let mut s = State::default();
-        s.is_visible = true;
+        s.visibility = Some(true);
         s.refresh_inflight = Some((1, Instant::now())); // deadline ~30s
         s.set_status("working", false); // deadline ~8s (earlier)
 
@@ -4655,7 +4721,7 @@ mod tests {
     #[test]
     fn preemption_keeps_arms_bounded_and_loses_no_wakeup() {
         let mut s = State::default();
-        s.is_visible = true;
+        s.visibility = Some(true);
         s.refresh_inflight = Some((1, Instant::now())); // in-flight timeout ~30s
         s.schedule_wakeup();
         s.timer_needs_arming = false;
@@ -4697,7 +4763,7 @@ mod tests {
     #[test]
     fn a_queued_arm_covers_the_deadline_and_delivering_it_makes_no_duplicate() {
         let mut s = State::default();
-        s.is_visible = true;
+        s.visibility = Some(true);
         s.refresh_inflight = Some((1, Instant::now())); // desired ~now+30
         // A pre-existing queued arm (armed before the hide) that fires sooner.
         s.outstanding_arms.push(Instant::now() + Duration::from_secs_f64(1.0));
@@ -4722,7 +4788,7 @@ mod tests {
     #[test]
     fn delayed_delivery_arm_is_not_purged_and_retires_correctly() {
         let mut s = State::default();
-        s.is_visible = true;
+        s.visibility = Some(true);
         // A (status-ish) arm already past its fire-time but not yet delivered,
         // and B (refresh-ish) still in the future.
         let a = Instant::now() - Duration::from_secs_f64(0.5);
@@ -4774,10 +4840,99 @@ mod tests {
     #[test]
     fn applying_a_refresh_result_does_not_mark_instance_visible() {
         let mut s = state_with_worktrees();
-        s.is_visible = false;
+        s.visibility = Some(false);
         let ctx = accept_ctx(&mut s, 0);
         s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &ctx);
-        assert!(!s.is_visible, "a directed result must not un-hide the instance");
+        assert!(!s.is_visible(), "a directed result must not un-hide the instance");
+    }
+
+    // Finding 1 (seventh pass): tri-state visibility. Only an EXPLICIT
+    // Some(false) gates the refresh lifecycle; unknown (None — e.g. fresh after
+    // a hot reload) is treated as pump-allowed so a reloaded visible sidebar
+    // bootstraps without user input.
+    #[test]
+    fn tri_state_visibility_gates_refresh_only_when_explicitly_hidden() {
+        let mut s = State::default();
+        s.refresh_inflight = Some((1, Instant::now()));
+
+        // Unknown (fresh/reloaded): pump-allowed, refresh wake-ups scheduled.
+        assert_eq!(s.visibility, None);
+        assert!(s.not_hidden(), "unknown visibility is pump-allowed (bootstrap)");
+        assert!(!s.is_visible(), "…but not DEFINITELY visible (no focus-pipe answer)");
+        assert!(s.next_wakeup_deadline().is_some(), "unknown: refresh wake-up scheduled");
+
+        // Explicitly hidden: gated hard.
+        s.handle_visible(false);
+        assert_eq!(s.visibility, Some(false));
+        assert!(!s.not_hidden());
+        assert!(s.next_wakeup_deadline().is_none(), "explicitly hidden: no refresh wake-up");
+
+        // Visible: allowed again, and definitely visible.
+        s.handle_visible(true);
+        assert!(s.not_hidden() && s.is_visible());
+        assert!(s.next_wakeup_deadline().is_some());
+    }
+
+    // Finding 1 (seventh pass): a TabUpdate must not resolve visibility either
+    // way — unknown stays pump-allowed (bootstrap), and an explicitly-hidden
+    // instance stays gated across TabUpdates (no un-hide).
+    #[test]
+    fn tab_update_does_not_change_visibility_gating() {
+        let mut s = State::default();
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.visibility, None, "TabUpdate must not resolve visibility");
+        assert!(s.not_hidden(), "unknown-visibility instance may still bootstrap-pump");
+
+        s.handle_visible(false);
+        s.handle_tab_update(vec![make_tab("feat-a", true)]);
+        assert_eq!(s.visibility, Some(false), "TabUpdate must not un-hide");
+        assert!(!s.not_hidden(), "an explicitly hidden instance stays gated across TabUpdates");
+    }
+
+    // Finding 2 (seventh pass): request-id ABA across a hot reload. A result
+    // from a PREVIOUS load (whose reset refresh_seq gave it the same id) carries
+    // a stale epoch and must be Ignored — it must NOT clear this load's guard,
+    // and this load's own (matching-epoch) result is still accepted.
+    #[test]
+    fn stale_epoch_result_is_ignored_and_preserves_the_guard() {
+        let mut s = state_with_worktrees();
+        s.load_epoch = 100;
+        s.refresh_seq = 1;
+        s.refresh_inflight = Some((1, Instant::now())); // this load's in-flight request
+
+        let mut stale = BTreeMap::new();
+        stale.insert(CTX_REQUEST_ID.to_string(), "1".to_string()); // ABA-matching id
+        stale.insert(CTX_REQUEST_EPOCH.to_string(), "99".to_string()); // previous load
+        let outcome = s.handle_list_worktrees(Some(0), b"old\told\n", b"", &stale);
+        assert_eq!(outcome, RefreshOutcome::Ignored, "a stale-epoch result must be Ignored");
+        assert_eq!(
+            s.refresh_inflight.map(|(id, _)| id),
+            Some(1),
+            "the stale result must NOT clear this load's in-flight guard"
+        );
+
+        // This load's own result (matching epoch) is accepted.
+        let mut fresh = BTreeMap::new();
+        fresh.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
+        fresh.insert(CTX_REQUEST_EPOCH.to_string(), "100".to_string());
+        let outcome = s.handle_list_worktrees(Some(0), b"feat-a\tfeat-a\n", b"", &fresh);
+        assert_eq!(outcome, RefreshOutcome::Succeeded);
+        assert!(s.refresh_inflight.is_none());
+    }
+
+    #[test]
+    fn malformed_epoch_fails_closed() {
+        let mut s = state_with_worktrees();
+        s.refresh_inflight = Some((1, Instant::now()));
+        let mut ctx = BTreeMap::new();
+        ctx.insert(CTX_REQUEST_ID.to_string(), "1".to_string());
+        ctx.insert(CTX_REQUEST_EPOCH.to_string(), "not-a-number".to_string());
+        assert_eq!(
+            s.handle_list_worktrees(Some(0), b"x\tx\n", b"", &ctx),
+            RefreshOutcome::Ignored,
+            "a malformed epoch fails closed"
+        );
+        assert!(s.refresh_inflight.is_some());
     }
 
     // Finding 2 (fourth pass): a hidden instance schedules NO refresh wake-up,
@@ -4786,7 +4941,7 @@ mod tests {
     #[test]
     fn hidden_instance_schedules_no_refresh_wakeup_but_keeps_the_owed_refresh() {
         let mut s = State::default();
-        s.is_visible = false;
+        s.visibility = Some(false);
         s.refresh_inflight = Some((1, Instant::now()));
         s.set_cache_dirty(true);
 
@@ -4804,7 +4959,7 @@ mod tests {
 
         // Once visible, the refresh deadline reappears.
         s.set_status("", false);
-        s.is_visible = true;
+        s.visibility = Some(true);
         assert!(
             s.next_wakeup_deadline().is_some(),
             "visible: the refresh in-flight/grace wake-up is scheduled again"
@@ -4821,7 +4976,7 @@ mod tests {
     #[test]
     fn hidden_instance_pipe_records_staleness_without_scheduling_a_refresh() {
         let mut s = state_with_worktrees();
-        s.is_visible = false;
+        s.visibility = Some(false);
         // An in-flight refresh whose result was lost while hidden, already past
         // the timeout — a visible pump WOULD reap and relaunch it.
         s.refresh_inflight = Some((
@@ -4857,7 +5012,7 @@ mod tests {
     #[test]
     fn grace_boundary_is_scheduled_and_flips_stale_visibility() {
         let mut s = state_with_worktrees();
-        s.is_visible = true;
+        s.visibility = Some(true);
         s.set_cache_dirty(true);
         s.refresh_inflight = Some((1, Instant::now()));
         s.last_rendered_stale = false; // the last frame (under grace) showed no marker
@@ -5494,7 +5649,7 @@ mod tests {
         // — or genuine user input — makes an instance visible.
         let mut s = State::default();
         s.handle_tab_update(vec![make_tab("feat-a", true)]);
-        assert!(!s.is_visible, "a TabUpdate must not un-hide the instance");
+        assert!(!s.is_visible(), "a TabUpdate must not un-hide the instance");
         assert_eq!(s.handle_pipe(&pipe_msg(PIPE_FOCUS, &[])), Action::None);
 
         // Once Visible(true) arrives, it is authoritative and the focus pipe
