@@ -7,7 +7,9 @@ Fixes two interlocked bugs found by the 2026-07 real-input UI audit
   selected the *next* item, and the last item's subtitle mapped past the
   end of the list (dead zone).
 - **Z-2 / #136** — the in-pane header (` zelligent / <repo> ` then; just
-  ` <repo> ` since #156) never
+  ` <repo> ` since #156; now the sidebar's sole title since #218 made the
+  sidebar pane `borderless=true`, dropping the Zellij frame title that used
+  to stack above it — see sidebar-layout-contract.md) never
   displayed in a live session, and the number of leading (non-item) lines
   shifted at runtime whenever a status message wrapped to two physical
   rows, which in turn shifted the Z-1 offset dynamically.

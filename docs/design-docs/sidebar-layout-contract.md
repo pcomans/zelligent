@@ -47,6 +47,14 @@ Unknown placeholders are left untouched.
 fragment owns the surrounding `pane ... { ... }` wrapper, so custom layouts can
 control sidebar geometry and pane naming.
 
+The shipped default wraps the sidebar in a `borderless=true` pane (#218). A
+bordered pane draws a Zellij frame title from the pane `name` (`zelligent`),
+which stacked directly above the plugin's own in-pane header (the repo name) —
+two ruled title bars reading as a "double header". Borderless removes the
+frame so the plugin's in-pane header is the sole title, regardless of the
+user's global `pane_frames` setting. Custom fragments that drop `borderless`
+reintroduce the frame title (and the double header).
+
 `{{zelligent_children}}` is the insertion point for the main tab body:
 
 - startup and spawn tabs receive the default shell+lazygit body unless the

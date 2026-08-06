@@ -377,6 +377,28 @@ resolve_layout_source() {
   return 1
 }
 
+# The pre-#218 canonical shipped default layout (bordered sidebar pane). A
+# `~/.zelligent/layout.kdl` byte-identical to this was auto-provisioned from the
+# old default (by `doctor` or `dev-install.sh`), so migrate it to the current
+# borderless default — otherwise the sidebar keeps the Zellij frame title
+# stacked over the plugin's in-pane header (the "double header", #218). Layouts
+# differing from BOTH this and the current default are genuinely customized and
+# left untouched. Frozen historical constant — dev-install.sh embeds a copy;
+# keep the two in sync.
+legacy_default_layout_pre218() {
+  cat <<'LEGACY_KDL'
+pane split_direction="Vertical" {
+    pane name="zelligent" size=36 {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
+}
+LEGACY_KDL
+}
+
 count_layout_placeholder() {
   local layout_source="$1"
   local placeholder="$2"
@@ -1048,6 +1070,9 @@ PERMS
       echo "  layout: created $USER_LAYOUT_PATH"
     elif cmp -s "$DEFAULT_LAYOUT_PATH" "$USER_LAYOUT_PATH"; then
       echo "  layout: ok"
+    elif legacy_default_layout_pre218 | cmp -s - "$USER_LAYOUT_PATH"; then
+      cp "$DEFAULT_LAYOUT_PATH" "$USER_LAYOUT_PATH"
+      echo "  layout: migrated auto-generated default to current (#218 borderless sidebar)"
     else
       echo "  layout: custom user layout differs from shipped default"
       echo "          Overwrite with: cp \"$DEFAULT_LAYOUT_PATH\" \"$USER_LAYOUT_PATH\""

@@ -16,10 +16,10 @@ Verifies the PR 83 layout behavior started through `zelligent`.
 - Action: Read the terminal buffer
 - Expected: The initial tab shows the sidebar plus the standard shell and lazygit body
 
-## Test 3: Spawn from inside the session keeps the same frame
+## Test 3: Spawn from inside the session keeps the same sidebar pane
 - Action: Spawn from the sidebar UI itself (never from the control window — see README "CLI under test"): focus the sidebar in the view window, press `i`, type `feature-a`, press Enter
 - Expected: A new tab opens in the live session and still shows the persistent left sidebar
 
 ## Test 4: Manual tabs inherit the sidebar
 - Action: Press `Ctrl-t`, then `n` (creates an unnamed tab immediately — Zellij has no inline rename prompt here; do NOT type a name, it would land in the new tab's shell). To name it, use `zellij action rename-tab scratch` from the control window
-- Expected: The new manual tab keeps the left sidebar frame inherited from `default_tab_template`
+- Expected: The new manual tab keeps the borderless left sidebar pane inherited from `default_tab_template` (36 cols, plugin's in-pane ` <repo> ` header, no Zellij frame title above it)

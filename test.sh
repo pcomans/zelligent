@@ -28,7 +28,11 @@ REPO_ROOT="${GIT_COMMON_DIR%/.git}"
 REPO_NAME="$(basename "$REPO_ROOT")"
 # Spawn now requires a resolvable plugin path and layout asset.
 export ZELLIGENT_PLUGIN_SRC="${ZELLIGENT_PLUGIN_SRC:-$SCRIPT}"
-export ZELLIGENT_DEFAULT_LAYOUT_SRC="${ZELLIGENT_DEFAULT_LAYOUT_SRC:-$REPO_ROOT/share/default-layout.kdl}"
+# Read this branch's own default layout (SCRIPT_DIR), not REPO_ROOT's: in a
+# `git worktree` checkout REPO_ROOT is the main repo (see the SCRIPT_DIR note
+# above), so sourcing the asset via REPO_ROOT would validate main's layout
+# instead of the branch's own — masking layout changes under test (#218).
+export ZELLIGENT_DEFAULT_LAYOUT_SRC="${ZELLIGENT_DEFAULT_LAYOUT_SRC:-$SCRIPT_DIR/share/default-layout.kdl}"
 # The test harness drives zelligent without a controlling terminal (commands
 # are captured via `$(...)`), so the production-only TTY guard at the spawn
 # entrypoint must be skipped — the mock zellij stubs never read the terminal.
@@ -173,6 +177,10 @@ contains "layout contains agent command"  'exec claude'              "$out"
 contains "layout contains worktree cwd"   "cwd=\"$EXPECTED_CWD\""   "$out"
 contains "layout contains lazygit"        'command="lazygit"'        "$out"
 contains "layout contains sidebar plugin" 'plugin location="file:'    "$out"
+# #218: the sidebar pane is borderless so Zellij draws no frame title above
+# the plugin's own in-pane header (that stacked pair was the "double header").
+contains "layout: sidebar pane is borderless (no frame title)" \
+  'name="zelligent" size=36 borderless=true' "$out"
 count_equals "L1: exactly one vertical split per tab (sidebar left)" 'split_direction="Vertical"' 1 "$out"
 excludes "layout omits tab-bar"           'zellij:tab-bar'            "$out"
 contains "layout contains status-bar"     'zellij:status-bar'         "$out"
@@ -1187,6 +1195,34 @@ contains "doctor drift: reports custom layout" "layout: custom user layout diffe
 contains "doctor drift: prints overwrite command" "Overwrite with: cp" "$out_drift"
 check "doctor drift: does not rewrite layout" "$DRIFTED_LAYOUT_BEFORE" "$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")"
 
+# doctor legacy-default migration (#218): a user layout byte-identical to the
+# pre-#218 canonical default (bordered sidebar, auto-provisioned by an older
+# doctor/dev-install) is migrated to the current borderless default, so
+# upgraders stop getting the double header. Genuinely customized layouts (the
+# drift case above) are still left untouched.
+cat > "$MOCK_DR_HOME/.zelligent/layout.kdl" <<'KDL'
+pane split_direction="Vertical" {
+    pane name="zelligent" size=36 {
+        {{zelligent_sidebar}}
+    }
+    {{zelligent_children}}
+}
+pane size=1 borderless=true {
+    plugin location="zellij:status-bar"
+}
+KDL
+out_mig=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1); code_mig=$?
+check "doctor migrate exits 0" "0" "$code_mig"
+contains "doctor migrate: reports legacy migration" \
+  "layout: migrated auto-generated default to current (#218 borderless sidebar)" "$out_mig"
+check "doctor migrate: rewrites legacy layout to current shipped default" \
+  "$(cat "$ZELLIGENT_DEFAULT_LAYOUT_SRC")" \
+  "$(cat "$MOCK_DR_HOME/.zelligent/layout.kdl")"
+out_mig2=$(HOME="$MOCK_DR_HOME" ZELLIGENT_PLUGIN_SRC="$FAKE_WASM" \
+  PATH="$MOCK_DR_BIN:/usr/bin:/bin" "$SCRIPT" doctor 2>&1)
+contains "doctor migrate: idempotent (ok) after migration" "layout: ok" "$out_mig2"
+
 rm -rf "$MOCK_DR_BIN" "$MOCK_DR_HOME" "$FAKE_WASM_DIR"
 
 # doctor sweep (#157): auto-fixes an EXITED session whose own sidebar URL is
@@ -1820,7 +1856,9 @@ echo "Install script contract:"
 DEV_INSTALL_CONTENT=$(cat "$SCRIPT_DIR/dev-install.sh")
 contains "dev-install copies default layout asset" 'default-layout.kdl' "$DEV_INSTALL_CONTENT"
 contains "dev-install creates user layout if missing" 'USER_LAYOUT_DST' "$DEV_INSTALL_CONTENT"
-contains "dev-install preserves existing user layout" 'Preserved existing user layout' "$DEV_INSTALL_CONTENT"
+contains "dev-install preserves customized user layout" 'Preserved existing (customized) user layout' "$DEV_INSTALL_CONTENT"
+contains "dev-install migrates legacy default user layout (#218)" 'Migrated legacy default user layout to current' "$DEV_INSTALL_CONTENT"
+contains "dev-install detects legacy default via frozen pre-#218 layout" 'legacy_default_layout_pre218' "$DEV_INSTALL_CONTENT"
 contains "default layout asset exists in repo" '{{zelligent_sidebar}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 contains "default layout asset contains children placeholder" '{{zelligent_children}}' "$(cat "$REPO_ROOT/share/default-layout.kdl")"
 

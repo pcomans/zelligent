@@ -24,6 +24,6 @@ Verifies PR 83 startup behavior in a git repo with no managed worktrees.
 - Action: Read the terminal buffer
 - Expected: A semantic version string (e.g., "0.1.14") appears somewhere in the plugin UI
 
-## Test 5: Manual tabs inherit the sidebar frame
+## Test 5: Manual tabs inherit the sidebar pane
 - Action: Press `Ctrl-t`, then `n`, type `scratch`, and press Enter
-- Expected: The new manual tab still shows the persistent left sidebar pane
+- Expected: The new manual tab still shows the persistent borderless left sidebar pane (36 cols, plugin's in-pane ` <repo> ` header, no Zellij frame title above it)
