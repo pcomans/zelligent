@@ -59,6 +59,12 @@ Conventions: tmux socket `zt-driver-test`, session `zt-driver`, `view` 220x60 +
 - Recreate the tampered EXITED state of R3. From OUTSIDE any zellij session,
   run `zelligent spawn feature-a bash` in the repo dir (spawn's attach-session
   path must hit the same guard before attaching).
+- SAFETY NOTE: this is the ONE legitimate `zelligent spawn` from outside Zellij.
+  The ui-audit plans forbid it because there it would attach a SECOND mirrored
+  client into a LIVE session and leak keystrokes; here the target session is
+  EXITED (dead) and spawn's attach-session path is precisely what must trip the
+  #155 guard, so it cannot be replaced with a sidebar spawn. Run it as the SOLE
+  client — do not have another window attached at the same time.
 - Expected with the guard: stale session dropped + recreated, spawn lands in
   a healthy session. Pre-guard: same magic-header error.
 

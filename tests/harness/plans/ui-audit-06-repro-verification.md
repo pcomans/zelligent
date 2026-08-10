@@ -16,6 +16,26 @@ Harness window: `tmux -L zt-driver-test new-session -d -s zt-driver -n view -x 2
 
 Conventions: as ui-audit-01 (tmux mouse on; press/release separate send-keys; ARCHIVE=/tmp/zelligent-ui-run/06-repro; step captures rNN-*.txt/.ansi; quote evidence; real input only; ctrl window only where stated; ~8s after spawns, ~1s after input).
 
+## Status since the July campaign (READ FIRST — these flip expected outcomes)
+
+Several findings below were FIXED during the July 2026 UI audit (#135/#137) and
+reaffirmed by the 2026-08-05 audit-suite run (build `bd6d84a`). Keep the repro
+mechanics as REGRESSION GUARDS, but the expected verdict has flipped:
+
+- **R1 (BUG-1 subtitle-offset): now NOT-REPRODUCED.** Clicks map to their OWN
+  item at ZERO offset — a subtitle click hits that same row, and the blank line
+  above `local` is a no-op. Under the single-click contract a real click also
+  ACTIVATES (spawn if detached), so account for the focus-claim click.
+- **R2 (BUG-2 header): recharacterized.** The in-pane repo-name header now
+  RENDERS as the sole title line (post-#218 borderless sidebar). BUG-2 is now
+  specifically a COLD-START blank header: REPRODUCED only if the header is blank
+  at cold start — and on large fixtures that blank can persist the whole session
+  rather than healing. A rendered header is the healthy norm, not a repro.
+- **R4 (BUG-3 three-click): now NOT-REPRODUCED as a bug.** A single real click
+  select+activates; the only extra click is the focus-claim click that every
+  freshly-landed sidebar eats. So "focus-claim + one real click," not three.
+- R5–R9 mechanics stand; record actual behavior against the current contract.
+
 ## R1 — BUG-1: subtitle click selects the NEXT item (tall window)
 - From clean startup (▌ on local, active repo tab): capture; left-click the `branch: feature-a` SUBTITLE line (locate in fresh capture).
 - REPRODUCED if ▌ lands on `feature-b` (not feature-a).

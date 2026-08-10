@@ -86,9 +86,11 @@ Current plans:
 - `ui-audit-01-mouse-core.md` … `ui-audit-05-agent-status-modes.md`: exhaustive
   real-input audit of mouse selection/activation, multi-tab switching, scrolled
   viewports, worktree lifecycle staleness, and agent-status glyphs. Written for
-  the 2026-07 UI audit (see `docs/reports/ui-audit-2026-07-05.md` if present);
-  each plan carries a "Harness corrections" section with hard-won tmux/SGR
-  driving rules — read it before running.
+  the 2026-07 UI audit (see `docs/reports/ui-audit-2026-07-05.md` if present)
+  and re-aligned to the current interaction contract by the 2026-08-05 audit-
+  suite run (against build `bd6d84a`); each plan carries a "Harness corrections"
+  section with hard-won tmux/SGR driving rules and the current single-click
+  select+activate contract — read it before running.
 - `ui-audit-06-repro-verification.md`: minimal from-clean-fixture repros for
   every bug found in the audit (Z-1 through Z-8). Use as a regression suite
   when fixing those bugs.
@@ -137,10 +139,19 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   SGR press and release as SEPARATE `send-keys` calls.
 - Take a FRESH capture and locate the target row before every click — never
   trust coordinates written in a plan.
+- **Single-click select+activate contract** (#135/#137, reaffirmed in the PR
+  #211 docs): a real click on a non-active row immediately SELECTS *and*
+  ACTIVATES it — switch if its tab is open, spawn if detached. There is no
+  separate "select" click; wheel and `j`/`k` are cursor-only (they move `▌`
+  without activating), and `Enter` activates the `▌` row. Older plan prose that
+  says "two-click" or "select then activate" means: spend the focus-claim click
+  first (below), then one real click activates.
 - **The focus-claim click**: a sidebar pane that is not click-focused eats
   exactly one click (Zellij's click-to-focus), with zero state change. This
   recurs after EVERY cross-tab landing, not just at startup. Count clicks from
-  the first one the plugin receives.
+  the first one the plugin receives — so the first click after landing looks
+  like a "select" only because it is being swallowed, not because a two-click
+  contract exists.
 - **Keyboard focus follows the new tab's main pane** after a click-driven
   spawn/switch. Re-click the sidebar once before sending it keys, or the keys
   land in the shell (a literal `dy` in a worktree prompt was the incident).
@@ -172,9 +183,20 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   a crash (leaves EXITED serialized state for resurrection tests).
 - **Never run `zelligent spawn` from the ctrl window.** Outside Zellij it ends
   in `exec zellij attach`, turning ctrl into a second mirrored client whose
-  keystrokes leak into the live session's focused pane. Spawn via the sidebar
-  UI (`i` flow or clicks). Pipes (`zellij pipe`) and `zelligent remove` are
-  non-attaching and safe from ctrl.
+  keystrokes leak into the live session's focused pane (this bit two drivers).
+  Spawn via the sidebar UI (`i` flow or a real click). To reproduce an
+  *out-of-band* worktree tab safely, use the non-attaching primitives instead:
+  `git worktree add …` plus `zellij --session <name> action new-tab` (both run
+  fine from ctrl). Pipes (`zellij pipe`) and `zelligent remove` are also
+  non-attaching and safe from ctrl. The ONE legitimate `zelligent spawn` from
+  outside Zellij is a resurrection plan's spawn-attach-guard step, where the
+  target session is EXITED (not live) and the attach path is itself what is
+  under test — and even then it must be the sole client, never a second mirror.
+- **A permission classifier blocking a harness command is a signal, not a
+  speed bump.** If a classifier or approval prompt blocks a command, re-evaluate
+  whether that command is actually harness-safe BEFORE retrying — a retry that
+  succeeds does not make a forbidden command safe (a `zelligent spawn`-from-ctrl
+  retry after a block contributed to a driver incident).
 - **Never run `bash test.sh` concurrently with a harness driver** (or two
   drivers in parallel). Both create real Zellij sessions and fixtures; the
   collisions produce hangs and phantom failures (two incidents).
@@ -198,7 +220,25 @@ absence produced a wasted run, a false verdict, or a wedged environment.
   means some process synchronously waited ~1s on a `zellij pipe` call
   (#167's root cause hid behind exactly this line for weeks, misfiled as
   environmental). Around hard server kills it's expected; anywhere else,
-  find the caller and background it.
+  find the caller and background it. See "Known open observations" below.
+
+## Known open observations
+
+Cross-run findings that are established but not yet root-caused. Record them
+when you see them; do NOT dismiss them as noise, and do NOT re-diagnose them
+from scratch on every run.
+
+- **CliPipe 1s-timeout bursts.** `Action CliPipe did not complete within 1s
+  timeout` fires in *bursts* (10–34 lines per session across the 2026-08-05
+  audit suite), tightly correlated with every pipe-invalidate / spawn / remove
+  action — i.e. every `pipe_invalidate` call. It is under investigation and is
+  not benign, but it is a known open item: log the count per phase and move on
+  rather than re-litigating it per run.
+- **BUG-2 cold-start blank header can persist a whole session.** The in-pane
+  repo-name header can fail to render on cold start, leaving a leading blank
+  line. On large fixtures (e.g. the many-worktrees scroll fixture) this is not
+  merely transient — it can persist for the entire session rather than healing
+  on the next refresh. Note it once and continue.
 
 ## Writing a new test plan
 

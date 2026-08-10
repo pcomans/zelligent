@@ -25,13 +25,15 @@ ANSI glyph markers: working = `\x1b[32m●`, needs-input = `\x1b[33m●`, done =
 
 1. MOUSE SETUP: before any click, run `tmux -L zt-driver-test set-option -g mouse on`; send press and release as SEPARATE send-keys calls. Wheel events need no setup.
 2. THERE IS NO TAB BAR. Test 6's "tab-bar click zelligent-test-repo" becomes: press `C-t` then digit `1` (real keystrokes, repo tab is position 1). Verify active tab via the MAIN pane's frame title and the sidebar's bold-cyan row.
-3. KNOWN BUG (confirmed, do NOT trip over it): clicking a SUBTITLE line selects the NEXT item. ALWAYS click TITLE lines to select/focus. Blank line under the missing header selects item 0 — avoid unless a step says otherwise.
-4. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding. The in-pane header line is missing — known, don't re-report.
-5. Keyboard keys (`n`, `i`, `d`, Esc, typed characters) go to the SIDEBAR pane — it must have focus. Focus it with a single title-line click on a NOT-selected row (never the selected one — that activates).
+3. SINGLE-CLICK SELECT+ACTIVATE (#135/#137, reaffirmed PR #211): a real click select+activates its row — spawn if detached, switch if open — after the focus-claim click. SUBTITLE-OFFSET BUG FIXED (reverified 2026-08-05): clicks map to their OWN item at ZERO offset; clicking a subtitle line hits that same row, and the blank line above `local` is a no-op.
+4. IN-PANE HEADER RENDERS: post-#218 the sidebar is borderless and the repo-name header renders as the SOLE title line (no longer "missing"). KNOWN (BUG-2): a cold-start blank header can persist a whole session on large fixtures — note once, don't re-diagnose. The ▌ gutter renders on BOTH lines of the selected item — correct, not a finding.
+5. Keyboard keys (`n`, `i`, `d`, Esc, typed characters) go to the SIDEBAR pane — it must have focus. Focus it by spending the FOCUS-CLAIM click (the first click after any cross-tab landing is swallowed with zero state change); that single click claims focus and leaves selection untouched. Do NOT add a second click just to "select" — under the single-click contract the next real click would ACTIVATE the row.
 
-## Test 1: Spawn a tab with a fake long-running agent
-- Action: via ctrl window: `cd /tmp/zelligent-test-repo && ZELLIGENT_PLUGIN_SRC="$HOME/.local/share/zelligent/zelligent-plugin.wasm" ./zelligent.sh spawn fake-agent 'bash -c "echo agent running; sleep 600"'`; wait 8s; capture.
-- Expected: tab `fake-agent` opens; its main pane shows `agent running`; sidebar row `fake-agent` / `branch: fake-agent` (not `user tab` after self-heal); no glyph yet (no status events sent).
+## Test 1: Spawn a tab with a fake long-running agent (via the sidebar UI, then real keyboard input)
+- Action: do NOT run `zelligent spawn` from ctrl — outside Zellij it execs `zellij attach`, mirroring ctrl into the live session and leaking keystrokes into its focused pane (this bit two drivers; see README "What must NEVER run"). Instead spawn through the UI and feed the agent as real input:
+  1. Focus the sidebar (spend the focus-claim click), press `i`, type `fake-agent`, press Enter; wait 8s for the `fake-agent` tab to open.
+  2. Keyboard focus follows the new tab's main pane after a click-driven spawn, so the shell there already has focus — send the fake long-running agent as REAL keyboard input into that main pane: type `bash -c 'echo agent running; sleep 600'` and press Enter; wait 1s; capture.
+- Expected: tab `fake-agent` opens; after the typed command runs, its main pane shows `agent running`; sidebar row `fake-agent` / `branch: fake-agent` (matched worktree, not `user tab`); no glyph yet (no status events sent).
 
 ## Test 2: Start event renders a green working dot
 - Action: via ctrl window: `zellij --session zelligent-test-repo pipe --name zelligent-status --args "event=Start,tab=fake-agent"`; wait 2s; capture ANSI.
